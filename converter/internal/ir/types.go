@@ -93,4 +93,13 @@ type Target struct {
 	// IMPORTED_LOCATION in the synthesized <Pkg>Targets-Release.cmake.
 	// Empty if the target has no install rule.
 	InstallDest string
+
+	// ArtifactName is the on-disk file name produced by the build (e.g.
+	// "libhello.a", "calc"). Drives IMPORTED_LOCATION_<CONFIG> in the
+	// synthesized cmake-config bundle.
+	ArtifactName string
+
+	// LinkLanguage feeds IMPORTED_LINK_INTERFACE_LANGUAGES_<CONFIG> in the
+	// per-config bundle file. Single language per target in M1.
+	LinkLanguage string
 }

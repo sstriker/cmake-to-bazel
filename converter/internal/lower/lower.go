@@ -148,6 +148,19 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, hostSrc string) (*ir.Target, error
 		irt.InstallDest = t.Install.Destinations[0].Path
 	}
 
+	if len(t.Artifacts) > 0 {
+		irt.ArtifactName = t.Artifacts[0].Path
+	} else if t.NameOnDisk != "" {
+		irt.ArtifactName = t.NameOnDisk
+	}
+
+	switch {
+	case t.Link != nil && t.Link.Language != "":
+		irt.LinkLanguage = t.Link.Language
+	case len(t.CompileGroups) > 0:
+		irt.LinkLanguage = t.CompileGroups[0].Language
+	}
+
 	return irt, nil
 }
 

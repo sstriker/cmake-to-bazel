@@ -19,6 +19,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cli"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cmakerun"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/bazel"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/cmakecfg"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/lower"
@@ -73,7 +74,26 @@ func run(a cli.Args) error {
 	if err := os.MkdirAll(filepath.Dir(a.OutBuild), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(a.OutBuild, out, 0o644)
+	if err := os.WriteFile(a.OutBuild, out, 0o644); err != nil {
+		return err
+	}
+
+	if a.OutBundleDir != "" {
+		bundle, err := cmakecfg.Emit(pkg, cmakecfg.Options{})
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(a.OutBundleDir, 0o755); err != nil {
+			return err
+		}
+		for name, body := range bundle.Files {
+			dst := filepath.Join(a.OutBundleDir, name)
+			if err := os.WriteFile(dst, body, 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // handleError marshals a typed Tier-1 failure to OutFailure (if requested) and

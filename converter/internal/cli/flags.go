@@ -38,6 +38,10 @@ type Args struct {
 	// OutBuild is the destination path for the generated BUILD.bazel.
 	OutBuild string
 
+	// OutBundleDir, when non-empty, is the directory where the synthesized
+	// cmake-config bundle is written (one .cmake file per kind).
+	OutBundleDir string
+
 	// OutFailure, when non-empty, is the path to write failure.json on
 	// Tier-1 errors.
 	OutFailure string
@@ -52,6 +56,7 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.SourceRoot, "source-root", "", "absolute path to the CMake project root")
 	fs.StringVar(&a.ReplyDir, "reply-dir", "", "skip cmake invocation; read File API reply from this dir (testing)")
 	fs.StringVar(&a.OutBuild, "out-build", "BUILD.bazel", "destination path for generated BUILD.bazel")
+	fs.StringVar(&a.OutBundleDir, "out-bundle-dir", "", "directory for synthesized cmake-config bundle (optional)")
 	fs.StringVar(&a.OutFailure, "out-failure", "", "write Tier-1 failure JSON here on per-element errors (optional)")
 
 	if err := fs.Parse(argv); err != nil {
