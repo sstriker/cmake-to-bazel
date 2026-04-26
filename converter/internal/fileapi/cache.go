@@ -1,0 +1,38 @@
+package fileapi
+
+// Cache is <reply>/cache-v2-*.json.
+//
+// Mirror of CMakeCache.txt at end-of-configure. We don't need most entries,
+// but specific ones (e.g. CMAKE_<LANG>_COMPILER_ID, BUILD_SHARED_LIBS) drive
+// downstream decisions in lower/.
+//
+// Schema reference: cmake-file-api(7), "cache" object kind.
+type Cache struct {
+	Kind    string        `json:"kind"`
+	Version ObjectVersion `json:"version"`
+	Entries []CacheEntry  `json:"entries"`
+}
+
+// CacheEntry is one cache variable. Properties carry HELPSTRING, ADVANCED, etc.
+type CacheEntry struct {
+	Name       string           `json:"name"`
+	Value      string           `json:"value"`
+	Type       string           `json:"type"`
+	Properties []CacheEntryProp `json:"properties,omitempty"`
+}
+
+type CacheEntryProp struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Get returns the entry with the given name, or nil if not present. Names are
+// case-sensitive (matching CMake).
+func (c Cache) Get(name string) *CacheEntry {
+	for i := range c.Entries {
+		if c.Entries[i].Name == name {
+			return &c.Entries[i]
+		}
+	}
+	return nil
+}
