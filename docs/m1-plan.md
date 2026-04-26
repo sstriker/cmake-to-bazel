@@ -10,8 +10,8 @@ late-binding through string-valued variable references) makes static translation
 intractable. Instead, run real CMake in a hermetic bwrap sandbox and translate
 its **structured output** — File API JSON (`.cmake/api/v1/reply/`) plus parsed
 `build.ninja` — into fully-declared `BUILD.bazel` rules and synthetic
-`<Pkg>Config.cmake` bundles. See `docs/cmake_configure_analysis.md` for the
-detailed analysis that drives this decision.
+`<Pkg>Config.cmake` bundles. See `cmake_analysis.md` for the detailed analysis
+that drives this decision.
 
 This plan covers **M1 only**: a standalone `convert-element` binary that
 converts a single CMake element (libdrm) end-to-end. M2–M6 extend this into a
