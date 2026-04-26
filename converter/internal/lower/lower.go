@@ -23,11 +23,12 @@ import (
 // Options controls behavior that the orchestrator (M3) overrides per-package.
 // M1 callers can pass the zero value.
 type Options struct {
-	// SourceRoot, when non-empty, overrides the source root recorded in the
-	// File API codemodel. The orchestrator sets this when the converter ran
-	// against a shadow tree under /src but emitted output should reference
-	// the canonical source root for path purposes.
-	SourceRoot string
+	// HostSourceRoot is the on-disk path to the source tree, used for
+	// filesystem walks (e.g. header discovery under each include directory).
+	// It may differ from the source root recorded in the File API codemodel
+	// when cmake ran inside a sandbox that bind-mounted the source tree at
+	// a different path (e.g. /src). Defaults to the codemodel's source path.
+	HostSourceRoot string
 }
 
 // Header file extensions we treat as `hdrs` candidates when walking include
@@ -49,14 +50,15 @@ func ToIR(r *fileapi.Reply, opts Options) (*ir.Package, error) {
 	}
 	cfg := r.Codemodel.Configurations[0]
 
-	src := opts.SourceRoot
-	if src == "" {
-		src = r.Codemodel.Paths.Source
+	cmakeSrc := r.Codemodel.Paths.Source
+	hostSrc := opts.HostSourceRoot
+	if hostSrc == "" {
+		hostSrc = cmakeSrc
 	}
 
 	pkg := &ir.Package{
 		Name:       projectName(r),
-		SourceRoot: src,
+		SourceRoot: hostSrc,
 	}
 
 	for _, tref := range cfg.Targets {
@@ -65,7 +67,7 @@ func ToIR(r *fileapi.Reply, opts Options) (*ir.Package, error) {
 			return nil, failure.New(failure.FileAPIMalformed,
 				"target id %q in codemodel but not loaded", tref.Id)
 		}
-		irt, err := lowerTarget(&t, src)
+		irt, err := lowerTarget(&t, cmakeSrc, hostSrc)
 		if err != nil {
 			return nil, err
 		}
@@ -81,7 +83,7 @@ func projectName(r *fileapi.Reply) string {
 	return ""
 }
 
-func lowerTarget(t *fileapi.Target, sourceRoot string) (*ir.Target, error) {
+func lowerTarget(t *fileapi.Target, cmakeSrc, hostSrc string) (*ir.Target, error) {
 	irt := &ir.Target{Name: t.Name}
 
 	switch t.Type {
@@ -127,7 +129,7 @@ func lowerTarget(t *fileapi.Target, sourceRoot string) (*ir.Target, error) {
 		irt.Defines = defs
 
 		for _, inc := range cg.Includes {
-			rel, ok := relativeIfInside(sourceRoot, inc.Path)
+			rel, ok := relativeIfInside(cmakeSrc, inc.Path)
 			if !ok {
 				continue
 			}
@@ -135,7 +137,7 @@ func lowerTarget(t *fileapi.Target, sourceRoot string) (*ir.Target, error) {
 		}
 	}
 
-	hdrs, err := discoverHeaders(sourceRoot, irt.Includes)
+	hdrs, err := discoverHeaders(hostSrc, irt.Includes)
 	if err != nil {
 		return nil, err
 	}
