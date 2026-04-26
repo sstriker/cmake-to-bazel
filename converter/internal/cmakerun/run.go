@@ -29,6 +29,13 @@ type Options struct {
 	// BuildType is passed as -DCMAKE_BUILD_TYPE. M1 always passes "Release".
 	BuildType string
 
+	// TracePath, when non-empty, enables `cmake --trace-expand
+	// --trace-format=json-v1 --trace-redirect=<path>`. The path is
+	// in-sandbox; cmakerun bind-mounts BuildDir at /build, so a TracePath
+	// like "/build/trace.jsonl" lands at filepath.Join(HostBuildDir,
+	// "trace.jsonl") on the host afterward.
+	TracePath string
+
 	// Stdout/Stderr capture cmake output. Nil discards.
 	Stdout, Stderr interface {
 		Write([]byte) (int, error)
@@ -76,6 +83,13 @@ func Configure(ctx context.Context, opts Options) (Reply, error) {
 		"-G", "Ninja",
 		"-DCMAKE_BUILD_TYPE=" + opts.BuildType,
 		"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+	}
+	if opts.TracePath != "" {
+		cmakeArgv = append(cmakeArgv,
+			"--trace-expand",
+			"--trace-format=json-v1",
+			"--trace-redirect="+opts.TracePath,
+		)
 	}
 
 	sb := hermetic.Sandbox{
