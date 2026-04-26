@@ -1,0 +1,21 @@
+# Build outputs
+build/
+bazel-*
+
+# Test outputs
+*.test
+coverage.out
+coverage.html
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local convert-element outputs
+out/
+tmp/
+
+# Local checkouts of fetched sample projects (libdrm etc.)
+converter/testdata/sample-projects/libdrm/
