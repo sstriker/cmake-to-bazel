@@ -25,7 +25,7 @@ func TestToIR_HelloWorld(t *testing.T) {
 		t.Fatalf("abs: %v", err)
 	}
 
-	pkg, err := lower.ToIR(r, lower.Options{SourceRoot: src})
+	pkg, err := lower.ToIR(r, lower.Options{HostSourceRoot: src})
 	if err != nil {
 		t.Fatalf("ToIR: %v", err)
 	}

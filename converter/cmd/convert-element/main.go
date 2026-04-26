@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cli"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/cmakerun"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/bazel"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
@@ -33,15 +35,34 @@ func main() {
 }
 
 func run(a cli.Args) error {
-	if a.ReplyDir == "" {
-		// Step 4 will replace this branch with hermetic.Sandbox + cmakerun.Configure.
-		return fmt.Errorf("--source-root path requires cmake invocation, not yet wired (M1 step 4)")
+	replyDir := a.ReplyDir
+	if replyDir == "" {
+		// Real-cmake path: spin a tmp build dir, configure under bwrap, then
+		// load the reply produced inside it.
+		buildDir, err := os.MkdirTemp("", "convert-element-build-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(buildDir)
+
+		ctx := context.Background()
+		reply, err := cmakerun.Configure(ctx, cmakerun.Options{
+			HostSourceRoot: a.SourceRoot,
+			HostBuildDir:   buildDir,
+			Stdout:         os.Stderr, // route cmake noise to our stderr
+			Stderr:         os.Stderr,
+		})
+		if err != nil {
+			return failure.New(failure.ConfigureFailed, "%v", err)
+		}
+		replyDir = reply.HostPath
 	}
-	r, err := fileapi.Load(a.ReplyDir)
+
+	r, err := fileapi.Load(replyDir)
 	if err != nil {
 		return failure.New(failure.FileAPIMissing, "load reply: %v", err)
 	}
-	pkg, err := lower.ToIR(r, lower.Options{SourceRoot: a.SourceRoot})
+	pkg, err := lower.ToIR(r, lower.Options{HostSourceRoot: a.SourceRoot})
 	if err != nil {
 		return err
 	}
