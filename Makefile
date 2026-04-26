@@ -50,7 +50,10 @@ vet:
 	$(GO) vet ./...
 
 fmt:
-	@diff -u <(echo -n) <(gofmt -d ./) || (echo "gofmt diffs above; run 'gofmt -w .'"; exit 1)
+	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then \
+		echo "gofmt diffs in:"; echo "$$out"; \
+		echo "run 'gofmt -w .'"; exit 1; \
+	fi
 
 check-tools:
 	@command -v cmake >/dev/null || (echo "cmake not on PATH"; exit 1)

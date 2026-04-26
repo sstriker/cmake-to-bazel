@@ -1,0 +1,96 @@
+// Package ir is the in-memory representation produced by lower/ and consumed
+// by emit/. It is intentionally a flat, plain-data shape: no methods, no I/O,
+// no policy.
+//
+// One Package per CMake source root. One Target per CMake build target
+// (cc_library / cc_binary / cc_import equivalent). Genrules from
+// add_custom_command (recovered from build.ninja in M2) are also Targets, with
+// Kind = KindGenrule.
+package ir
+
+// Kind is the Bazel rule kind a Target lowers to.
+type Kind int
+
+const (
+	KindUnknown Kind = iota
+	KindCCLibrary
+	KindCCBinary
+	KindCCImport
+	KindCCInterface
+	KindGenrule
+)
+
+func (k Kind) String() string {
+	switch k {
+	case KindCCLibrary:
+		return "cc_library"
+	case KindCCBinary:
+		return "cc_binary"
+	case KindCCImport:
+		return "cc_import"
+	case KindCCInterface:
+		return "cc_library" // header-only: cc_library with hdrs only
+	case KindGenrule:
+		return "genrule"
+	}
+	return "unknown"
+}
+
+// Package is the BUILD.bazel-equivalent for one CMake source root.
+type Package struct {
+	// Name is the CMake project() name.
+	Name string
+
+	// SourceRoot is the absolute path the converter ran cmake against. Stored
+	// for reference; emitters must not embed it in output.
+	SourceRoot string
+
+	// Targets is the per-target rule list. Stable order: lowering enumerates
+	// codemodel targets in their declared order.
+	Targets []Target
+}
+
+// Target is one rule in the emitted BUILD.bazel.
+//
+// All path fields are package-relative (rooted at Package.SourceRoot). All
+// label fields are full Bazel labels (e.g. ":foo", "@glibc//:c"). String
+// slices that contribute to BUILD.bazel attributes are sorted by the emitter
+// for deterministic output; lowerers are free to leave them in any order.
+type Target struct {
+	Name string
+	Kind Kind
+
+	// Srcs are compilation inputs (.c / .cc / .cpp / .S / etc.).
+	Srcs []string
+
+	// Hdrs are exported headers reachable via Includes/StripIncludePrefix.
+	Hdrs []string
+
+	// Includes corresponds to the BUILD attribute of the same name: each
+	// entry is a directory (package-relative) added to the include search
+	// path of dependents.
+	Includes []string
+
+	// Copts, Defines, Linkopts pass through to the cc_* rule of the same name.
+	Copts    []string
+	Defines  []string
+	LinkOpts []string
+
+	// Deps are Bazel labels to other targets.
+	Deps []string
+
+	// Visibility defaults to package-private when empty; the emitter writes
+	// the explicit slice if set.
+	Visibility []string
+
+	// Linkstatic / Alwayslink only meaningful for KindCCLibrary.
+	Linkstatic bool
+	Alwayslink bool
+
+	// InstallDest is the relative path under the install prefix where the
+	// CMake install(TARGETS) rule places this target's artifact (e.g. "lib"
+	// for STATIC_LIBRARY). Used by emit/cmakecfg/ to populate
+	// IMPORTED_LOCATION in the synthesized <Pkg>Targets-Release.cmake.
+	// Empty if the target has no install rule.
+	InstallDest string
+}

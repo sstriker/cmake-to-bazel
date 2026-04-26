@@ -1,0 +1,73 @@
+// Package cli holds flag parsing, validation, and CLI exit codes for
+// convert-element. Kept separate from main so it's testable without a process
+// boundary.
+package cli
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"os"
+)
+
+// Exit codes documented in the README. These map onto the failure-tier model:
+//
+//	0   success
+//	1   Tier-1 (per-element conversion error; failure.json written)
+//	64  CLI usage error
+//	65  Tier-2 (converter bug / malformed cmake output)
+//	70  Tier-3 (infrastructure)
+const (
+	ExitSuccess = 0
+	ExitTier1   = 1
+	ExitUsage   = 64
+	ExitTier2   = 65
+	ExitTier3   = 70
+)
+
+// Args is the parsed command-line input.
+type Args struct {
+	// SourceRoot is the absolute path to the CMake project root.
+	SourceRoot string
+
+	// ReplyDir, when non-empty, skips invocation of cmake and reads File API
+	// JSON directly from this directory. Used by tests and for offline
+	// dry-runs against pre-recorded fixtures.
+	ReplyDir string
+
+	// OutBuild is the destination path for the generated BUILD.bazel.
+	OutBuild string
+
+	// OutFailure, when non-empty, is the path to write failure.json on
+	// Tier-1 errors.
+	OutFailure string
+}
+
+// Parse reads argv (without program name), populates Args, and prints usage
+// to stderr if invalid. Returns ExitUsage on bad input.
+func Parse(argv []string, stderr io.Writer) (Args, int) {
+	fs := flag.NewFlagSet("convert-element", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	a := Args{}
+	fs.StringVar(&a.SourceRoot, "source-root", "", "absolute path to the CMake project root")
+	fs.StringVar(&a.ReplyDir, "reply-dir", "", "skip cmake invocation; read File API reply from this dir (testing)")
+	fs.StringVar(&a.OutBuild, "out-build", "BUILD.bazel", "destination path for generated BUILD.bazel")
+	fs.StringVar(&a.OutFailure, "out-failure", "", "write Tier-1 failure JSON here on per-element errors (optional)")
+
+	if err := fs.Parse(argv); err != nil {
+		return a, ExitUsage
+	}
+	if a.SourceRoot == "" && a.ReplyDir == "" {
+		fmt.Fprintln(stderr, "convert-element: must set --source-root or --reply-dir")
+		fs.Usage()
+		return a, ExitUsage
+	}
+	return a, ExitSuccess
+}
+
+// LookEnv is a tiny indirection so tests can inject env without touching
+// process state.
+type LookEnv func(string) (string, bool)
+
+// OSLookEnv is the production env reader.
+var OSLookEnv LookEnv = func(k string) (string, bool) { return os.LookupEnv(k) }
