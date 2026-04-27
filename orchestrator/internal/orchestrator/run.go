@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync"
 
+	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+
 	"github.com/sstriker/cmake-to-bazel/internal/cas"
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/internal/reapi"
@@ -421,7 +423,7 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 			return fmt.Errorf("element %s: clear elemOut: %w", name, err)
 		}
 		if r.opts.Executor != nil {
-			fr, err = remoteExecute(ctx, r.store, r.opts.Executor, built, elemOut, name)
+			fr, err = remoteExecute(ctx, r.store, r.opts.Executor, built, elemOut, name, logOf(r.opts))
 		} else {
 			fr, err = convertOne(ctx, r.conv, name, shadowSrc, importsPath, prefixPath, r.opts)
 			if err == nil && fr == nil {
@@ -890,11 +892,17 @@ func publishActionResult(ctx context.Context, store cas.Store, built *reapi.Buil
 // Tier-1 failure detection: the converter writes failure.json on
 // exit-1, which the worker collects as an OutputFile. Same behavior
 // shape as convertOne returning a *FailureRecord.
-func remoteExecute(ctx context.Context, store cas.Store, exec reapi.Executor, built *reapi.BuiltAction, elemOut, name string) (*FailureRecord, error) {
+func remoteExecute(ctx context.Context, store cas.Store, exec reapi.Executor, built *reapi.BuiltAction, elemOut, name string, log io.Writer) (*FailureRecord, error) {
 	ar, err := exec.Execute(ctx, store, built)
 	if err != nil {
 		return nil, fmt.Errorf("element %s: remote execute: %w", name, err)
 	}
+	// Stream the worker's stdout/stderr to the orchestrator's log so
+	// operators debugging Tier-1 failures don't have to bb-browser
+	// the action result by hand. Errors fetching are non-fatal — the
+	// action result itself is the source of truth.
+	streamWorkerOutput(ctx, store, ar, log)
+
 	if err := os.MkdirAll(elemOut, 0o755); err != nil {
 		return nil, fmt.Errorf("element %s: mkdir elemOut: %w", name, err)
 	}
@@ -912,6 +920,23 @@ func remoteExecute(ctx context.Context, store cas.Store, exec reapi.Executor, bu
 		return nil, fmt.Errorf("element %s: remote action exit %d", name, ar.ExitCode)
 	}
 	return nil, nil
+}
+
+// streamWorkerOutput fetches stdout/stderr blobs from CAS and writes
+// them to the orchestrator's log. Best-effort: a missing or
+// unreadable blob is ignored so a remote-execute success isn't
+// gated on log retrieval working.
+func streamWorkerOutput(ctx context.Context, store cas.Store, ar *repb.ActionResult, log io.Writer) {
+	if ar.StdoutDigest != nil && ar.StdoutDigest.SizeBytes > 0 {
+		if body, err := store.GetBlob(ctx, ar.StdoutDigest); err == nil {
+			_, _ = log.Write(body)
+		}
+	}
+	if ar.StderrDigest != nil && ar.StderrDigest.SizeBytes > 0 {
+		if body, err := store.GetBlob(ctx, ar.StderrDigest); err == nil {
+			_, _ = log.Write(body)
+		}
+	}
 }
 
 // loadReadPaths reads the converter-emitted read_paths.json into a string

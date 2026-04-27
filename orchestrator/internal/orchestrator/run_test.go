@@ -62,6 +62,12 @@ func stubConverter() int {
 	if perElem := os.Getenv("ORCHESTRATOR_STUB_MODE_" + sanitizeStubKey(*srcRoot)); perElem != "" {
 		mode = perElem
 	}
+	// Optional sentinel emitted to stdout, used by tests asserting
+	// that worker output reaches the orchestrator.
+	if sentinel := os.Getenv("ORCHESTRATOR_STUB_STDOUT_SENTINEL"); sentinel != "" {
+		fmt.Println(sentinel)
+	}
+
 	switch mode {
 	case "success":
 		body := fmt.Sprintf("# stub BUILD.bazel for %s\n", filepath.Base(*srcRoot))
