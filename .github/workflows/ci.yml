@@ -70,6 +70,9 @@ jobs:
       - name: cmake-consumer e2e (M5 step 11)
         run: make e2e-cmake-consumer
 
+      - name: toolchain-skip e2e (configure-time win)
+        run: make e2e-toolchain-skip
+
   bazel-e2e:
     name: End-to-end (bazel build downstream)
     runs-on: ubuntu-24.04
