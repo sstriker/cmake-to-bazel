@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cli"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cmakerun"
@@ -29,6 +30,16 @@ import (
 	"github.com/sstriker/cmake-to-bazel/internal/shadow"
 )
 
+// timings is the on-disk schema for --out-timings. Captured per-phase
+// wall-clock seconds let operators see configure-vs-translation ratios
+// across a distro. version=1 fences future readers.
+type timings struct {
+	Version             int     `json:"version"`
+	CMakeConfigureSecs  float64 `json:"cmake_configure_seconds"`
+	TranslationSecs     float64 `json:"translation_seconds"`
+	TotalSecs           float64 `json:"total_seconds"`
+}
+
 func main() {
 	args, code := cli.Parse(os.Args[1:], os.Stderr)
 	if code != cli.ExitSuccess {
@@ -40,6 +51,9 @@ func main() {
 }
 
 func run(a cli.Args) error {
+	t0 := time.Now()
+	var configureElapsed time.Duration
+
 	replyDir := a.ReplyDir
 	var ninjaPath string
 	var hostBuildDir string
@@ -74,7 +88,9 @@ func run(a cli.Args) error {
 		if a.OutReadPaths != "" {
 			opts.TracePath = "/build/trace.jsonl"
 		}
+		configureStart := time.Now()
 		reply, err := cmakerun.Configure(ctx, opts)
+		configureElapsed = time.Since(configureStart)
 		if err != nil {
 			return failure.New(failure.ConfigureFailed, "%v", err)
 		}
@@ -151,6 +167,28 @@ func run(a cli.Args) error {
 			if err := os.WriteFile(dst, body, 0o644); err != nil {
 				return err
 			}
+		}
+	}
+
+	if a.OutTimings != "" {
+		total := time.Since(t0)
+		// translation = total - configure (configureElapsed is 0 in
+		// the --reply-dir offline path, so translation == total there).
+		translation := total - configureElapsed
+		if translation < 0 {
+			translation = 0
+		}
+		body, _ := json.MarshalIndent(timings{
+			Version:            1,
+			CMakeConfigureSecs: configureElapsed.Seconds(),
+			TranslationSecs:    translation.Seconds(),
+			TotalSecs:          total.Seconds(),
+		}, "", "  ")
+		if err := os.MkdirAll(filepath.Dir(a.OutTimings), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(a.OutTimings, append(body, '\n'), 0o644); err != nil {
+			return err
 		}
 	}
 
