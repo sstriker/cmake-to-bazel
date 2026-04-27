@@ -25,6 +25,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/lower"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/shadow"
 )
 
 func main() {
@@ -40,22 +41,38 @@ func main() {
 func run(a cli.Args) error {
 	replyDir := a.ReplyDir
 	var ninjaPath string
+	var hostBuildDir string
 	if replyDir == "" {
+		ctx := context.Background()
+
+		// Architectural floor: cmake >= 3.20 (codemodel-v2 minimum). The
+		// orchestrator (M3) must always run with a pinned cmake; the
+		// escape hatch is for local dev only.
+		if !a.AllowCMakeVersionMismatch {
+			if _, _, _, err := cmakerun.AssertVersion(ctx); err != nil {
+				return failure.New(failure.ConfigureFailed, "%v", err)
+			}
+		}
+
 		// Real-cmake path: spin a tmp build dir, configure under bwrap, then
 		// load the reply produced inside it.
 		buildDir, err := os.MkdirTemp("", "convert-element-build-*")
 		if err != nil {
 			return err
 		}
+		hostBuildDir = buildDir
 		defer os.RemoveAll(buildDir)
 
-		ctx := context.Background()
-		reply, err := cmakerun.Configure(ctx, cmakerun.Options{
+		opts := cmakerun.Options{
 			HostSourceRoot: a.SourceRoot,
 			HostBuildDir:   buildDir,
 			Stdout:         os.Stderr, // route cmake noise to our stderr
 			Stderr:         os.Stderr,
-		})
+		}
+		if a.OutReadPaths != "" {
+			opts.TracePath = "/build/trace.jsonl"
+		}
+		reply, err := cmakerun.Configure(ctx, opts)
 		if err != nil {
 			return failure.New(failure.ConfigureFailed, "%v", err)
 		}
@@ -132,6 +149,25 @@ func run(a cli.Args) error {
 			if err := os.WriteFile(dst, body, 0o644); err != nil {
 				return err
 			}
+		}
+	}
+
+	if a.OutReadPaths != "" && hostBuildDir != "" {
+		traceHost := filepath.Join(hostBuildDir, "trace.jsonl")
+		raw, err := os.ReadFile(traceHost)
+		if err != nil {
+			return fmt.Errorf("read trace: %w", err)
+		}
+		reads := shadow.ExtractReadPaths(raw, a.SourceRoot)
+		body, err := json.MarshalIndent(reads, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(a.OutReadPaths), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(a.OutReadPaths, append(body, '\n'), 0o644); err != nil {
+			return err
 		}
 	}
 	return nil

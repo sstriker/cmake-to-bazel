@@ -52,6 +52,18 @@ type Args struct {
 	// resolved via this map; the orchestrator (M3) writes one before each
 	// per-element conversion.
 	ImportsManifest string
+
+	// OutReadPaths, when non-empty and the converter ran cmake itself
+	// (not via --reply-dir), writes a JSON array of source-tree paths
+	// that cmake read at configure time, parsed from
+	// `--trace-expand --trace-format=json-v1`. M3 merges these into
+	// per-package allowlist registries.
+	OutReadPaths string
+
+	// AllowCMakeVersionMismatch lets the converter run with a cmake
+	// version below the architectural floor (3.20 — codemodel-v2 minimum).
+	// Local-dev only; M3 must never set this.
+	AllowCMakeVersionMismatch bool
 }
 
 // Parse reads argv (without program name), populates Args, and prints usage
@@ -66,6 +78,8 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.OutBundleDir, "out-bundle-dir", "", "directory for synthesized cmake-config bundle (optional)")
 	fs.StringVar(&a.OutFailure, "out-failure", "", "write Tier-1 failure JSON here on per-element errors (optional)")
 	fs.StringVar(&a.ImportsManifest, "imports-manifest", "", "path to JSON imports manifest mapping cross-element CMake targets to Bazel labels (optional)")
+	fs.StringVar(&a.OutReadPaths, "out-read-paths", "", "write JSON array of source-tree paths cmake read at configure time (requires --source-root, optional)")
+	fs.BoolVar(&a.AllowCMakeVersionMismatch, "allow-cmake-version-mismatch", false, "let convert-element run with cmake older than the codemodel-v2 floor (local-dev escape hatch)")
 
 	if err := fs.Parse(argv); err != nil {
 		return a, ExitUsage
