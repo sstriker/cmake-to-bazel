@@ -31,6 +31,8 @@ import (
 	"strings"
 
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
+	"github.com/sstriker/cmake-to-bazel/internal/shadow"
+	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/allowlistreg"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/exports"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/synthprefix"
@@ -127,18 +129,35 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	depRecords := map[string]*depRecord{}
 	importsRoot := filepath.Join(opts.Out, "imports")
 	prefixRoot := filepath.Join(opts.Out, "synth-prefix")
+	shadowRoot := filepath.Join(opts.Out, "shadow")
+	registryRoot := filepath.Join(opts.Out, "registry", "allowlists")
 	if err := os.MkdirAll(importsRoot, 0o755); err != nil {
 		return nil, err
 	}
 
+	registry := allowlistreg.New(registryRoot)
+
 	res := &Result{}
 	for _, name := range cmakeOrder {
 		el := opts.Project.Elements[name]
-		srcRoot, err := resolveSource(el, opts.SourcesBase)
+		realSrcRoot, err := resolveSource(el, opts.SourcesBase)
 		if err != nil {
 			return nil, fmt.Errorf("element %s: %w", name, err)
 		}
 		fmt.Fprintf(logOf(opts), "==> %s\n", name)
+
+		// Load any persisted allowlist entries for this element from a
+		// previous orchestrator run; build a shadow tree using the
+		// default allowlist union'd with the registered paths. cmake
+		// runs against the shadow tree so editing a non-allowlisted
+		// .c file's content doesn't change the action key.
+		if err := registry.Load(name); err != nil {
+			return nil, fmt.Errorf("element %s: load allowlist registry: %w", name, err)
+		}
+		shadowSrc, err := buildShadowForElement(shadowRoot, name, realSrcRoot, registry.Matcher(name))
+		if err != nil {
+			return nil, fmt.Errorf("element %s: shadow tree: %w", name, err)
+		}
 
 		prefixPath, err := buildPrefixForElement(prefixRoot, name, opts.Graph, depRecords, opts.Out)
 		if err != nil {
@@ -150,7 +169,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("element %s: imports manifest: %w", name, err)
 		}
 
-		fr, err := convertOne(ctx, conv, name, srcRoot, importsPath, prefixPath, opts)
+		fr, err := convertOne(ctx, conv, name, shadowSrc, importsPath, prefixPath, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -159,6 +178,16 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			continue
 		}
 		res.Converted = append(res.Converted, name)
+
+		// Merge this run's read paths into the persistent registry so
+		// the next run uses an augmented shadow allowlist.
+		readPaths, err := loadReadPaths(filepath.Join(opts.Out, "elements", name, "read_paths.json"))
+		if err != nil {
+			return nil, fmt.Errorf("element %s: load read_paths: %w", name, err)
+		}
+		if err := registry.Update(name, readPaths); err != nil {
+			return nil, fmt.Errorf("element %s: update allowlist registry: %w", name, err)
+		}
 
 		// Pick up this element's bundle metadata for downstream consumers.
 		bundleDir := filepath.Join(opts.Out, "elements", name, "cmake-config")
@@ -431,6 +460,42 @@ func buildPrefixForElement(prefixRoot, name string, g *element.Graph, depRecords
 		return "", err
 	}
 	return dst, nil
+}
+
+// buildShadowForElement creates <shadowRoot>/<element-name>/ as a path-only
+// mirror of the real source tree, with file content preserved only for
+// allowlisted paths. cmake's access(R_OK)-only configure-time semantics
+// (cmake_analysis.md §0) make a shadow tree configure-equivalent to the
+// real one for every non-allowlisted file. The orchestrator points
+// convert-element at the shadow tree so content-only edits to .c files
+// are absorbed at the cache key (M3a step 6).
+func buildShadowForElement(shadowRoot, name, realSrc string, m shadow.Matcher) (string, error) {
+	dst := filepath.Join(shadowRoot, filepath.FromSlash(name))
+	if err := os.RemoveAll(dst); err != nil {
+		return "", err
+	}
+	if err := shadow.Build(realSrc, dst, m); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+// loadReadPaths reads the converter-emitted read_paths.json into a string
+// slice. Missing file is not an error (older converter versions or runs
+// without --out-read-paths produce no file); we just return an empty list.
+func loadReadPaths(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return out, nil
 }
 
 // transitiveDeps walks the graph from `name` collecting every reachable

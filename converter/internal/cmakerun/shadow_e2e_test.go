@@ -12,7 +12,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/bazel"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/lower"
-	"github.com/sstriker/cmake-to-bazel/converter/internal/shadow"
+	"github.com/sstriker/cmake-to-bazel/internal/shadow"
 )
 
 // TestE2E_HelloWorld_ShadowTree validates the architectural keystone: running
