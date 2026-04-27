@@ -149,7 +149,7 @@ structure as small pure functions over IR.
 
 | M | Goal | Wks | Acceptance |
 |---|---|---|---|
-| M2 | build.ninja parser + multi-element graph | 2 | Codegen-using element converts; Bazel-vs-BuildStream parity check on libdrm |
+| M2 | build.ninja parser; recovered codegen tagged for distro-wide audit; multi-element graph | 2 | Codegen-using element converts; every recovered genrule carries a `cmake-codegen` tag (with driver and recovery-mode sub-tags), every consuming target carries `has-cmake-codegen`; documented in `docs/codegen-tags.md` with stability promise; Bazel-vs-BuildStream parity check on a real package |
 | M3 | Orchestrator + REAPI submission + shadow trees | 2 | All `kind: cmake` FDSDK elements convert end-to-end; determinism test |
 | M4 | Tiered failures + regression detection + fingerprint registry | 1.5 | Deliberate breakage produces structured regression report |
 | M5 | Bazel envelope + `converted_pkg_repo` + CAS HTTP proxy | 1 | Downstream Bazel build consuming converted FDSDK element succeeds |
