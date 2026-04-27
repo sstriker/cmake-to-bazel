@@ -38,12 +38,16 @@ func TestEmit_CodegenTarget_Golden(t *testing.T) {
 	}
 
 	// Scrub paths whose values are non-deterministic across recordings:
-	//   - the absolute host source root (in the file header comment)
-	//   - the absolute build dir (referenced inside the recovered
-	//     CUSTOM_COMMAND command)
-	//   - the absolute path to gen_version.py (referenced inside the
-	//     recovered CUSTOM_COMMAND command)
+	//   - the absolute host source root used at test time (in the file
+	//     header comment, computed from filepath.Abs)
+	//   - the absolute source root recorded into build.ninja at recording
+	//     time (different host: my dev box vs. CI runners)
+	//   - the absolute build dir baked into ${cmake_ninja_workdir} (always
+	//     a per-recording mktemp path)
 	got = []byte(strings.ReplaceAll(string(got), src, "<SRC>"))
+	if recorded := r.Codemodel.Paths.Source; recorded != "" && recorded != src {
+		got = []byte(strings.ReplaceAll(string(got), recorded, "<SRC>"))
+	}
 	got = scrubBuildTmp(got)
 
 	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "codegen-target", "BUILD.bazel.golden")
