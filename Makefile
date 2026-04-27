@@ -1,5 +1,6 @@
 .PHONY: all converter orchestrator diff history test test-e2e e2e-hello-world e2e-fmt \
-        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-buildbarn buildbarn-up buildbarn-down \
+        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-buildbarn e2e-buildbarn-execute \
+        buildbarn-up buildbarn-down \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
@@ -99,6 +100,16 @@ buildbarn-down:
 
 e2e-buildbarn: buildbarn-up
 	$(GO) test -tags=buildbarn -run TestE2E_Buildbarn ./orchestrator/...
+	$(MAKE) buildbarn-down
+
+# M3b execution validation against real Buildbarn workers (scheduler +
+# bb-worker + bb-runner-bare from the same docker-compose stack).
+# Submits a synthetic /bin/sh action — does NOT run the converter
+# end-to-end, since the bb-runner-bare image lacks cmake/ninja/bwrap.
+# Closes the loop on the protocol round trip; full conversion needs
+# a custom worker image (see deploy/buildbarn/README.md).
+e2e-buildbarn-execute: buildbarn-up
+	$(GO) test -tags=buildbarn -run TestE2E_Buildbarn_Execute ./internal/reapi/...
 	$(MAKE) buildbarn-down
 
 # Fetch the M2 acceptance package out-of-band. Idempotent.
