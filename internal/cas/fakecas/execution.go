@@ -404,19 +404,17 @@ func (e *ExecutionServer) sendDoneError(stream repb.Execution_ExecuteServer, run
 }
 
 // envFromCommand projects Command.environment_variables to an os/exec
-// Env slice ("KEY=VAL"). Inheriting the host PATH if not declared by
-// the action is convenient for tests; production workers wouldn't.
+// Env slice ("KEY=VAL"). When the Command declares no env at all we
+// inherit the host's, which is what tests want (the orchestrator's
+// stub-converter looks at ORCHESTRATOR_STUB_* env vars). A production
+// REAPI worker would NOT inherit; that's a fake-only ergonomic.
 func envFromCommand(cmd *repb.Command) []string {
-	have := make(map[string]bool)
-	out := make([]string, 0, len(cmd.EnvironmentVariables)+1)
+	if len(cmd.EnvironmentVariables) == 0 {
+		return os.Environ()
+	}
+	out := make([]string, 0, len(cmd.EnvironmentVariables))
 	for _, ev := range cmd.EnvironmentVariables {
 		out = append(out, ev.Name+"="+ev.Value)
-		have[ev.Name] = true
-	}
-	if !have["PATH"] {
-		if hostPath := os.Getenv("PATH"); hostPath != "" {
-			out = append(out, "PATH="+hostPath)
-		}
 	}
 	return out
 }
