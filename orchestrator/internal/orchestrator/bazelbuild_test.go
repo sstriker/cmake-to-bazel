@@ -42,9 +42,11 @@ func TestE2E_BazelBuild_DownstreamConsumesConvertedRepos(t *testing.T) {
 		}
 	}
 
-	repoRoot, err := filepath.Abs("../../..")
+	// The cmake_to_bazel module lives at <repo>/bazel/MODULE.bazel.
+	// local_path_override needs the directory containing that file.
+	moduleRoot, err := filepath.Abs("../../../bazel")
 	if err != nil {
-		t.Fatalf("repo root: %v", err)
+		t.Fatalf("module root: %v", err)
 	}
 
 	proj, g := mustLoadFixture(t)
@@ -69,7 +71,7 @@ func TestE2E_BazelBuild_DownstreamConsumesConvertedRepos(t *testing.T) {
 	}
 	manifest := filepath.Join(out, "manifest", "converted.json")
 	moduleBody := strings.NewReplacer(
-		"__ROOT__", repoRoot,
+		"__MODULE_ROOT__", moduleRoot,
 		"__MANIFEST__", manifest,
 	).Replace(string(tmplBody))
 	if err := os.WriteFile(filepath.Join(downstream, "MODULE.bazel"), []byte(moduleBody), 0o644); err != nil {
