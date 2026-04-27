@@ -226,15 +226,36 @@ type Endpoint struct {
 // Close shuts down the gRPC server and releases the listener.
 func (e *Endpoint) Close() { e.teardown() }
 
+// Option configures Start.
+type Option func(*startConfig)
+
+type startConfig struct {
+	exec *ExecutionServer
+}
+
+// WithExecution registers an ExecutionServer alongside the standard
+// CAS/AC/ByteStream services. Tests that exercise the M3b remote
+// execution path must enable this.
+func WithExecution(exec *ExecutionServer) Option {
+	return func(c *startConfig) { c.exec = exec }
+}
+
 // Start spins up an in-process gRPC server backed by srv on a random
 // localhost port and returns an Endpoint. Test callers are responsible
 // for closing it.
-func Start(t testing.TB, srv *Server) *Endpoint {
+func Start(t testing.TB, srv *Server, opts ...Option) *Endpoint {
 	t.Helper()
+	cfg := &startConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
 	gs := grpc.NewServer()
 	repb.RegisterContentAddressableStorageServer(gs, srv)
 	repb.RegisterActionCacheServer(gs, srv)
 	bytestream.RegisterByteStreamServer(gs, srv)
+	if cfg.exec != nil {
+		repb.RegisterExecutionServer(gs, cfg.exec)
+	}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

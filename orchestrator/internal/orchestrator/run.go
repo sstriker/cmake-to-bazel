@@ -70,6 +70,13 @@ type Options struct {
 	// to share cache hits across orchestrator instances.
 	Store cas.Store
 
+	// Executor, when non-nil, takes over per-element execution on AC
+	// miss: instead of running convert-element locally via os/exec,
+	// the orchestrator submits the Action to Executor.Execute and
+	// uses the returned ActionResult. M3b's GRPCExecutor goes through
+	// REAPI's Execution service. Nil = local exec (M5 default).
+	Executor reapi.Executor
+
 	// Platform encodes the action's platform properties (OS family,
 	// arch, tool versions). When empty, Run uses defaultPlatform —
 	// linux/x86_64 with the cmake/ninja/bwrap pins from the Makefile.
@@ -240,17 +247,22 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			if err := os.RemoveAll(elemOut); err != nil {
 				return nil, fmt.Errorf("element %s: clear elemOut: %w", name, err)
 			}
-			fr, err = convertOne(ctx, conv, name, shadowSrc, importsPath, prefixPath, opts)
+			if opts.Executor != nil {
+				fr, err = remoteExecute(ctx, store, opts.Executor, built, elemOut, name)
+			} else {
+				fr, err = convertOne(ctx, conv, name, shadowSrc, importsPath, prefixPath, opts)
+				if err == nil && fr == nil {
+					if err = publishActionResult(ctx, store, built, elemOut); err != nil {
+						err = fmt.Errorf("element %s: publish action result: %w", name, err)
+					}
+				}
+			}
 			if err != nil {
 				return nil, err
 			}
-			// Successes publish to AC so re-runs hit. Tier-1 failures
-			// neither publish nor count as a cache miss — same shape as
-			// the M3a action-key cache had.
+			// Successes count as a cache miss; Tier-1 failures don't
+			// (same shape as the M3a action-key cache).
 			if fr == nil {
-				if err := publishActionResult(ctx, store, built, elemOut); err != nil {
-					return nil, fmt.Errorf("element %s: publish action result: %w", name, err)
-				}
 				res.CacheMisses = append(res.CacheMisses, name)
 			}
 		}
@@ -679,6 +691,38 @@ func publishActionResult(ctx context.Context, store cas.Store, built *reapi.Buil
 		return err
 	}
 	return store.UpdateActionResult(ctx, built.ActionDigest, ar)
+}
+
+// remoteExecute submits the Action to the configured Executor (M3b's
+// REAPI Execution path), then materializes the returned ActionResult
+// into elemOut. The worker is responsible for publishing the
+// ActionResult to AC; the orchestrator only consumes it.
+//
+// Tier-1 failure detection: the converter writes failure.json on
+// exit-1, which the worker collects as an OutputFile. Same behavior
+// shape as convertOne returning a *FailureRecord.
+func remoteExecute(ctx context.Context, store cas.Store, exec reapi.Executor, built *reapi.BuiltAction, elemOut, name string) (*FailureRecord, error) {
+	ar, err := exec.Execute(ctx, store, built)
+	if err != nil {
+		return nil, fmt.Errorf("element %s: remote execute: %w", name, err)
+	}
+	if err := os.MkdirAll(elemOut, 0o755); err != nil {
+		return nil, fmt.Errorf("element %s: mkdir elemOut: %w", name, err)
+	}
+	if err := reapi.MaterializeResult(ctx, store, ar, elemOut); err != nil {
+		return nil, fmt.Errorf("element %s: materialize result: %w", name, err)
+	}
+	if ar.ExitCode == 1 {
+		fr, ferr := loadFailure(name, filepath.Join(elemOut, "failure.json"))
+		if ferr != nil {
+			return nil, fmt.Errorf("element %s: remote action exit 1 but failure.json unreadable: %w", name, ferr)
+		}
+		return fr, nil
+	}
+	if ar.ExitCode != 0 {
+		return nil, fmt.Errorf("element %s: remote action exit %d", name, ar.ExitCode)
+	}
+	return nil, nil
 }
 
 // loadReadPaths reads the converter-emitted read_paths.json into a string
