@@ -33,9 +33,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sstriker/cmake-to-bazel/internal/cas"
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
+	"github.com/sstriker/cmake-to-bazel/internal/reapi"
 	"github.com/sstriker/cmake-to-bazel/internal/shadow"
-	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/actionkey"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/allowlistreg"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/exports"
@@ -63,9 +64,32 @@ type Options struct {
 	// to "convert-element" (PATH lookup).
 	ConverterBinary string
 
+	// Store is the CAS+ActionCache backing the per-element conversion
+	// cache. When nil, Run constructs a LocalStore at <Out>/cache so
+	// existing tests and offline runs work unchanged. Pass a GRPCStore
+	// to share cache hits across orchestrator instances.
+	Store cas.Store
+
+	// Platform encodes the action's platform properties (OS family,
+	// arch, tool versions). When empty, Run uses defaultPlatform —
+	// linux/x86_64 with the cmake/ninja/bwrap pins from the Makefile.
+	// Two orchestrators must use the same Platform to share cache hits.
+	Platform []reapi.PlatformProperty
+
 	// Log captures orchestrator progress messages and per-element
 	// converter stdout/stderr (merged). Defaults to os.Stderr when nil.
 	Log io.Writer
+}
+
+// defaultPlatform mirrors the toolchain pins enforced by the Makefile
+// and by hermetic.AssertCMakeVersion. Bumping any pin invalidates every
+// element's cache by changing the Action digest — that's the contract.
+var defaultPlatform = []reapi.PlatformProperty{
+	{Name: "Arch", Value: "x86_64"},
+	{Name: "OSFamily", Value: "linux"},
+	{Name: "bwrap-version", Value: "0.8.0"},
+	{Name: "cmake-version", Value: "3.28.3"},
+	{Name: "ninja-version", Value: "1.11.1"},
 }
 
 // Result summarizes a Run.
@@ -143,9 +167,18 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	registry := allowlistreg.New(registryRoot)
-	actionsCacheRoot := filepath.Join(opts.Out, "cache", "actions")
-	if err := os.MkdirAll(actionsCacheRoot, 0o755); err != nil {
-		return nil, err
+
+	store := opts.Store
+	if store == nil {
+		ls, err := cas.NewLocalStore(filepath.Join(opts.Out, "cache"))
+		if err != nil {
+			return nil, fmt.Errorf("orchestrator: init local cas: %w", err)
+		}
+		store = ls
+	}
+	platform := opts.Platform
+	if len(platform) == 0 {
+		platform = defaultPlatform
 	}
 
 	res := &Result{}
@@ -180,39 +213,43 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("element %s: imports manifest: %w", name, err)
 		}
 
-		// Action-key cache: if the same (shadow, imports, prefix,
-		// converter) combination has produced outputs before, reuse them
-		// instead of running convert-element again. The plumbing that
-		// follows must run regardless (depRecords/registry get updated
-		// either way) so cache-hit and cache-miss paths converge.
-		key, err := actionkey.Compute(actionkey.Inputs{
+		// REAPI ActionCache: build a real Action proto for this
+		// conversion, query AC for a cached ActionResult, materialize
+		// outputs on hit. On miss, run the converter locally and
+		// publish the result. Two orchestrators share work via the
+		// same AC.
+		built, err := reapi.Build(reapi.Inputs{
 			ShadowDir:       shadowSrc,
 			ImportsManifest: importsPath,
 			PrefixDir:       prefixPath,
 			ConverterBin:    convAbs,
+			Platform:        platform,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("element %s: action key: %w", name, err)
+			return nil, fmt.Errorf("element %s: build action: %w", name, err)
 		}
-		cachedDir := filepath.Join(actionsCacheRoot, key)
 		elemOut := filepath.Join(opts.Out, "elements", name)
-		hit, err := tryCacheHit(cachedDir, elemOut)
+		hit, fr, err := tryActionCacheHit(ctx, store, built, elemOut)
 		if err != nil {
-			return nil, fmt.Errorf("element %s: cache lookup: %w", name, err)
+			return nil, fmt.Errorf("element %s: action cache lookup: %w", name, err)
 		}
-
-		var fr *FailureRecord
 		if hit {
-			fmt.Fprintf(logOf(opts), "    cache hit %s\n", key[:12])
+			fmt.Fprintf(logOf(opts), "    cache hit %s\n", built.ActionDigest.Hash[:12])
 			res.CacheHits = append(res.CacheHits, name)
 		} else {
+			if err := os.RemoveAll(elemOut); err != nil {
+				return nil, fmt.Errorf("element %s: clear elemOut: %w", name, err)
+			}
 			fr, err = convertOne(ctx, conv, name, shadowSrc, importsPath, prefixPath, opts)
 			if err != nil {
 				return nil, err
 			}
+			// Successes publish to AC so re-runs hit. Tier-1 failures
+			// neither publish nor count as a cache miss — same shape as
+			// the M3a action-key cache had.
 			if fr == nil {
-				if err := populateCache(cachedDir, elemOut); err != nil {
-					return nil, fmt.Errorf("element %s: populate cache: %w", name, err)
+				if err := publishActionResult(ctx, store, built, elemOut); err != nil {
+					return nil, fmt.Errorf("element %s: publish action result: %w", name, err)
 				}
 				res.CacheMisses = append(res.CacheMisses, name)
 			}
@@ -591,103 +628,57 @@ func buildShadowForElement(shadowRoot, name, realSrc string, m shadow.Matcher) (
 	return dst, nil
 }
 
-// tryCacheHit returns true if cachedDir exists and its contents have been
-// successfully copied to dst (which is created/cleaned). Missing cachedDir
-// is the cache-miss signal — returns (false, nil).
-func tryCacheHit(cachedDir, dst string) (bool, error) {
-	info, err := os.Stat(cachedDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+// tryActionCacheHit looks up the Action's digest in ActionCache. On
+// hit, materializes every output blob to elemOut and returns
+// (true, fr, nil) — fr is non-nil when the cached ActionResult
+// represents a Tier-1 failure (failure.json present in outputs).
+//
+// Returns (false, nil, nil) on cache miss, blob-eviction (stale AC
+// entry), or any other recoverable lookup failure — caller falls
+// through to local execution.
+func tryActionCacheHit(ctx context.Context, store cas.Store, built *reapi.BuiltAction, elemOut string) (bool, *FailureRecord, error) {
+	ar, err := store.GetActionResult(ctx, built.ActionDigest)
+	if errors.Is(err, cas.ErrNotFound) {
+		return false, nil, nil
 	}
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
-	if !info.IsDir() {
-		return false, fmt.Errorf("cache entry %s is not a directory", cachedDir)
+	if err := os.RemoveAll(elemOut); err != nil {
+		return false, nil, err
 	}
-	if err := os.RemoveAll(dst); err != nil {
-		return false, err
+	if err := os.MkdirAll(elemOut, 0o755); err != nil {
+		return false, nil, err
 	}
-	if err := copyTree(cachedDir, dst); err != nil {
-		return false, err
+	if err := reapi.MaterializeResult(ctx, store, ar, elemOut); err != nil {
+		// Stale AC entry (referenced blob evicted) — treat as miss
+		// and fall through. Per the M5 plan's resilience case.
+		var miss *reapi.ErrMissingBlob
+		if errors.As(err, &miss) {
+			_ = os.RemoveAll(elemOut)
+			return false, nil, nil
+		}
+		return false, nil, err
 	}
-	return true, nil
+	if ar.ExitCode == 1 {
+		fr, ferr := loadFailure("", filepath.Join(elemOut, "failure.json"))
+		if ferr != nil {
+			return false, nil, ferr
+		}
+		return true, fr, nil
+	}
+	return true, nil, nil
 }
 
-// populateCache writes srcDir's contents into cacheDir atomically (via a
-// sibling tmp + rename) so a crashed populate doesn't leave a half-cached
-// entry that future runs would treat as a hit.
-func populateCache(cacheDir, srcDir string) error {
-	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(cacheDir), "incoming-*")
+// publishActionResult uploads every output produced by a successful
+// local conversion to CAS, then writes the ActionResult to AC so future
+// runs (on this or any other machine) hit cache.
+func publishActionResult(ctx context.Context, store cas.Store, built *reapi.BuiltAction, elemOut string) error {
+	ar, err := reapi.SynthesizeResult(ctx, store, elemOut, built.OutputPaths, 0, nil, nil)
 	if err != nil {
 		return err
 	}
-	if err := copyTree(srcDir, tmp); err != nil {
-		_ = os.RemoveAll(tmp)
-		return err
-	}
-	// If something already exists at cacheDir (race with a parallel
-	// orchestrator instance), keep theirs; remove ours and treat as hit.
-	if _, err := os.Stat(cacheDir); err == nil {
-		_ = os.RemoveAll(tmp)
-		return nil
-	}
-	return os.Rename(tmp, cacheDir)
-}
-
-// copyTree mirrors src into dst, regular files only. Symlinks are
-// recreated. Other special file types are not part of the converter's
-// output set so we don't model them.
-func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(src, p)
-		if err != nil {
-			return err
-		}
-		out := filepath.Join(dst, rel)
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			t, err := os.Readlink(p)
-			if err != nil {
-				return err
-			}
-			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-				return err
-			}
-			return os.Symlink(t, out)
-		case d.IsDir():
-			return os.MkdirAll(out, info.Mode().Perm())
-		case info.Mode().IsRegular():
-			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-				return err
-			}
-			in, err := os.Open(p)
-			if err != nil {
-				return err
-			}
-			defer in.Close()
-			outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(outf, in); err != nil {
-				_ = outf.Close()
-				return err
-			}
-			return outf.Close()
-		}
-		return nil
-	})
+	return store.UpdateActionResult(ctx, built.ActionDigest, ar)
 }
 
 // loadReadPaths reads the converter-emitted read_paths.json into a string
