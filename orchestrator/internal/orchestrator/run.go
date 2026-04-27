@@ -20,6 +20,8 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -358,11 +360,15 @@ func loadFailure(name, path string) (*FailureRecord, error) {
 	}, nil
 }
 
-// writeManifest writes converted.json + failures.json under <out>/manifest/.
+// writeManifest writes converted.json + failures.json + determinism.json
+// under <out>/manifest/.
 //
-// converted.json entries are sorted by element name for stable diffs;
-// failures.json the same. Schema versioned via "version": 1 so M4's
-// regression detector can fence on incompatible reads.
+// converted.json + failures.json entries are sorted by element name for
+// stable diffs. determinism.json is a path -> sha256 map covering every
+// per-element output file the orchestrator produced; M3a step 7's
+// determinism test compares these across machines. Schema versioned via
+// "version": 1 so M4's regression detector can fence on incompatible
+// reads.
 func writeManifest(out string, res *Result) error {
 	conv := append([]string(nil), res.Converted...)
 	sort.Strings(conv)
@@ -386,7 +392,70 @@ func writeManifest(out string, res *Result) error {
 		Version  int             `json:"version"`
 		Elements []FailureRecord `json:"elements"`
 	}{Version: 1, Elements: fails}
-	return writeJSON(filepath.Join(out, "manifest", "failures.json"), failDoc)
+	if err := writeJSON(filepath.Join(out, "manifest", "failures.json"), failDoc); err != nil {
+		return err
+	}
+
+	return writeDeterminism(out)
+}
+
+// writeDeterminism walks every file under <out>/elements/ and hashes it,
+// then writes a sorted path -> sha256 map under <out>/manifest/
+// determinism.json. The file is what M3a step 7's three-tmpdir test
+// compares for byte-equality across machines.
+func writeDeterminism(out string) error {
+	root := filepath.Join(out, "elements")
+	type entry struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	}
+	var entries []entry
+	if err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		// determinism.json shouldn't include itself.
+		sum, err := hashRegularFile(p)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, entry{
+			Path:   filepath.ToSlash(rel),
+			SHA256: sum,
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	doc := struct {
+		Version int     `json:"version"`
+		Files   []entry `json:"files"`
+	}{Version: 1, Files: entries}
+	return writeJSON(filepath.Join(out, "manifest", "determinism.json"), doc)
+}
+
+func hashRegularFile(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func writeJSON(path string, v any) error {
