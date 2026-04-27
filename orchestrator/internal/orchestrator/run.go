@@ -93,6 +93,13 @@ type Options struct {
 	// log output (tests + dev loops).
 	Concurrency int
 
+	// SourceAsset, when non-nil, enables `kind: remote-asset` source
+	// resolution: the orchestrator looks up sources by uri+qualifiers
+	// against the Remote Asset endpoint and materializes the resulting
+	// Directory from Store. Used for FDSDK sources published via
+	// `bst source push`. Local + git checkouts work without it.
+	SourceAsset *cas.RemoteAsset
+
 	// Log captures orchestrator progress messages and per-element
 	// converter stdout/stderr (merged). Defaults to os.Stderr when nil.
 	Log io.Writer
@@ -203,7 +210,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		convAbs:      convAbs,
 		store:        store,
 		platform:     platform,
-		resolver:     newResolver(opts),
+		resolver:     newResolver(opts, store),
 		importsRoot:  importsRoot,
 		prefixRoot:   prefixRoot,
 		shadowRoot:   shadowRoot,
@@ -517,14 +524,17 @@ func convertOne(ctx context.Context, conv, name, srcRoot, importsPath, prefixPat
 
 // newResolver builds a sourcecheckout.Resolver wired to the
 // orchestrator's source cache (under <Out>/sources/) and respecting
-// the --sources-base override when set.
-func newResolver(opts Options) *sourcecheckout.Resolver {
+// the --sources-base override when set. SourceAsset+Store hand the
+// resolver the M3d remote-asset path.
+func newResolver(opts Options, store cas.Store) *sourcecheckout.Resolver {
 	return &sourcecheckout.Resolver{
 		CacheDir:    filepath.Join(opts.Out, "sources"),
 		SourcesBase: opts.SourcesBase,
 		ElementSourceDir: func(el *element.Element) string {
 			return filepath.Dir(el.SourcePath)
 		},
+		Asset: opts.SourceAsset,
+		Store: store,
 	}
 }
 
