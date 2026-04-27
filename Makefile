@@ -1,5 +1,6 @@
 .PHONY: all converter orchestrator diff history test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
-        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
+        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-buildbarn buildbarn-up buildbarn-down \
+        fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
 # enforced softly here for dev-loop visibility.
@@ -81,6 +82,27 @@ e2e-bazel-build: check-tools converter orchestrator
 # required; just real cmake + bwrap (already covered by check-tools).
 e2e-cmake-consumer: check-tools converter orchestrator
 	$(GO) test -tags=e2e -run TestE2E_CMakeConsumer ./orchestrator/...
+
+# Real-Buildbarn validation. Brings up bb-storage via docker compose,
+# runs the cache-share keystone test against grpc://127.0.0.1:8980,
+# tears down. Replaces the in-process fake with actual Buildbarn code.
+# Requires docker compose; no other toolchain bar.
+BUILDBARN_COMPOSE := deploy/buildbarn/docker-compose.yml
+
+buildbarn-up:
+	docker compose -f $(BUILDBARN_COMPOSE) up -d
+	@echo "waiting for bb-storage healthcheck..."
+	@for i in $$(seq 1 60); do \
+		if curl -fsS http://127.0.0.1:9980/-/healthy >/dev/null 2>&1; then echo "ready"; exit 0; fi; \
+		sleep 1; \
+	done; echo "bb-storage did not become healthy within 60s"; exit 1
+
+buildbarn-down:
+	docker compose -f $(BUILDBARN_COMPOSE) down -v
+
+e2e-buildbarn: buildbarn-up
+	$(GO) test -tags=buildbarn -run TestE2E_Buildbarn ./orchestrator/...
+	$(MAKE) buildbarn-down
 
 # Fetch the M2 acceptance package out-of-band. Idempotent.
 fetch-fmt:
