@@ -113,6 +113,14 @@ type Options struct {
 	// `bst source push`. Local + git checkouts work without it.
 	SourceAsset *cas.RemoteAsset
 
+	// ToolchainCMakeFile, when non-empty, is the path to a CMake
+	// toolchain file (typically derive-toolchain's toolchain.cmake)
+	// passed to every per-element converter invocation via
+	// --toolchain-cmake-file. Lets cmake skip its compiler-detection
+	// probe — a measurable per-conversion latency win at distro
+	// scale. The orchestrator validates the file exists at startup.
+	ToolchainCMakeFile string
+
 	// Log captures orchestrator progress messages and per-element
 	// converter stdout/stderr (merged). Defaults to os.Stderr when nil.
 	Log io.Writer
@@ -703,6 +711,9 @@ func convertOne(ctx context.Context, conv, name, srcRoot, importsPath, prefixPat
 	}
 	if prefixPath != "" {
 		args = append(args, "--prefix-dir", prefixPath)
+	}
+	if opts.ToolchainCMakeFile != "" {
+		args = append(args, "--toolchain-cmake-file", opts.ToolchainCMakeFile)
 	}
 
 	cmd := exec.CommandContext(ctx, conv, args...)

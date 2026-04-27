@@ -57,6 +57,7 @@ func main() {
 		sourceCASInst   = fs.String("source-cas-instance", "", "Remote Asset instance_name; defaults to --cas-instance")
 		platformFlag    = fs.String("platform", "", "Action.platform overrides as comma-separated name=value (e.g. cmake-version=3.30.0,ninja-version=1.12.0). Overrides built-in defaults; the orchestrator MUST agree with workers on platform values to share cache hits.")
 		elemTimeout     = fs.Duration("element-timeout", 0, "per-element pipeline cap (e.g. 30m, 2h). Zero = orchestrator default (30m). Mirrored into Action.timeout for remote workers.")
+		toolchainCMake  = fs.String("toolchain-cmake-file", "", "CMake toolchain file (typically derive-toolchain's toolchain.cmake) passed to every per-element converter invocation. Skips cmake's compiler-detection probe — measurable per-conversion latency win.")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -155,6 +156,7 @@ func main() {
 		SourceAsset:       sourceAsset,
 		Platform:          platform,
 		PerElementTimeout: *elemTimeout,
+		ToolchainCMakeFile: *toolchainCMake,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
