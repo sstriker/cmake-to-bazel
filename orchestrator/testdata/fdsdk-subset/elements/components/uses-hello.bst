@@ -12,4 +12,4 @@ depends:
 
 sources:
 - kind: local
-  path: files/uses-hello
+  path: ../../files/uses-hello
