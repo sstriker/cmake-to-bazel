@@ -1,0 +1,43 @@
+# Minimal Buildbarn deployment for M5 cache-substrate validation.
+#
+# Brings up bb-storage as a single-node REAPI ContentAddressableStorage
+# + ActionCache server on grpc://localhost:8980. The orchestrator's
+# --cas=grpc://localhost:8980 flag points at this and exercises the
+# full M5 protocol against actual Buildbarn code (vs the in-process
+# fake used in unit tests).
+#
+# This is NOT a production deployment — single replica, no auth,
+# in-container blobstore. Use it to validate end-to-end + run the
+# cache-share keystone test against real Buildbarn before pointing
+# the orchestrator at a production endpoint.
+#
+# Bring up:    docker compose -f deploy/buildbarn/docker-compose.yml up -d
+# Tear down:   docker compose -f deploy/buildbarn/docker-compose.yml down -v
+# Logs:        docker compose -f deploy/buildbarn/docker-compose.yml logs -f
+#
+# The bb-storage image tag is pinned (rather than :latest) so config
+# schema drift doesn't surprise CI; bumping requires re-validating
+# storage.jsonnet against the new schema.
+
+services:
+  bb-storage:
+    image: ghcr.io/buildbarn/bb-storage:20251015T103016Z-89ad8a4
+    container_name: bb-storage
+    restart: unless-stopped
+    command: ["/config/storage.jsonnet"]
+    volumes:
+      - ./config:/config:ro
+      - bb-storage-data:/storage
+    ports:
+      - "127.0.0.1:8980:8980"  # REAPI gRPC
+      - "127.0.0.1:9980:9980"  # diagnostics http (Prometheus, pprof)
+    healthcheck:
+      # bb-storage exposes /-/healthy on the diagnostics http server.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9980/-/healthy"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  bb-storage-data:

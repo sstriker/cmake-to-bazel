@@ -104,3 +104,21 @@ jobs:
 
       - name: bazel-build downstream e2e (M5 step 10)
         run: make e2e-bazel-build
+
+  buildbarn-e2e:
+    name: End-to-end (real Buildbarn cache substrate)
+    runs-on: ubuntu-24.04
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build orchestrator
+        run: make orchestrator
+
+      - name: Run M5 keystone against real bb-storage
+        run: make e2e-buildbarn
