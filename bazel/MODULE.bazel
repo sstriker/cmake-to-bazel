@@ -1,0 +1,13 @@
+"""Root module for the cmake-to-bazel envelope.
+
+Downstream Bazel projects depend on this module via bazel_dep, then
+invoke the converted_pkg_repo extension to materialize one Bazel repo
+per orchestrator-converted FDSDK element. See
+converted_pkg_repo.bzl's docstring for the consumer-side incantation.
+"""
+
+module(
+    name = "cmake_to_bazel",
+    version = "0.0.0",
+    compatibility_level = 1,
+)
