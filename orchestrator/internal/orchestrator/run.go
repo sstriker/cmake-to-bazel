@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 
@@ -95,6 +96,16 @@ type Options struct {
 	// log output (tests + dev loops).
 	Concurrency int
 
+	// PerElementTimeout caps how long any single element's pipeline
+	// (resolve source, build action, AC lookup, convert/execute,
+	// publish) may take. Zero = defaultPerElementTimeout. The same
+	// value is set as Action.Timeout for remote execution so workers
+	// enforce the limit symmetrically.
+	//
+	// On timeout, processElement returns a Tier-2/3 error that
+	// cancels the run via ctx; in-flight goroutines abort.
+	PerElementTimeout time.Duration
+
 	// SourceAsset, when non-nil, enables `kind: remote-asset` source
 	// resolution: the orchestrator looks up sources by uri+qualifiers
 	// against the Remote Asset endpoint and materializes the resulting
@@ -106,6 +117,13 @@ type Options struct {
 	// converter stdout/stderr (merged). Defaults to os.Stderr when nil.
 	Log io.Writer
 }
+
+// defaultPerElementTimeout is the cap when Options.PerElementTimeout
+// is unset. 30 minutes accommodates large cmake configures (libdrm-
+// class projects with thousands of TUs) without being so generous
+// that a hung action holds the queue indefinitely. Operators can
+// raise it via --element-timeout when needed.
+const defaultPerElementTimeout = 30 * time.Minute
 
 // defaultPlatform mirrors the toolchain pins enforced by the Makefile
 // and by hermetic.AssertCMakeVersion. Bumping any pin invalidates every
@@ -206,6 +224,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		platform = defaultPlatform
 	}
 
+	timeout := opts.PerElementTimeout
+	if timeout <= 0 {
+		timeout = defaultPerElementTimeout
+	}
+
 	r := &runner{
 		opts:        opts,
 		conv:        conv,
@@ -213,6 +236,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		store:       store,
 		platform:    platform,
 		resolver:    newResolver(opts, store),
+		timeout:     timeout,
 		importsRoot: importsRoot,
 		prefixRoot:  prefixRoot,
 		shadowRoot:  shadowRoot,
@@ -249,6 +273,7 @@ type runner struct {
 	store    cas.Store
 	platform []reapi.PlatformProperty
 	resolver *sourcecheckout.Resolver
+	timeout  time.Duration // per-element cap; zero = none
 
 	importsRoot, prefixRoot, shadowRoot string
 	registry                            *allowlistreg.Registry
@@ -331,7 +356,13 @@ func (r *runner) driveElements(ctx context.Context, cmakeOrder []string) error {
 			}
 			defer func() { <-sem }()
 
-			if err := r.processElement(runCtx, name); err != nil {
+			elemCtx := runCtx
+			if r.timeout > 0 {
+				var cancelElem context.CancelFunc
+				elemCtx, cancelElem = context.WithTimeout(runCtx, r.timeout)
+				defer cancelElem()
+			}
+			if err := r.processElement(elemCtx, name); err != nil {
 				recordErr(err)
 			}
 		}()
@@ -405,6 +436,7 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 		PrefixDir:       prefixPath,
 		ConverterBin:    r.convAbs,
 		Platform:        r.platform,
+		Timeout:         r.timeout,
 	})
 	if err != nil {
 		return fmt.Errorf("element %s: build action: %w", name, err)

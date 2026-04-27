@@ -56,6 +56,7 @@ func main() {
 		sourceCAS       = fs.String("source-cas", "", "REAPI Remote Asset endpoint for kind:remote-asset sources (e.g. grpc://host:port). Reuses --cas-* TLS / token plumbing.")
 		sourceCASInst   = fs.String("source-cas-instance", "", "Remote Asset instance_name; defaults to --cas-instance")
 		platformFlag    = fs.String("platform", "", "Action.platform overrides as comma-separated name=value (e.g. cmake-version=3.30.0,ninja-version=1.12.0). Overrides built-in defaults; the orchestrator MUST agree with workers on platform values to share cache hits.")
+		elemTimeout     = fs.Duration("element-timeout", 0, "per-element pipeline cap (e.g. 30m, 2h). Zero = orchestrator default (30m). Mirrored into Action.timeout for remote workers.")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -143,16 +144,17 @@ func main() {
 	}
 
 	res, err := orchestrator.Run(ctx, orchestrator.Options{
-		Project:         proj,
-		Graph:           g,
-		Out:             *out,
-		SourcesBase:     *sourcesBase,
-		ConverterBinary: *converterBinary,
-		Store:           store,
-		Executor:        executor,
-		Concurrency:     *concurrency,
-		SourceAsset:     sourceAsset,
-		Platform:        platform,
+		Project:           proj,
+		Graph:             g,
+		Out:               *out,
+		SourcesBase:       *sourcesBase,
+		ConverterBinary:   *converterBinary,
+		Store:             store,
+		Executor:          executor,
+		Concurrency:       *concurrency,
+		SourceAsset:       sourceAsset,
+		Platform:          platform,
+		PerElementTimeout: *elemTimeout,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
