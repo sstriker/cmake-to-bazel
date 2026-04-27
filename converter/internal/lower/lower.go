@@ -18,6 +18,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ir"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 )
 
@@ -30,6 +31,11 @@ type Options struct {
 	// when cmake ran inside a sandbox that bind-mounted the source tree at
 	// a different path (e.g. /src). Defaults to the codemodel's source path.
 	HostSourceRoot string
+
+	// Imports resolves cross-element imported targets (find_package-style
+	// names) to Bazel labels. Optional; nil disables manifest lookup, in
+	// which case unresolved link deps trigger unresolved-link-dep.
+	Imports *manifest.Resolver
 }
 
 // Header file extensions we treat as `hdrs` candidates when walking include
@@ -67,13 +73,30 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 
 	cc := newCodegenContext()
 
+	// Build the in-element id -> Bazel-rule-name map up front so dep
+	// lowering can map t.Dependencies[].Id to a label without re-walking
+	// configurations. UTILITY targets (add_custom_target nodes) are
+	// excluded — they have no Bazel equivalent, so depending on them is a
+	// no-op; the underlying add_custom_command's outputs are referenced
+	// via srcs/hdrs instead. utilityIDs records them separately so dep
+	// resolution can distinguish "skip utility" from "unresolved".
+	idToName := map[string]string{}
+	utilityIDs := map[string]bool{}
+	for _, tref := range cfg.Targets {
+		if t, ok := r.Targets[tref.Id]; ok && t.Type == "UTILITY" {
+			utilityIDs[tref.Id] = true
+			continue
+		}
+		idToName[tref.Id] = tref.Name
+	}
+
 	for _, tref := range cfg.Targets {
 		t, ok := r.Targets[tref.Id]
 		if !ok {
 			return nil, failure.New(failure.FileAPIMalformed,
 				"target id %q in codemodel but not loaded", tref.Id)
 		}
-		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, g, cc)
+		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, g, cc, idToName, utilityIDs, opts.Imports)
 		if err != nil {
 			return nil, err
 		}
@@ -100,7 +123,7 @@ func projectName(r *fileapi.Reply) string {
 	return ""
 }
 
-func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *ninja.Graph, cc *codegenContext) (*ir.Target, error) {
+func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *ninja.Graph, cc *codegenContext, idToName map[string]string, utilityIDs map[string]bool, imports *manifest.Resolver) (*ir.Target, error) {
 	irt := &ir.Target{Name: t.Name}
 
 	switch t.Type {
@@ -194,6 +217,33 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *nin
 	sort.Strings(merged)
 	irt.Hdrs = dedupeStrings(merged)
 
+	// Lower dependencies. In-element target ids look like `<name>::@<hash>`
+	// where <name> is the CMake target name; cross-element find_package-
+	// imported targets carry a namespaced name like `Pkg::tgt::@<hash>`.
+	// Resolution order:
+	//
+	//   1. In-element non-UTILITY target -> ":<name>"
+	//   2. In-element UTILITY target -> skip silently (no Bazel equivalent)
+	//   3. CMake target name in imports manifest -> bazel_label
+	//   4. Otherwise -> Tier-1 unresolved-link-dep.
+	for _, dep := range t.Dependencies {
+		if name, ok := idToName[dep.Id]; ok {
+			irt.Deps = append(irt.Deps, ":"+name)
+			continue
+		}
+		if utilityIDs[dep.Id] {
+			continue
+		}
+		cmakeName := stripIDHash(dep.Id)
+		if export := imports.LookupCMakeTarget(cmakeName); export != nil {
+			irt.Deps = append(irt.Deps, export.BazelLabel)
+			continue
+		}
+		return nil, failure.New(failure.UnresolvedLinkDep,
+			"target %q depends on %q which is neither in-element nor in the imports manifest",
+			t.Name, cmakeName)
+	}
+
 	if t.Install != nil && len(t.Install.Destinations) > 0 {
 		irt.Visibility = []string{"//visibility:public"}
 		irt.InstallDest = t.Install.Destinations[0].Path
@@ -213,6 +263,16 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *nin
 	}
 
 	return irt, nil
+}
+
+// stripIDHash returns the CMake target name from a File-API target id of the
+// form `<name>::@<hash>`. If the id has no hash suffix it is returned
+// unchanged; namespaced names (Foo::bar::@<hash>) collapse to "Foo::bar".
+func stripIDHash(id string) string {
+	if i := strings.Index(id, "::@"); i >= 0 {
+		return id[:i]
+	}
+	return id
 }
 
 // dedupeStrings returns a copy of in with consecutive duplicates removed. The

@@ -45,6 +45,13 @@ type Args struct {
 	// OutFailure, when non-empty, is the path to write failure.json on
 	// Tier-1 errors.
 	OutFailure string
+
+	// ImportsManifest, when non-empty, is the path to a per-orchestration
+	// imports manifest (see docs/codegen-tags.md sibling and
+	// internal/manifest/imports.go for schema). Cross-element deps are
+	// resolved via this map; the orchestrator (M3) writes one before each
+	// per-element conversion.
+	ImportsManifest string
 }
 
 // Parse reads argv (without program name), populates Args, and prints usage
@@ -58,6 +65,7 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.OutBuild, "out-build", "BUILD.bazel", "destination path for generated BUILD.bazel")
 	fs.StringVar(&a.OutBundleDir, "out-bundle-dir", "", "directory for synthesized cmake-config bundle (optional)")
 	fs.StringVar(&a.OutFailure, "out-failure", "", "write Tier-1 failure JSON here on per-element errors (optional)")
+	fs.StringVar(&a.ImportsManifest, "imports-manifest", "", "path to JSON imports manifest mapping cross-element CMake targets to Bazel labels (optional)")
 
 	if err := fs.Parse(argv); err != nil {
 		return a, ExitUsage
