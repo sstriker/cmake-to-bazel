@@ -147,15 +147,18 @@ structure as small pure functions over IR.
 
 ## Subsequent milestones (sketch)
 
-| M | Goal | Wks | Acceptance |
-|---|---|---|---|
-| M2 | build.ninja parser; recovered codegen tagged for distro-wide audit; multi-element graph | 2 | Codegen-using element converts; every recovered genrule carries a `cmake-codegen` tag (with driver and recovery-mode sub-tags), every consuming target carries `has-cmake-codegen`; documented in `docs/codegen-tags.md` with stability promise; Bazel-vs-BuildStream parity check on a real package |
-| M3a | Local orchestrator: BuildStream YAML reader, per-element subprocess loop, shadow + imports + synth-prefix + allowlist registry + action-key cache | 1.5 | Every FDSDK kind:cmake element converts via `os/exec`; determinism test passes on three fresh tmpdirs |
-| M3b | REAPI submission layer wrapping the M3a orchestrator | 1 | Same outputs as M3a but actions execute remotely against Buildbarn; CAS hit-rate measurable |
-| M3c | `bst source checkout` integration: orchestrator drives source provisioning for `kind: git`, `kind: tar`, etc. M3a/M3b operate on pre-checked-out trees via `--sources-base` and document the workaround. | 0.5 | Orchestrator converts an FDSDK subset starting from BuildStream YAMLs alone, no pre-staging |
-| M4 | Tiered failures + regression detection + fingerprint registry — see `docs/m4-plan.md` | 1.5 | Deliberate breakage produces structured regression report |
-| M5 | Bazel envelope + `converted_pkg_repo` + CAS HTTP proxy | 1 | Downstream Bazel build consuming converted FDSDK element succeeds |
-| M6+ | Debian-scale bulk pass | open | Same binaries; only front-end changes |
+Status legend: ✅ done, 🔧 partial / validation pending, ⏳ queued.
+
+| M | Status | Goal | Wks | Acceptance |
+|---|---|---|---|---|
+| M2 | ✅ | build.ninja parser; recovered codegen tagged for distro-wide audit; multi-element graph | 2 | Codegen-using element converts; every recovered genrule carries a `cmake-codegen` tag (with driver and recovery-mode sub-tags), every consuming target carries `has-cmake-codegen`; documented in `docs/codegen-tags.md` with stability promise; Bazel-vs-BuildStream parity check on a real package |
+| M3a | ✅ | Local orchestrator: BuildStream YAML reader, per-element subprocess loop, shadow + imports + synth-prefix + allowlist registry + action-key cache | 1.5 | Every FDSDK kind:cmake element converts via `os/exec`; determinism test passes on three fresh tmpdirs |
+| M3b | 🔧 | REAPI Execute submission against the same Action proto M5 builds | 0.5 | `--execute=grpc://...` routes per-element conversions through Buildbarn workers; client never forks the converter. M5's CAS+AC layer carries inputs and outputs. Validation against a real Buildbarn (vs the in-process fake) still pending. |
+| M3c | ✅ | Orchestrator-driven source provisioning for `kind: local` and `kind: git`. Other kinds error out and document the `--sources-base` workaround. | 0.5 | `make e2e-orchestrate` runs without `--sources-base` against a fixture using kind:git; cache hits on repeated runs. |
+| M3d | ⏳ | BuildStream-style source CAS via Remote Asset API. Source URI qualifiers map to Directory digests in the same CAS the action inputs live in; sources become input-root references by digest, not by tree-content hash. Replaces M3c's orchestrator-side git clones with a `bst source push/pull`-style flow. | 1 | An FDSDK subset converts with `--source-asset=grpc://raa-endpoint`; source blobs are deduplicated in CAS across runs and machines; orchestrator never shells out to `git`. |
+| M4 | ✅ | Tiered failures + regression detection + fingerprint registry — see `docs/m4-plan.md` | 1.5 | Deliberate breakage produces structured regression report |
+| M5 | ✅ | Bazel envelope + `converted_pkg_repo` + real REAPI Action/ActionCache substrate (shared cache across converter instances) — see `docs/m5-plan.md` | 2 | Two independent orchestrators share cache hits via REAPI ActionCache; downstream `bazel build @libdrm//:libdrm` succeeds against the converted FDSDK subset |
+| M6+ | ⏳ | Debian-scale bulk pass | open | Same binaries; only front-end (BuildStream YAML → Debian metadata) changes |
 
 ## Verification
 
