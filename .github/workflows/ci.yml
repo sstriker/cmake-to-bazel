@@ -46,6 +46,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap
+          # Ubuntu 24.04 ships an AppArmor profile that restricts unprivileged
+          # user namespaces by default; bwrap needs them to set up uid maps.
+          # Disable the restriction at the kernel level for the runner.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           cmake --version | head -1
           ninja --version
           bwrap --version 2>&1 | head -1
