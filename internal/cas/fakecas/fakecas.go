@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	raa "github.com/bazelbuild/remote-apis/build/bazel/remote/asset/v1"
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"google.golang.org/genproto/googleapis/bytestream"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
@@ -230,7 +231,8 @@ func (e *Endpoint) Close() { e.teardown() }
 type Option func(*startConfig)
 
 type startConfig struct {
-	exec *ExecutionServer
+	exec  *ExecutionServer
+	asset *AssetServer
 }
 
 // WithExecution registers an ExecutionServer alongside the standard
@@ -238,6 +240,13 @@ type startConfig struct {
 // execution path must enable this.
 func WithExecution(exec *ExecutionServer) Option {
 	return func(c *startConfig) { c.exec = exec }
+}
+
+// WithAsset registers an AssetServer (Fetch + Push) alongside the
+// standard services. Tests that exercise the M3d source-CAS resolver
+// must enable this.
+func WithAsset(asset *AssetServer) Option {
+	return func(c *startConfig) { c.asset = asset }
 }
 
 // Start spins up an in-process gRPC server backed by srv on a random
@@ -255,6 +264,10 @@ func Start(t testing.TB, srv *Server, opts ...Option) *Endpoint {
 	bytestream.RegisterByteStreamServer(gs, srv)
 	if cfg.exec != nil {
 		repb.RegisterExecutionServer(gs, cfg.exec)
+	}
+	if cfg.asset != nil {
+		raa.RegisterFetchServer(gs, cfg.asset)
+		raa.RegisterPushServer(gs, cfg.asset)
 	}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")

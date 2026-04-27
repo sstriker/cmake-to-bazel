@@ -53,6 +53,8 @@ func main() {
 		remoteExec      = fs.String("execute", "", "remote execution endpoint: grpc://host:port | grpcs://host:port. when set, conversions submit a REAPI Action instead of forking convert-element locally")
 		remoteExecInst  = fs.String("execute-instance", "", "REAPI Execute instance_name; defaults to --cas-instance")
 		concurrency     = fs.Int("concurrency", 0, "max in-flight per-element conversions (<=0 = NumCPU). Topology is preserved; deps still land before dependents.")
+		sourceCAS       = fs.String("source-cas", "", "REAPI Remote Asset endpoint for kind:remote-asset sources (e.g. grpc://host:port). Reuses --cas-* TLS / token plumbing.")
+		sourceCASInst   = fs.String("source-cas-instance", "", "Remote Asset instance_name; defaults to --cas-instance")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -91,6 +93,29 @@ func main() {
 		defer closer()
 	}
 
+	var sourceAsset *cas.RemoteAsset
+	if *sourceCAS != "" {
+		instance := *sourceCASInst
+		if instance == "" {
+			instance = *casInstance
+		}
+		ra, err := cas.NewRemoteAsset(ctx, cas.RemoteAssetConfig{
+			Endpoint:     *sourceCAS,
+			InstanceName: instance,
+			Insecure:     strings.HasPrefix(*sourceCAS, "grpc://"),
+			TLSCertFile:  *casCert,
+			TLSKeyFile:   *casKey,
+			CAFile:       *casCA,
+			TokenFile:    *casToken,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "orchestrate: source-cas: %v\n", err)
+			os.Exit(1)
+		}
+		defer ra.Close()
+		sourceAsset = ra
+	}
+
 	var executor reapi.Executor
 	if *remoteExec != "" {
 		instance := *remoteExecInst
@@ -119,6 +144,7 @@ func main() {
 		Store:           store,
 		Executor:        executor,
 		Concurrency:     *concurrency,
+		SourceAsset:     sourceAsset,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
