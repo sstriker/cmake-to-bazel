@@ -123,7 +123,7 @@ func (t *Tree) packSubtree(absPath string) (*repb.Directory, *Digest, error) {
 		}
 	}
 
-	sortDirectory(dir)
+	SortDirectory(dir)
 
 	digest, body, err := DigestProto(dir)
 	if err != nil {
@@ -134,9 +134,11 @@ func (t *Tree) packSubtree(absPath string) (*repb.Directory, *Digest, error) {
 	return dir, digest, nil
 }
 
-// sortDirectory sorts each child slice by name. REAPI requires this for
-// canonical encoding.
-func sortDirectory(d *repb.Directory) {
+// SortDirectory sorts each child slice by name. REAPI requires this for
+// canonical encoding; callers building Directory protos by hand (e.g.
+// composing an input root from several subtrees) MUST call this before
+// digesting.
+func SortDirectory(d *repb.Directory) {
 	sort.Slice(d.Files, func(i, j int) bool { return d.Files[i].Name < d.Files[j].Name })
 	sort.Slice(d.Directories, func(i, j int) bool { return d.Directories[i].Name < d.Directories[j].Name })
 	sort.Slice(d.Symlinks, func(i, j int) bool { return d.Symlinks[i].Name < d.Symlinks[j].Name })
