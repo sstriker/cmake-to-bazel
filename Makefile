@@ -1,11 +1,16 @@
-.PHONY: all converter test test-e2e e2e-hello-world e2e-libdrm \
-        update-golden record-fixtures lint vet fmt check-tools clean
+.PHONY: all converter test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
+        fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
 # enforced softly here for dev-loop visibility.
 CMAKE_VERSION  ?= 3.28.3
 NINJA_VERSION  ?= 1.11.1
 BWRAP_VERSION  ?= 0.8.0
+
+# M2 acceptance-package version. Bumping requires a re-run of
+# TestE2E_Fmt_Converts since the *_test count assertion has a floor.
+FMT_VERSION    ?= 11.0.2
+FMT_DIR        ?= /tmp/fmt
 
 GO        ?= go
 GOFLAGS   ?=
@@ -35,6 +40,17 @@ e2e-hello-world: check-tools converter
 
 e2e-libdrm: check-tools converter
 	$(GO) test -tags=e2e -run TestE2E_Libdrm ./converter/...
+
+e2e-fmt: check-tools converter fetch-fmt
+	$(GO) test -tags=e2e -run TestE2E_Fmt ./converter/...
+
+# Fetch the M2 acceptance package out-of-band. Idempotent.
+fetch-fmt:
+	@if [ ! -d "$(FMT_DIR)" ]; then \
+		git clone --depth 1 --branch $(FMT_VERSION) https://github.com/fmtlib/fmt.git "$(FMT_DIR)"; \
+	else \
+		echo "fmt already at $(FMT_DIR); rm -rf to refetch"; \
+	fi
 
 # Regenerate golden files. Re-runs the pipeline, overwrites *.golden.
 update-golden:
