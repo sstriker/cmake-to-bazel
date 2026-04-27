@@ -55,6 +55,13 @@ func stubConverter() int {
 	if mode == "" {
 		mode = "success"
 	}
+	// Per-element override: ORCHESTRATOR_STUB_MODE_<sanitized-element-name>
+	// where the element name is uppercased and non-[A-Z0-9_] chars are
+	// replaced with _. Lets one Run invocation drive different
+	// elements to different outcomes — needed for dep-failed tests.
+	if perElem := os.Getenv("ORCHESTRATOR_STUB_MODE_" + sanitizeStubKey(*srcRoot)); perElem != "" {
+		mode = perElem
+	}
 	switch mode {
 	case "success":
 		body := fmt.Sprintf("# stub BUILD.bazel for %s\n", filepath.Base(*srcRoot))
@@ -148,7 +155,13 @@ func TestRun_StubSuccess(t *testing.T) {
 }
 
 // TestRun_StubTier1: stub fails Tier-1 for every element; orchestrator
-// records both and doesn't abort.
+// records all of them and doesn't abort.
+//
+// Dependents of failed elements get code="dep-failed" (M3d-era polish:
+// surfacing the root cause clearly instead of cascading
+// configure-failed entries that hide the actual problem). hello fails
+// configure-failed; uses-hello short-circuits with dep-failed pointing
+// at hello.
 func TestRun_StubTier1(t *testing.T) {
 	out := t.TempDir()
 	res := runOrchestrator(t, out, "tier1")
@@ -158,15 +171,25 @@ func TestRun_StubTier1(t *testing.T) {
 	if len(res.Failed) != 2 {
 		t.Fatalf("Failed = %v, want 2 entries", res.Failed)
 	}
+	got := map[string]string{}
 	for _, fr := range res.Failed {
-		if fr.Code != "configure-failed" || fr.Tier != 1 {
-			t.Errorf("Failed entry %+v", fr)
+		if fr.Tier != 1 {
+			t.Errorf("Tier = %d, want 1: %+v", fr.Tier, fr)
 		}
+		got[fr.Element] = fr.Code
+	}
+	if got["components/hello"] != "configure-failed" {
+		t.Errorf("hello.Code = %q, want configure-failed", got["components/hello"])
+	}
+	if got["components/uses-hello"] != "dep-failed" {
+		t.Errorf("uses-hello.Code = %q, want dep-failed", got["components/uses-hello"])
 	}
 
 	body := mustReadFile(t, filepath.Join(out, "manifest", "failures.json"))
-	if !strings.Contains(string(body), `"configure-failed"`) {
-		t.Errorf("failures.json missing code: %s", body)
+	for _, want := range []string{`"configure-failed"`, `"dep-failed"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("failures.json missing %s\n%s", want, body)
+		}
 	}
 }
 
@@ -389,3 +412,38 @@ func (l testLog) Write(p []byte) (int, error) {
 // when the stub binary detection ever needs it; vet is happy with the
 // blank import.
 var _ = runtime.GOOS
+
+// sanitizeStubKey turns a path into the alphanumeric-uppercase form
+// used by ORCHESTRATOR_STUB_MODE_<...> env vars. The element name lives
+// in --source-root's last segments; for a path like
+//   /tmp/.../shadow/components/hello
+// we use "components/hello" (the trailing two segments) and emit
+// "COMPONENTS_HELLO".
+//
+// The orchestrator builds shadow trees at <out>/shadow/<element-name>/
+// so element-name is always the path relative to that root. We can't
+// know <out> here, so we conservatively use the last two segments
+// joined; a single-segment element name (rare) falls back to that
+// segment alone.
+func sanitizeStubKey(srcRoot string) string {
+	parts := strings.Split(filepath.ToSlash(srcRoot), "/")
+	// Take the last two segments to form "components/hello".
+	tail := parts
+	if len(parts) >= 2 {
+		tail = parts[len(parts)-2:]
+	}
+	joined := strings.Join(tail, "/")
+	var b strings.Builder
+	for i := 0; i < len(joined); i++ {
+		c := joined[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			b.WriteByte(c - 'a' + 'A')
+		case c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}

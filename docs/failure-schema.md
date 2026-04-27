@@ -161,6 +161,24 @@ manifest, or stub it like `non_cmake_stubs/glibc/`.
 
 **Emission point:** `lower.lowerTarget` link-deps walk (M2).
 
+### `dep-failed` _(M3a; refined in M3d)_
+
+A transitive cmake dep of this element failed Tier-1; the
+orchestrator short-circuited the dependent's conversion to surface
+the root cause. The `message` field names the failing dep so
+operators can jump straight to it. The dependent's converter is not
+invoked; no shadow tree, no AC lookup happens.
+
+Without this short-circuit, dependents would proceed against an
+empty synth-prefix and produce a less helpful `configure-failed`
+("package <X> not found"), masking the actual broken element.
+
+**Operator action:** fix the named dep. Re-runs of the dependent
+auto-recover once the dep succeeds (its action-key fingerprint
+changes when the upstream output changes).
+
+**Emission point:** `runner.processElement` early-out (M3a).
+
 ## Stability rules
 
 1. **Append-only.** Once a code is in this list, it stays. New
