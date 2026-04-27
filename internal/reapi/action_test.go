@@ -123,10 +123,10 @@ func TestBuild_ArgvHasCanonicalPaths(t *testing.T) {
 	want := []string{
 		"bin/convert-element",
 		"--source-root", "source",
-		"--out-build", "out/BUILD.bazel",
-		"--out-bundle-dir", "out/cmake-config",
-		"--out-failure", "out/failure.json",
-		"--out-read-paths", "out/read_paths.json",
+		"--out-build", "BUILD.bazel",
+		"--out-bundle-dir", "cmake-config",
+		"--out-failure", "failure.json",
+		"--out-read-paths", "read_paths.json",
 		"--imports-manifest", "imports.json",
 		"--prefix-dir", "prefix",
 	}
@@ -143,7 +143,7 @@ func TestBuild_ArgvHasCanonicalPaths(t *testing.T) {
 func TestBuild_OutputPaths(t *testing.T) {
 	in := fixture(t, false, false)
 	a, _ := Build(in)
-	want := []string{"out/BUILD.bazel", "out/cmake-config", "out/failure.json", "out/read_paths.json"}
+	want := []string{"BUILD.bazel", "cmake-config", "failure.json", "read_paths.json"}
 	if len(a.OutputPaths) != len(want) {
 		t.Fatalf("output_paths len: got %d want %d", len(a.OutputPaths), len(want))
 	}
