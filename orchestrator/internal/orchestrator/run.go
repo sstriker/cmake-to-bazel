@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/internal/shadow"
+	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/actionkey"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/allowlistreg"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/exports"
@@ -66,8 +68,10 @@ type Options struct {
 
 // Result summarizes a Run.
 type Result struct {
-	Converted []string
-	Failed    []FailureRecord
+	Converted   []string
+	Failed      []FailureRecord
+	CacheHits   []string // elements whose outputs came from the action cache
+	CacheMisses []string // elements that ran convert-element this pass
 }
 
 // FailureRecord is the per-element entry the orchestrator collects for the
@@ -99,7 +103,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if conv == "" {
 		conv = "convert-element"
 	}
-	if _, err := exec.LookPath(conv); err != nil {
+	convAbs, err := exec.LookPath(conv)
+	if err != nil {
 		return nil, fmt.Errorf("orchestrator: converter binary %q not on PATH: %w", conv, err)
 	}
 
@@ -136,6 +141,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	registry := allowlistreg.New(registryRoot)
+	actionsCacheRoot := filepath.Join(opts.Out, "cache", "actions")
+	if err := os.MkdirAll(actionsCacheRoot, 0o755); err != nil {
+		return nil, err
+	}
 
 	res := &Result{}
 	for _, name := range cmakeOrder {
@@ -169,9 +178,42 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("element %s: imports manifest: %w", name, err)
 		}
 
-		fr, err := convertOne(ctx, conv, name, shadowSrc, importsPath, prefixPath, opts)
+		// Action-key cache: if the same (shadow, imports, prefix,
+		// converter) combination has produced outputs before, reuse them
+		// instead of running convert-element again. The plumbing that
+		// follows must run regardless (depRecords/registry get updated
+		// either way) so cache-hit and cache-miss paths converge.
+		key, err := actionkey.Compute(actionkey.Inputs{
+			ShadowDir:       shadowSrc,
+			ImportsManifest: importsPath,
+			PrefixDir:       prefixPath,
+			ConverterBin:    convAbs,
+		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("element %s: action key: %w", name, err)
+		}
+		cachedDir := filepath.Join(actionsCacheRoot, key)
+		elemOut := filepath.Join(opts.Out, "elements", name)
+		hit, err := tryCacheHit(cachedDir, elemOut)
+		if err != nil {
+			return nil, fmt.Errorf("element %s: cache lookup: %w", name, err)
+		}
+
+		var fr *FailureRecord
+		if hit {
+			fmt.Fprintf(logOf(opts), "    cache hit %s\n", key[:12])
+			res.CacheHits = append(res.CacheHits, name)
+		} else {
+			fr, err = convertOne(ctx, conv, name, shadowSrc, importsPath, prefixPath, opts)
+			if err != nil {
+				return nil, err
+			}
+			if fr == nil {
+				if err := populateCache(cachedDir, elemOut); err != nil {
+					return nil, fmt.Errorf("element %s: populate cache: %w", name, err)
+				}
+				res.CacheMisses = append(res.CacheMisses, name)
+			}
 		}
 		if fr != nil {
 			res.Failed = append(res.Failed, *fr)
@@ -478,6 +520,105 @@ func buildShadowForElement(shadowRoot, name, realSrc string, m shadow.Matcher) (
 		return "", err
 	}
 	return dst, nil
+}
+
+// tryCacheHit returns true if cachedDir exists and its contents have been
+// successfully copied to dst (which is created/cleaned). Missing cachedDir
+// is the cache-miss signal — returns (false, nil).
+func tryCacheHit(cachedDir, dst string) (bool, error) {
+	info, err := os.Stat(cachedDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("cache entry %s is not a directory", cachedDir)
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return false, err
+	}
+	if err := copyTree(cachedDir, dst); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// populateCache writes srcDir's contents into cacheDir atomically (via a
+// sibling tmp + rename) so a crashed populate doesn't leave a half-cached
+// entry that future runs would treat as a hit.
+func populateCache(cacheDir, srcDir string) error {
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(cacheDir), "incoming-*")
+	if err != nil {
+		return err
+	}
+	if err := copyTree(srcDir, tmp); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
+	// If something already exists at cacheDir (race with a parallel
+	// orchestrator instance), keep theirs; remove ours and treat as hit.
+	if _, err := os.Stat(cacheDir); err == nil {
+		_ = os.RemoveAll(tmp)
+		return nil
+	}
+	return os.Rename(tmp, cacheDir)
+}
+
+// copyTree mirrors src into dst, regular files only. Symlinks are
+// recreated. Other special file types are not part of the converter's
+// output set so we don't model them.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		out := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			t, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(t, out)
+		case d.IsDir():
+			return os.MkdirAll(out, info.Mode().Perm())
+		case info.Mode().IsRegular():
+			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+				return err
+			}
+			in, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+			outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(outf, in); err != nil {
+				_ = outf.Close()
+				return err
+			}
+			return outf.Close()
+		}
+		return nil
+	})
 }
 
 // loadReadPaths reads the converter-emitted read_paths.json into a string
