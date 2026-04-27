@@ -150,7 +150,8 @@ structure as small pure functions over IR.
 | M | Goal | Wks | Acceptance |
 |---|---|---|---|
 | M2 | build.ninja parser; recovered codegen tagged for distro-wide audit; multi-element graph | 2 | Codegen-using element converts; every recovered genrule carries a `cmake-codegen` tag (with driver and recovery-mode sub-tags), every consuming target carries `has-cmake-codegen`; documented in `docs/codegen-tags.md` with stability promise; Bazel-vs-BuildStream parity check on a real package |
-| M3 | Orchestrator + REAPI submission + shadow trees | 2 | All `kind: cmake` FDSDK elements convert end-to-end; determinism test |
+| M3a | Local orchestrator: BuildStream YAML reader, per-element subprocess loop, shadow + imports + synth-prefix + allowlist registry + action-key cache | 1.5 | Every FDSDK kind:cmake element converts via `os/exec`; determinism test passes on three fresh tmpdirs |
+| M3b | REAPI submission layer wrapping the M3a orchestrator | 1 | Same outputs as M3a but actions execute remotely against Buildbarn; CAS hit-rate measurable |
 | M4 | Tiered failures + regression detection + fingerprint registry | 1.5 | Deliberate breakage produces structured regression report |
 | M5 | Bazel envelope + `converted_pkg_repo` + CAS HTTP proxy | 1 | Downstream Bazel build consuming converted FDSDK element succeeds |
 | M6+ | Debian-scale bulk pass | open | Same binaries; only front-end changes |
