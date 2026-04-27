@@ -14,8 +14,18 @@ its **structured output** — File API JSON (`.cmake/api/v1/reply/`) plus parsed
 that drives this decision.
 
 This plan covers **M1 only**: a standalone `convert-element` binary that
-converts a single CMake element (libdrm) end-to-end. M2–M6 extend this into a
+converts a single CMake element end-to-end. M2–M6 extend this into a
 Buildbarn-orchestrated multi-element converter; sketched at the bottom.
+
+> **Note (post-M5):** The original draft named libdrm as the M1
+> acceptance gate, on the mistaken assumption that libdrm is a cmake
+> project. libdrm is actually meson-based, so the libdrm-specific
+> hooks (`make e2e-libdrm`, `testdata/fileapi/libdrm-snapshot/`,
+> `non_cmake_stubs/glibc/`) never landed. M2's fmt e2e
+> (`make e2e-fmt`) became the real-world cmake acceptance package
+> instead — it exercises the same surfaces (find_package consumer,
+> shadow tree, codegen recovery for fmt's tests) that libdrm was
+> meant to cover.
 
 ## Key decisions
 
