@@ -55,6 +55,7 @@ func main() {
 		concurrency     = fs.Int("concurrency", 0, "max in-flight per-element conversions (<=0 = NumCPU). Topology is preserved; deps still land before dependents.")
 		sourceCAS       = fs.String("source-cas", "", "REAPI Remote Asset endpoint for kind:remote-asset sources (e.g. grpc://host:port). Reuses --cas-* TLS / token plumbing.")
 		sourceCASInst   = fs.String("source-cas-instance", "", "Remote Asset instance_name; defaults to --cas-instance")
+		platformFlag    = fs.String("platform", "", "Action.platform overrides as comma-separated name=value (e.g. cmake-version=3.30.0,ninja-version=1.12.0). Overrides built-in defaults; the orchestrator MUST agree with workers on platform values to share cache hits.")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -135,6 +136,12 @@ func main() {
 		executor = ex
 	}
 
+	platform, err := parsePlatform(*platformFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "orchestrate: --platform: %v\n", err)
+		os.Exit(64)
+	}
+
 	res, err := orchestrator.Run(ctx, orchestrator.Options{
 		Project:         proj,
 		Graph:           g,
@@ -145,6 +152,7 @@ func main() {
 		Executor:        executor,
 		Concurrency:     *concurrency,
 		SourceAsset:     sourceAsset,
+		Platform:        platform,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
@@ -226,6 +234,32 @@ func buildExecuteTLS(opts casOpts) (*tls.Config, error) {
 		tc.Certificates = []tls.Certificate{cert}
 	}
 	return tc, nil
+}
+
+// parsePlatform parses a --platform "name=value,name=value" string
+// into a slice of PlatformProperty, suitable for Options.Platform. An
+// empty string returns nil so the orchestrator falls back to
+// defaultPlatform. Whitespace around names and values is trimmed.
+func parsePlatform(raw string) ([]reapi.PlatformProperty, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	pairs := strings.Split(raw, ",")
+	out := make([]reapi.PlatformProperty, 0, len(pairs))
+	for _, pair := range pairs {
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("expected name=value, got %q", pair)
+		}
+		name := strings.TrimSpace(kv[0])
+		value := strings.TrimSpace(kv[1])
+		if name == "" {
+			return nil, fmt.Errorf("empty platform property name in %q", pair)
+		}
+		out = append(out, reapi.PlatformProperty{Name: name, Value: value})
+	}
+	return out, nil
 }
 
 // openStore parses the --cas flag and returns a Store ready for the
