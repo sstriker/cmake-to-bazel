@@ -114,10 +114,13 @@ func TestRun_StubSuccess(t *testing.T) {
 		t.Errorf("Failed = %v, want []", res.Failed)
 	}
 
-	// Per-element artifacts staged for both.
+	// Per-element artifacts staged for both. The stub names its bundle
+	// after the source root's basename — which is now the shadow tree
+	// path the orchestrator builds (last segment matches the element
+	// name's last segment).
 	for _, want := range []string{
 		"elements/components/hello/BUILD.bazel",
-		"elements/components/hello/cmake-config/hello-worldConfig.cmake",
+		"elements/components/hello/cmake-config/helloConfig.cmake",
 		"elements/components/hello/read_paths.json",
 		"elements/components/uses-hello/BUILD.bazel",
 		"elements/components/uses-hello/cmake-config/uses-helloConfig.cmake",
@@ -194,7 +197,9 @@ func TestRun_ImportsManifestForDownstream(t *testing.T) {
 
 	// hello converts first; its imports manifest should be empty since
 	// `base` (its only dep) is kind:manual, not in the export registry.
-	helloRec := mustReadFile(t, filepath.Join(rec, "hello-world.imports.txt"))
+	// The stub records to <basename>.imports.txt where basename is the
+	// shadow tree's last path segment (= element name's last segment).
+	helloRec := mustReadFile(t, filepath.Join(rec, "hello.imports.txt"))
 	if len(helloRec) != 0 {
 		t.Errorf("hello got --imports-manifest=%q, want empty (no cmake deps)", helloRec)
 	}
@@ -208,8 +213,8 @@ func TestRun_ImportsManifestForDownstream(t *testing.T) {
 	for _, want := range []string{
 		`"version": 1`,
 		`"name": "elem_components_hello"`,
-		`"cmake_target": "hello-world::hello-world"`,
-		`"bazel_label": "@elem_components_hello//:hello-world"`,
+		`"cmake_target": "hello::hello"`,
+		`"bazel_label": "@elem_components_hello//:hello"`,
 	} {
 		if !strings.Contains(string(importsBody), want) {
 			t.Errorf("imports.json missing %q\n%s", want, importsBody)

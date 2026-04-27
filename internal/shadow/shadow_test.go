@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sstriker/cmake-to-bazel/converter/internal/shadow"
+	"github.com/sstriker/cmake-to-bazel/internal/shadow"
 )
 
 func TestDefaultAllowlist(t *testing.T) {
@@ -40,7 +40,7 @@ func TestDefaultAllowlist(t *testing.T) {
 }
 
 func TestBuild_HelloWorld(t *testing.T) {
-	src, err := filepath.Abs("../../testdata/sample-projects/hello-world")
+	src, err := filepath.Abs("../../converter/testdata/sample-projects/hello-world")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestBuild_HelloWorld(t *testing.T) {
 }
 
 func TestBuild_RefusesExistingDst(t *testing.T) {
-	src, err := filepath.Abs("../../testdata/sample-projects/hello-world")
+	src, err := filepath.Abs("../../converter/testdata/sample-projects/hello-world")
 	if err != nil {
 		t.Fatal(err)
 	}
