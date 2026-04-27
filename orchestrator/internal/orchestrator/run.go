@@ -341,6 +341,22 @@ func (r *runner) driveElements(ctx context.Context, cmakeOrder []string) error {
 // processElement runs the full per-element pipeline. Returns nil on
 // success or Tier-1 (failure recorded in r.res); error on Tier-2/3.
 func (r *runner) processElement(ctx context.Context, name string) error {
+	// Short-circuit dependents of failed elements with a synthetic
+	// Tier-1: trying to convert them would fail at find_package
+	// (synth-prefix is missing the failed dep's bundle) with a less
+	// informative configure-failed code. dep-failed surfaces the root
+	// cause cleanly.
+	if failedDep, ok := r.firstFailedDep(name); ok {
+		r.appendFailure(FailureRecord{
+			Element: name,
+			Tier:    1,
+			Code:    "dep-failed",
+			Message: fmt.Sprintf("transitive cmake dep %s failed Tier-1; skipped to surface root cause", failedDep),
+		})
+		fmt.Fprintf(logOf(r.opts), "==> %s\n    skipped: dep %s failed\n", name, failedDep)
+		return nil
+	}
+
 	el := r.opts.Project.Elements[name]
 	realSrcRoot, err := r.resolver.Resolve(ctx, el)
 	if err != nil {
@@ -476,6 +492,29 @@ func (r *runner) appendFailure(fr FailureRecord) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.res.Failed = append(r.res.Failed, fr)
+}
+
+// firstFailedDep walks name's transitive cmake-deps closure and returns
+// the first dep already recorded in r.res.Failed. Concurrency-safe;
+// reads r.res.Failed under the mutex.
+//
+// Topological scheduling guarantees deps complete before dependents,
+// so this snapshot is always consistent: a missing failed-record means
+// the dep succeeded (or was non-cmake), never "still in flight".
+func (r *runner) firstFailedDep(name string) (string, bool) {
+	closure := transitiveDeps(r.opts.Graph, name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	failed := make(map[string]bool, len(r.res.Failed))
+	for _, fr := range r.res.Failed {
+		failed[fr.Element] = true
+	}
+	for _, d := range closure {
+		if failed[d] {
+			return d, true
+		}
+	}
+	return "", false
 }
 
 // convertOne runs the converter against one element. Returns (nil, nil) on
