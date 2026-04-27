@@ -9,7 +9,7 @@ on:
 jobs:
   unit:
     name: Build + unit tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +32,7 @@ jobs:
 
   e2e:
     name: End-to-end (cmake + bwrap)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: unit
     steps:
       - uses: actions/checkout@v4
@@ -42,13 +42,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install pinned external tools
+      - name: Install bwrap (cmake/ninja are pre-installed on ubuntu-24.04)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake=3.28.* \
-            ninja-build \
-            bubblewrap
+          sudo apt-get install -y --no-install-recommends bubblewrap
           cmake --version | head -1
           ninja --version
           bwrap --version 2>&1 | head -1
