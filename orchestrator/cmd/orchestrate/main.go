@@ -17,12 +17,19 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/sstriker/cmake-to-bazel/internal/cas"
+	"github.com/sstriker/cmake-to-bazel/internal/reapi"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/orchestrator"
 )
@@ -43,6 +50,8 @@ func main() {
 		casKey          = fs.String("cas-tls-key", "", "client private key file for mTLS (gRPC mode only)")
 		casCA           = fs.String("cas-ca", "", "trust-root CA bundle (gRPC mode only)")
 		casToken        = fs.String("cas-token-file", "", "file containing a bearer token (gRPC mode only)")
+		remoteExec      = fs.String("execute", "", "remote execution endpoint: grpc://host:port | grpcs://host:port. when set, conversions submit a REAPI Action instead of forking convert-element locally")
+		remoteExecInst  = fs.String("execute-instance", "", "REAPI Execute instance_name; defaults to --cas-instance")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -81,6 +90,25 @@ func main() {
 		defer closer()
 	}
 
+	var executor reapi.Executor
+	if *remoteExec != "" {
+		instance := *remoteExecInst
+		if instance == "" {
+			instance = *casInstance
+		}
+		ex, exCloser, err := openExecutor(*remoteExec, instance, casOpts{
+			TLSCertFile: *casCert,
+			TLSKeyFile:  *casKey,
+			CAFile:      *casCA,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "orchestrate: execute: %v\n", err)
+			os.Exit(1)
+		}
+		defer exCloser()
+		executor = ex
+	}
+
 	res, err := orchestrator.Run(ctx, orchestrator.Options{
 		Project:         proj,
 		Graph:           g,
@@ -88,6 +116,7 @@ func main() {
 		SourcesBase:     *sourcesBase,
 		ConverterBinary: *converterBinary,
 		Store:           store,
+		Executor:        executor,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
@@ -106,6 +135,69 @@ type casOpts struct {
 	TLSKeyFile  string
 	CAFile      string
 	TokenFile   string
+}
+
+// openExecutor parses --execute and returns a REAPI Executor wired
+// to its own gRPC connection. The returned closer must be called when
+// orchestration is done. Returns an error on bad endpoint scheme or
+// dial failure.
+func openExecutor(endpoint, instance string, opts casOpts) (reapi.Executor, func(), error) {
+	addr, scheme := splitEndpoint(endpoint)
+	var dialOpts []grpc.DialOption
+	switch scheme {
+	case "grpc":
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	case "grpcs":
+		tc, err := buildExecuteTLS(opts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("execute tls: %w", err)
+		}
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
+	default:
+		return nil, nil, fmt.Errorf("--execute: unknown scheme %q (want grpc:// or grpcs://)", endpoint)
+	}
+	conn, err := grpc.NewClient(addr, dialOpts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execute dial %s: %w", addr, err)
+	}
+	return reapi.NewGRPCExecutor(conn, instance), func() { _ = conn.Close() }, nil
+}
+
+func splitEndpoint(raw string) (string, string) {
+	switch {
+	case strings.HasPrefix(raw, "grpc://"):
+		return strings.TrimPrefix(raw, "grpc://"), "grpc"
+	case strings.HasPrefix(raw, "grpcs://"):
+		return strings.TrimPrefix(raw, "grpcs://"), "grpcs"
+	default:
+		return raw, ""
+	}
+}
+
+// buildExecuteTLS mirrors cas.GRPCStore's TLS plumbing for the
+// Executor's separate connection. Reading the same flags twice keeps
+// the surface symmetric: same cert/key/ca apply to both transports.
+func buildExecuteTLS(opts casOpts) (*tls.Config, error) {
+	tc := &tls.Config{}
+	if opts.CAFile != "" {
+		pem, err := os.ReadFile(opts.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("ca %s: no certs parsed", opts.CAFile)
+		}
+		tc.RootCAs = pool
+	}
+	if opts.TLSCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(opts.TLSCertFile, opts.TLSKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		tc.Certificates = []tls.Certificate{cert}
+	}
+	return tc, nil
 }
 
 // openStore parses the --cas flag and returns a Store ready for the
