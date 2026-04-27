@@ -29,7 +29,9 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
+	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/exports"
 )
 
 // Options configures one Run call.
@@ -105,6 +107,17 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
+	// depExports accumulates the exports from each successfully-converted
+	// element. Before invoking convert-element on B, we write a per-
+	// element imports.json containing the exports of B's dep closure
+	// (transitive). The converter consumes it via --imports-manifest;
+	// see internal/manifest/imports.go for the schema.
+	depExports := map[string]*manifest.Element{}
+	importsRoot := filepath.Join(opts.Out, "imports")
+	if err := os.MkdirAll(importsRoot, 0o755); err != nil {
+		return nil, err
+	}
+
 	res := &Result{}
 	for _, name := range cmakeOrder {
 		el := opts.Project.Elements[name]
@@ -114,7 +127,12 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		}
 		fmt.Fprintf(logOf(opts), "==> %s\n", name)
 
-		fr, err := convertOne(ctx, conv, name, srcRoot, opts)
+		importsPath, err := writeImportsForElement(importsRoot, name, opts.Graph, depExports)
+		if err != nil {
+			return nil, fmt.Errorf("element %s: imports manifest: %w", name, err)
+		}
+
+		fr, err := convertOne(ctx, conv, name, srcRoot, importsPath, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -123,6 +141,14 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			continue
 		}
 		res.Converted = append(res.Converted, name)
+
+		// Pick up this element's exports for downstream consumers.
+		bundleDir := filepath.Join(opts.Out, "elements", name, "cmake-config")
+		raw, err := exports.FromBundle(bundleDir)
+		if err != nil {
+			return nil, fmt.Errorf("element %s: extract exports: %w", name, err)
+		}
+		depExports[name] = exports.AsElement(name, raw)
 	}
 
 	if err := writeManifest(opts.Out, res); err != nil {
@@ -133,7 +159,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 // convertOne runs the converter against one element. Returns (nil, nil) on
 // success, (FailureRecord, nil) on Tier-1, (nil, err) on Tier-2/3.
-func convertOne(ctx context.Context, conv, name, srcRoot string, opts Options) (*FailureRecord, error) {
+func convertOne(ctx context.Context, conv, name, srcRoot, importsPath string, opts Options) (*FailureRecord, error) {
 	elemOut := filepath.Join(opts.Out, "elements", name)
 	if err := os.MkdirAll(elemOut, 0o755); err != nil {
 		return nil, err
@@ -145,6 +171,9 @@ func convertOne(ctx context.Context, conv, name, srcRoot string, opts Options) (
 		"--out-bundle-dir", filepath.Join(elemOut, "cmake-config"),
 		"--out-failure", filepath.Join(elemOut, "failure.json"),
 		"--out-read-paths", filepath.Join(elemOut, "read_paths.json"),
+	}
+	if importsPath != "" {
+		args = append(args, "--imports-manifest", importsPath)
 	}
 
 	cmd := exec.CommandContext(ctx, conv, args...)
@@ -271,4 +300,62 @@ func logOf(opts Options) io.Writer {
 		return opts.Log
 	}
 	return os.Stderr
+}
+
+// writeImportsForElement writes a per-element imports.json containing the
+// exports of every element transitively reachable from `name` via build/all
+// deps. Skipped (non-cmake or not-yet-converted) deps contribute no
+// exports — they're tracked through the graph but not in the dep-export
+// registry.
+//
+// Returns the host path to the written file, or "" if there are no exports
+// to declare (avoids passing --imports-manifest with an empty document
+// which the converter accepts but flags as wasteful).
+func writeImportsForElement(importsRoot, name string, g *element.Graph, depExports map[string]*manifest.Element) (string, error) {
+	closure := transitiveDeps(g, name)
+	var elems []*manifest.Element
+	for _, d := range closure {
+		if me, ok := depExports[d]; ok && len(me.Exports) > 0 {
+			elems = append(elems, me)
+		}
+	}
+	if len(elems) == 0 {
+		return "", nil
+	}
+	sort.Slice(elems, func(i, j int) bool { return elems[i].Name < elems[j].Name })
+
+	doc := &manifest.Imports{Version: 1, Elements: elems}
+	out := filepath.Join(importsRoot, filepath.FromSlash(name)+".json")
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return "", err
+	}
+	body, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(out, append(body, '\n'), 0o644); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// transitiveDeps walks the graph from `name` collecting every reachable
+// dep in dependency-first order (deps before dependents). Idempotent under
+// repeated calls; returns deduplicated names.
+func transitiveDeps(g *element.Graph, name string) []string {
+	seen := map[string]bool{}
+	var order []string
+	var walk func(n string)
+	walk = func(n string) {
+		for _, d := range g.Edges[n] {
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			walk(d)
+			order = append(order, d)
+		}
+	}
+	walk(name)
+	return order
 }

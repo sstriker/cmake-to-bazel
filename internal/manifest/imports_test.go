@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sstriker/cmake-to-bazel/converter/internal/manifest"
+	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 )
 
 func TestLoad_HandwrittenManifest(t *testing.T) {

@@ -23,9 +23,9 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/lower"
-	"github.com/sstriker/cmake-to-bazel/converter/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/shadow"
+	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 )
 
 func main() {
