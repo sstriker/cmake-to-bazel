@@ -3,6 +3,7 @@ package reapi
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +166,110 @@ func TestBuild_NoTimeoutLeavesActionUnset(t *testing.T) {
 	}
 	if a.Action.Timeout != nil {
 		t.Errorf("Action.Timeout should be unset when Inputs.Timeout is zero, got %v", a.Action.Timeout.AsDuration())
+	}
+}
+
+// TestBuild_ToolchainCMakeFile_GraftsIntoInputRoot: when set, the
+// file lands at toolchain.cmake in the input root and argv passes
+// --toolchain-cmake-file referencing that path. Two builds with
+// the same toolchain file content produce identical Action digests
+// (host path independence preserved).
+func TestBuild_ToolchainCMakeFile_GraftsIntoInputRoot(t *testing.T) {
+	in := fixture(t, false, false)
+	tcDir := t.TempDir()
+	tcPath := filepath.Join(tcDir, "toolchain.cmake")
+	if err := os.WriteFile(tcPath, []byte("# fake toolchain file\n"), 0o644); err != nil {
+		t.Fatalf("write toolchain.cmake: %v", err)
+	}
+	in.ToolchainCMakeFile = tcPath
+
+	a, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Argv references the in-action path, not the host path.
+	argv := a.Command.Arguments
+	want := []string{"--toolchain-cmake-file", "toolchain.cmake"}
+	found := false
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == want[0] && argv[i+1] == want[1] {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("argv missing --toolchain-cmake-file toolchain.cmake; got %v", argv)
+	}
+	for _, arg := range argv {
+		if strings.Contains(arg, tcDir) {
+			t.Errorf("argv leaked host path %q: %v", tcDir, argv)
+		}
+	}
+
+	// Input root must reference the toolchain file as a top-level
+	// FileNode.
+	rootDir := a.InputRoot.Root
+	var foundFile bool
+	for _, f := range rootDir.Files {
+		if f.Name == "toolchain.cmake" {
+			foundFile = true
+			break
+		}
+	}
+	if !foundFile {
+		t.Errorf("input root has no toolchain.cmake FileNode; got %v", rootDir.Files)
+	}
+}
+
+// TestBuild_ToolchainCMakeFile_HostPathIndependence: same file
+// content under two different host directories produces identical
+// Action digests. The file's bytes (not its host location) drive
+// cache identity.
+func TestBuild_ToolchainCMakeFile_HostPathIndependence(t *testing.T) {
+	body := []byte("# stable content\n")
+
+	in1 := fixture(t, false, false)
+	p1 := filepath.Join(t.TempDir(), "toolchain.cmake")
+	if err := os.WriteFile(p1, body, 0o644); err != nil {
+		t.Fatalf("write 1: %v", err)
+	}
+	in1.ToolchainCMakeFile = p1
+
+	in2 := fixture(t, false, false)
+	p2 := filepath.Join(t.TempDir(), "elsewhere.cmake")
+	if err := os.WriteFile(p2, body, 0o644); err != nil {
+		t.Fatalf("write 2: %v", err)
+	}
+	in2.ToolchainCMakeFile = p2
+
+	a1, _ := Build(in1)
+	a2, _ := Build(in2)
+	if !cas.DigestEqual(a1.ActionDigest, a2.ActionDigest) {
+		t.Errorf("Action digests differ for same-content toolchain.cmake: %s vs %s",
+			cas.DigestString(a1.ActionDigest), cas.DigestString(a2.ActionDigest))
+	}
+}
+
+// TestBuild_ToolchainCMakeFile_ContentChangesDigest: editing the
+// toolchain file flips the Action digest, so the orchestrator's
+// cache invalidates correctly when the operator bumps a pin.
+func TestBuild_ToolchainCMakeFile_ContentChangesDigest(t *testing.T) {
+	in := fixture(t, false, false)
+	p := filepath.Join(t.TempDir(), "toolchain.cmake")
+	if err := os.WriteFile(p, []byte("v1"), 0o644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	in.ToolchainCMakeFile = p
+	before, _ := Build(in)
+
+	if err := os.WriteFile(p, []byte("v2"), 0o644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	after, _ := Build(in)
+
+	if cas.DigestEqual(before.ActionDigest, after.ActionDigest) {
+		t.Errorf("Action digest unchanged after toolchain.cmake content edit")
 	}
 }
 
