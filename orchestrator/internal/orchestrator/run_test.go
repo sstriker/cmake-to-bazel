@@ -222,6 +222,80 @@ func TestRun_ImportsManifestForDownstream(t *testing.T) {
 	}
 }
 
+// TestRun_ActionCache_HitsOnSecondRun: a second orchestrator invocation
+// against the same source tree + same converter binary reuses every
+// element's outputs from the action-key cache instead of re-running the
+// converter.
+func TestRun_ActionCache_HitsOnSecondRun(t *testing.T) {
+	out := t.TempDir()
+
+	first := runOrchestrator(t, out, "success")
+	if len(first.CacheHits) != 0 || len(first.CacheMisses) != 2 {
+		t.Errorf("first run: hits=%v misses=%v, want 0/2", first.CacheHits, first.CacheMisses)
+	}
+
+	// Re-run with the same env into the same out dir. Every element's
+	// inputs hash to the same key as before, so all hit cache.
+	second := runOrchestrator(t, out, "success")
+	if len(second.CacheMisses) != 0 || len(second.CacheHits) != 2 {
+		t.Errorf("second run: hits=%v misses=%v, want 2/0", second.CacheHits, second.CacheMisses)
+	}
+	want := []string{"components/hello", "components/uses-hello"}
+	if !sliceEqual(second.CacheHits, want) {
+		t.Errorf("CacheHits = %v, want %v", second.CacheHits, want)
+	}
+	if !sliceEqual(second.Converted, want) {
+		t.Errorf("Converted = %v, want %v", second.Converted, want)
+	}
+}
+
+// TestRun_ActionCache_MissOnSourceEdit: editing an allowlisted file
+// (CMakeLists.txt) shifts the shadow tree's hash and triggers a re-run.
+// (Editing a non-allowlisted .c keeps the shadow byte-stable and would
+// hit cache; that variant lives in step 7's determinism test where the
+// invariance is the headline claim.)
+func TestRun_ActionCache_MissOnSourceEdit(t *testing.T) {
+	out := t.TempDir()
+	_ = runOrchestrator(t, out, "success")
+
+	// Touch CMakeLists.txt to add a comment. The shadow tree mirrors it
+	// real-content so the hash flips.
+	cm := "../../testdata/fdsdk-subset/files/uses-hello/CMakeLists.txt"
+	abs, err := filepath.Abs(cm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(abs, orig, 0o644) })
+
+	bumped := append([]byte("# action-cache test bump\n"), orig...)
+	if err := os.WriteFile(abs, bumped, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second := runOrchestrator(t, out, "success")
+	// hello's shadow is unchanged -> cache hit.
+	// uses-hello's shadow CMakeLists changed -> cache miss.
+	if !sliceContains(second.CacheHits, "components/hello") {
+		t.Errorf("hello expected to cache-hit; got hits=%v misses=%v", second.CacheHits, second.CacheMisses)
+	}
+	if !sliceContains(second.CacheMisses, "components/uses-hello") {
+		t.Errorf("uses-hello expected to cache-miss after CMakeLists edit; got hits=%v misses=%v", second.CacheHits, second.CacheMisses)
+	}
+}
+
+func sliceContains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestRun_RejectsUnknownConverter: missing converter binary surfaces the
 // PATH lookup error before iterating.
 func TestRun_RejectsUnknownConverter(t *testing.T) {
