@@ -1,4 +1,4 @@
-.PHONY: all converter orchestrator diff history test test-e2e e2e-hello-world e2e-fmt \
+.PHONY: all converter orchestrator diff history bst-translate test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-buildbarn e2e-buildbarn-execute \
         buildbarn-up buildbarn-down \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
@@ -23,8 +23,9 @@ CONVERTER    := $(BIN_DIR)/convert-element
 ORCHESTRATOR := $(BIN_DIR)/orchestrate
 DIFF         := $(BIN_DIR)/orchestrate-diff
 HISTORY      := $(BIN_DIR)/orchestrate-history
+BST_TRANSLATE := $(BIN_DIR)/orchestrate-bst-translate
 
-all: converter orchestrator diff history
+all: converter orchestrator diff history bst-translate
 
 converter: $(CONVERTER)
 
@@ -33,6 +34,8 @@ orchestrator: $(ORCHESTRATOR)
 diff: $(DIFF)
 
 history: $(HISTORY)
+
+bst-translate: $(BST_TRANSLATE)
 
 $(CONVERTER):
 	@mkdir -p $(BIN_DIR)
@@ -49,6 +52,10 @@ $(DIFF):
 $(HISTORY):
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(HISTORY) ./orchestrator/cmd/orchestrate-history
+
+$(BST_TRANSLATE):
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(BST_TRANSLATE) ./orchestrator/cmd/orchestrate-bst-translate
 
 # Unit tests: pre-recorded File API fixtures, no cmake required.
 test:
