@@ -80,6 +80,15 @@ type Args struct {
 	// orchestrator (M3a step 4) builds the tree per-codebase from the
 	// converted-deps registry; standalone runs leave this empty.
 	PrefixDir string
+
+	// ToolchainCMakeFile, when non-empty, points at a CMake toolchain
+	// file (typically derive-toolchain's toolchain.cmake) that pre-
+	// populates the compiler-detection cache. cmakerun passes it via
+	// -DCMAKE_TOOLCHAIN_FILE so cmake skips the compiler-detection
+	// probe — a measurable per-conversion latency win at distro
+	// scale. The file is mounted into the sandbox alongside the
+	// source root.
+	ToolchainCMakeFile string
 }
 
 // Parse reads argv (without program name), populates Args, and prints usage
@@ -98,6 +107,7 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.OutTimings, "out-timings", "", "write JSON with per-phase wall-clock timings (cmake configure, translation, total)")
 	fs.BoolVar(&a.AllowCMakeVersionMismatch, "allow-cmake-version-mismatch", false, "let convert-element run with cmake older than the codemodel-v2 floor (local-dev escape hatch)")
 	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory mounted at /opt/prefix and added to CMAKE_PREFIX_PATH (out-of-tree synth-prefix; orchestrator-driven)")
+	fs.StringVar(&a.ToolchainCMakeFile, "toolchain-cmake-file", "", "CMake toolchain file (typically derive-toolchain's toolchain.cmake); skips per-conversion compiler probing")
 
 	if err := fs.Parse(argv); err != nil {
 		return a, ExitUsage

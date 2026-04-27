@@ -79,11 +79,12 @@ func run(a cli.Args) error {
 		defer os.RemoveAll(buildDir)
 
 		opts := cmakerun.Options{
-			HostSourceRoot: a.SourceRoot,
-			HostBuildDir:   buildDir,
-			HostPrefixDir:  a.PrefixDir,
-			Stdout:         os.Stderr, // route cmake noise to our stderr
-			Stderr:         os.Stderr,
+			HostSourceRoot:         a.SourceRoot,
+			HostBuildDir:           buildDir,
+			HostPrefixDir:          a.PrefixDir,
+			HostToolchainCMakeFile: a.ToolchainCMakeFile,
+			Stdout:                 os.Stderr, // route cmake noise to our stderr
+			Stderr:                 os.Stderr,
 		}
 		if a.OutReadPaths != "" {
 			opts.TracePath = "/build/trace.jsonl"
