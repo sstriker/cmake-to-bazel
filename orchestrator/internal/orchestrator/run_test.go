@@ -38,6 +38,7 @@ func stubConverter() int {
 	outBundle := fs.String("out-bundle-dir", "", "")
 	outFailure := fs.String("out-failure", "", "")
 	outReadPaths := fs.String("out-read-paths", "", "")
+	outTimings := fs.String("out-timings", "", "")
 	importsManifest := fs.String("imports-manifest", "", "")
 	prefixDir := fs.String("prefix-dir", "", "")
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -102,6 +103,18 @@ func stubConverter() int {
 		if *outReadPaths != "" {
 			_ = os.MkdirAll(filepath.Dir(*outReadPaths), 0o755)
 			_ = os.WriteFile(*outReadPaths, []byte("[]\n"), 0o644)
+		}
+		if *outTimings != "" {
+			// Tests assert that aggregation works; the actual numbers
+			// don't matter, but the schema does.
+			tbody, _ := json.MarshalIndent(map[string]any{
+				"version":                  1,
+				"cmake_configure_seconds":  1.5,
+				"translation_seconds":      0.5,
+				"total_seconds":            2.0,
+			}, "", "  ")
+			_ = os.MkdirAll(filepath.Dir(*outTimings), 0o755)
+			_ = os.WriteFile(*outTimings, append(tbody, '\n'), 0o644)
 		}
 		return 0
 	case "tier1":

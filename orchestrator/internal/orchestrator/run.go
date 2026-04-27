@@ -142,6 +142,41 @@ type Result struct {
 	Failed      []FailureRecord
 	CacheHits   []string // elements whose outputs came from the action cache
 	CacheMisses []string // elements that ran convert-element this pass
+
+	// Timings aggregates per-phase wall-clock durations across all
+	// elements that ran the converter this pass (cache-hits skip the
+	// converter and contribute nothing). The configure / translation
+	// ratio answers "where does conversion time go?" — a high ratio
+	// means cmake configure dominates and caching wins big; a low
+	// ratio means the converter's IR / emit pipeline is the
+	// bottleneck.
+	Timings TimingsSummary
+}
+
+// TimingsSummary is the cumulative + per-element view the orchestrator
+// emits at the end of a Run.
+type TimingsSummary struct {
+	// Per-element timings keyed by element name. Only elements that
+	// ran the converter this pass appear; cache-hits are absent.
+	PerElement map[string]ElementTimings `json:"per_element,omitempty"`
+
+	// Cumulative wall-clock seconds across all converter runs this
+	// pass. Sum of the per-element values.
+	TotalCMakeConfigureSecs float64 `json:"total_cmake_configure_seconds"`
+	TotalTranslationSecs    float64 `json:"total_translation_seconds"`
+	TotalConverterSecs      float64 `json:"total_converter_seconds"`
+
+	// ConfigureToTranslationRatio = TotalCMakeConfigureSecs /
+	// TotalTranslationSecs. Zero when TranslationSecs is zero.
+	ConfigureToTranslationRatio float64 `json:"configure_to_translation_ratio"`
+}
+
+// ElementTimings is one element's per-phase wall-clock seconds, as
+// reported by convert-element.
+type ElementTimings struct {
+	CMakeConfigureSecs float64 `json:"cmake_configure_seconds"`
+	TranslationSecs    float64 `json:"translation_seconds"`
+	TotalSecs          float64 `json:"total_seconds"`
 }
 
 // FailureRecord is the per-element entry the orchestrator collects for the
@@ -256,10 +291,66 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	sort.Strings(r.res.CacheMisses)
 	sort.Slice(r.res.Failed, func(i, j int) bool { return r.res.Failed[i].Element < r.res.Failed[j].Element })
 
+	// Aggregate timings across elements that ran the converter this
+	// pass. Cache hits don't re-emit timings.json so they're absent
+	// from the per-element map and contribute zero to the totals.
+	r.res.Timings = aggregateTimings(opts.Out, r.res.CacheMisses)
+	logTimingsSummary(logOf(opts), r.res)
+
 	if err := writeManifest(opts.Out, r.res); err != nil {
 		return nil, err
 	}
 	return r.res, nil
+}
+
+// aggregateTimings reads each cache-miss element's timings.json and
+// collects per-element + cumulative numbers. Errors reading individual
+// files are silent — timings are observability, not correctness.
+func aggregateTimings(out string, ranElements []string) TimingsSummary {
+	per := make(map[string]ElementTimings, len(ranElements))
+	var sumCfg, sumXlate, sumTotal float64
+	for _, name := range ranElements {
+		t, ok, err := loadTimings(filepath.Join(out, "elements", name, "timings.json"))
+		if err != nil || !ok {
+			continue
+		}
+		per[name] = ElementTimings{
+			CMakeConfigureSecs: t.CMakeConfigureSecs,
+			TranslationSecs:    t.TranslationSecs,
+			TotalSecs:          t.TotalSecs,
+		}
+		sumCfg += t.CMakeConfigureSecs
+		sumXlate += t.TranslationSecs
+		sumTotal += t.TotalSecs
+	}
+	ratio := 0.0
+	if sumXlate > 0 {
+		ratio = sumCfg / sumXlate
+	}
+	return TimingsSummary{
+		PerElement:                  per,
+		TotalCMakeConfigureSecs:     sumCfg,
+		TotalTranslationSecs:        sumXlate,
+		TotalConverterSecs:          sumTotal,
+		ConfigureToTranslationRatio: ratio,
+	}
+}
+
+// logTimingsSummary prints a one-line summary of the run plus the
+// cumulative timings to the orchestrator's log writer. Operator-
+// facing; the full per-element breakdown is in r.res.Timings for
+// callers (and writeManifest persists it).
+func logTimingsSummary(w io.Writer, res *Result) {
+	fmt.Fprintf(w, "summary: converted=%d cache_hits=%d cache_misses=%d failed=%d\n",
+		len(res.Converted), len(res.CacheHits), len(res.CacheMisses), len(res.Failed))
+	if res.Timings.TotalConverterSecs > 0 {
+		fmt.Fprintf(w, "summary: converter wall-clock total=%.1fs (cmake=%.1fs translate=%.1fs ratio=%.2f)\n",
+			res.Timings.TotalConverterSecs,
+			res.Timings.TotalCMakeConfigureSecs,
+			res.Timings.TotalTranslationSecs,
+			res.Timings.ConfigureToTranslationRatio,
+		)
+	}
 }
 
 // runner holds the per-Run state shared across element-processing
@@ -605,6 +696,7 @@ func convertOne(ctx context.Context, conv, name, srcRoot, importsPath, prefixPat
 		"--out-bundle-dir", filepath.Join(elemOut, "cmake-config"),
 		"--out-failure", filepath.Join(elemOut, "failure.json"),
 		"--out-read-paths", filepath.Join(elemOut, "read_paths.json"),
+		"--out-timings", filepath.Join(elemOut, "timings.json"),
 	}
 	if importsPath != "" {
 		args = append(args, "--imports-manifest", importsPath)
@@ -708,6 +800,17 @@ func writeManifest(out string, res *Result) error {
 		return err
 	}
 
+	timingsDoc := struct {
+		Version  int            `json:"version"`
+		Summary  TimingsSummary `json:"summary"`
+	}{
+		Version: 1,
+		Summary: res.Timings,
+	}
+	if err := writeJSON(filepath.Join(out, "manifest", "timings.json"), timingsDoc); err != nil {
+		return err
+	}
+
 	return writeDeterminism(out)
 }
 
@@ -736,7 +839,12 @@ func writeDeterminism(out string) error {
 		if err != nil {
 			return err
 		}
-		// determinism.json shouldn't include itself.
+		// timings.json carries wall-clock seconds, which legitimately
+		// differ run-to-run; excluding it keeps the three-tmpdir
+		// determinism test honest.
+		if filepath.Base(rel) == "timings.json" {
+			return nil
+		}
 		sum, err := hashRegularFile(p)
 		if err != nil {
 			return err
@@ -1027,6 +1135,38 @@ func loadReadPaths(path string) ([]string, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return out, nil
+}
+
+// elementTimings captures one element's per-phase wall-clock timings,
+// as written by convert-element's --out-timings flag. Missing file
+// (cache hit, older converter, etc.) is silently skipped — timings
+// are an operator UX feature, not a correctness requirement.
+type elementTimings struct {
+	CMakeConfigureSecs float64 `json:"cmake_configure_seconds"`
+	TranslationSecs    float64 `json:"translation_seconds"`
+	TotalSecs          float64 `json:"total_seconds"`
+}
+
+// loadTimings reads timings.json. Returns zero value when the file
+// is absent — a cache-hit element doesn't re-emit timings, and the
+// orchestrator's summary copes with that by counting only elements
+// that ran the converter this pass.
+func loadTimings(path string) (elementTimings, bool, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return elementTimings{}, false, nil
+	}
+	if err != nil {
+		return elementTimings{}, false, err
+	}
+	var raw struct {
+		Version int `json:"version"`
+		elementTimings
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return elementTimings{}, false, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return raw.elementTimings, true, nil
 }
 
 // transitiveDeps walks the graph from `name` collecting every reachable
