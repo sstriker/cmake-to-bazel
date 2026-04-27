@@ -1,0 +1,14 @@
+"""Smoke-test consumer for the M5 downstream-Bazel acceptance.
+
+The single cc_binary depends on a converted FDSDK element so that
+`bazel build //:smoke` exercises the converted_pkg_repo extension's
+repo declaration AND the BUILD.bazel the converter emitted.
+"""
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "smoke",
+    srcs = ["smoke.c"],
+    deps = ["@elem_components_uses_hello//:uses_hello_bin"],
+)
