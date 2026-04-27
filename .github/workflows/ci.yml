@@ -67,6 +67,40 @@ jobs:
       - name: orchestrate e2e (M3a step 2)
         run: make e2e-orchestrate
 
+      - name: cmake-consumer e2e (M5 step 11)
+        run: make e2e-cmake-consumer
+
       # libdrm e2e is gated on M1 milestone completion; enable when ready.
       # - name: libdrm e2e
       #   run: make e2e-libdrm
+
+  bazel-e2e:
+    name: End-to-end (bazel build downstream)
+    runs-on: ubuntu-24.04
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install bwrap + bazelisk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo chmod u+s "$(command -v bwrap)"
+          curl -L --fail -o /tmp/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64
+          sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazelisk
+          # bazelisk acts as bazel; symlink so the `bazel` LookPath in
+          # bazelbuild_test.go resolves without extra shell config.
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+          bazel version | head -3 || true
+
+      - name: Build converter + orchestrator
+        run: make converter orchestrator
+
+      - name: bazel-build downstream e2e (M5 step 10)
+        run: make e2e-bazel-build

@@ -1,8 +1,9 @@
 """Template MODULE.bazel for the M5 downstream-Bazel acceptance test.
 
 The test fills in two placeholders before running bazel:
-  __ROOT__       absolute path to the repo root (cmake-to-bazel)
-  __MANIFEST__   absolute path to <out>/manifest/converted.json
+  __MODULE_ROOT__  absolute path to the cmake_to_bazel module
+                   (i.e. <repo>/bazel — the dir containing MODULE.bazel)
+  __MANIFEST__     absolute path to <out>/manifest/converted.json
 
 The use_repo() list pins the two converted FDSDK subset elements; if
 the fixture grows, extend the list.
@@ -15,10 +16,10 @@ bazel_dep(name = "cmake_to_bazel", version = "0.0.0")
 
 local_path_override(
     module_name = "cmake_to_bazel",
-    path = "__ROOT__",
+    path = "__MODULE_ROOT__",
 )
 
-converted = use_extension("@cmake_to_bazel//bazel:converted_pkg_repo.bzl", "converted_pkg_repo")
+converted = use_extension("@cmake_to_bazel//:converted_pkg_repo.bzl", "converted_pkg_repo")
 converted.from_manifest(manifest = "__MANIFEST__")
 use_repo(
     converted,
