@@ -10,12 +10,17 @@
 // Default --format=text writes to stdout. --format=json emits the
 // canonical JSON report. --allow-regression flips the exit code from 2
 // to 0 when CI wants to inspect a known-bad diff without failing.
+//
+// --register <path> appends the AFTER run's snapshot to a persistent
+// fingerprint history (creating it if missing). Same content as the
+// previous append is deduped; returning to a prior state is appended.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/regression"
 )
@@ -32,11 +37,12 @@ func main() {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		before = fs.String("before", "", "path to the orchestrator output dir from the earlier run (required)")
-		after  = fs.String("after", "", "path to the orchestrator output dir from the later run (required)")
-		format = fs.String("format", "text", "output format: text | json")
-		out    = fs.String("out", "", "write the report to this file instead of stdout (optional)")
-		allow  = fs.Bool("allow-regression", false, "exit 0 even if newly-failed elements are present (CI escape hatch)")
+		before   = fs.String("before", "", "path to the orchestrator output dir from the earlier run (required)")
+		after    = fs.String("after", "", "path to the orchestrator output dir from the later run (required)")
+		format   = fs.String("format", "text", "output format: text | json")
+		out      = fs.String("out", "", "write the report to this file instead of stdout (optional)")
+		allow    = fs.Bool("allow-regression", false, "exit 0 even if newly-failed elements are present (CI escape hatch)")
+		register = fs.String("register", "", "path to a persistent fingerprint history; the AFTER run is appended on success (optional)")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -87,6 +93,27 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate-diff: write report: %v\n", err)
 		os.Exit(exitInfraOrLoad)
+	}
+
+	if *register != "" {
+		hist, err := regression.LoadHistory(*register)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "orchestrate-diff: %v\n", err)
+			os.Exit(exitInfraOrLoad)
+		}
+		snap := regression.SnapshotFromRun(afterRun, time.Now().UTC())
+		appended := hist.Append(snap)
+		if err := hist.Save(*register); err != nil {
+			fmt.Fprintf(os.Stderr, "orchestrate-diff: save history: %v\n", err)
+			os.Exit(exitInfraOrLoad)
+		}
+		if appended {
+			fmt.Fprintf(os.Stderr, "orchestrate-diff: appended snapshot sig=%s to %s\n",
+				snap.Sig[:12], *register)
+		} else {
+			fmt.Fprintf(os.Stderr, "orchestrate-diff: snapshot sig=%s deduped against latest in %s\n",
+				snap.Sig[:12], *register)
+		}
 	}
 
 	if d.HasRegressions() && !*allow {
