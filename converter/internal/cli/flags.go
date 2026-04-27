@@ -64,6 +64,14 @@ type Args struct {
 	// version below the architectural floor (3.20 — codemodel-v2 minimum).
 	// Local-dev only; M3 must never set this.
 	AllowCMakeVersionMismatch bool
+
+	// PrefixDir, when non-empty, is mounted read-only into the sandbox at
+	// /opt/prefix and exposed to cmake via CMAKE_PREFIX_PATH. Holds the
+	// synthesized cmake-config bundles + zero-byte IMPORTED_LOCATION
+	// stubs for cross-element find_package resolution. The orchestrator
+	// (M3a step 4) builds the tree per-element from the converted-deps
+	// registry; standalone runs leave this empty.
+	PrefixDir string
 }
 
 // Parse reads argv (without program name), populates Args, and prints usage
@@ -80,6 +88,7 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.ImportsManifest, "imports-manifest", "", "path to JSON imports manifest mapping cross-element CMake targets to Bazel labels (optional)")
 	fs.StringVar(&a.OutReadPaths, "out-read-paths", "", "write JSON array of source-tree paths cmake read at configure time (requires --source-root, optional)")
 	fs.BoolVar(&a.AllowCMakeVersionMismatch, "allow-cmake-version-mismatch", false, "let convert-element run with cmake older than the codemodel-v2 floor (local-dev escape hatch)")
+	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory mounted at /opt/prefix and added to CMAKE_PREFIX_PATH (cross-element synth-prefix; orchestrator-driven)")
 
 	if err := fs.Parse(argv); err != nil {
 		return a, ExitUsage

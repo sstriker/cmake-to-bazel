@@ -32,6 +32,12 @@ import (
 // project name itself contains a hyphen) emit hyphenated namespaces.
 var addLibraryRe = regexp.MustCompile(`^add_library\(\s*([A-Za-z0-9_-]+)\s*::\s*([A-Za-z0-9_-]+)\s+(STATIC|SHARED|MODULE|INTERFACE)\s+IMPORTED`)
 
+// importedLocationStanzaRe captures `set_target_properties(<NS>::<target>
+// PROPERTIES ... IMPORTED_LOCATION_<CONFIG> "${_IMPORT_PREFIX}<rest>" ...)`.
+// The match spans multi-line stanzas that converter cmakecfg emits; we
+// run it over the file-as-a-whole rather than line-by-line.
+var importedLocationStanzaRe = regexp.MustCompile(`set_target_properties\(\s*([A-Za-z0-9_-]+::[A-Za-z0-9_-]+)\s+PROPERTIES[\s\S]*?IMPORTED_LOCATION_[A-Z]+\s+"\$\{_IMPORT_PREFIX\}([^"]+)"`)
+
 // FromBundle scans a cmake-config bundle directory for imported targets and
 // returns one manifest.Export per declaration. Element name is NOT applied
 // to BazelLabel here — that's the caller's job (the orchestrator stamps the
@@ -41,7 +47,8 @@ func FromBundle(bundleDir string) ([]*manifest.Export, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exports: read %s: %w", bundleDir, err)
 	}
-	// Find the *Targets.cmake (singular, no -release suffix).
+	// Targets.cmake declares add_library; per-config Targets-*.cmake
+	// supplies IMPORTED_LOCATION_<CONFIG>.
 	var targetsFiles []string
 	for _, e := range entries {
 		if e.IsDir() {
@@ -69,6 +76,34 @@ func FromBundle(bundleDir string) ([]*manifest.Export, error) {
 			}
 			seen[e.CMakeTarget] = true
 			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// PrefixRelativeLinkPaths reads every per-config Targets-*.cmake under
+// bundleDir and returns a map of cmake_target -> []prefix-relative paths.
+// Each path is the IMPORTED_LOCATION_<CONFIG> stanza's value with the
+// leading `${_IMPORT_PREFIX}` stripped. Caller (orchestrator) joins these
+// against the consumer's prefix root to produce absolute LinkPaths for the
+// imports manifest.
+func PrefixRelativeLinkPaths(bundleDir string) (map[string][]string, error) {
+	entries, err := os.ReadDir(bundleDir)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".cmake" {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(bundleDir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range importedLocationStanzaRe.FindAllSubmatch(body, -1) {
+			tgt, rel := string(m[1]), string(m[2])
+			out[tgt] = append(out[tgt], rel)
 		}
 	}
 	return out, nil
@@ -111,7 +146,12 @@ func parseFile(path string) ([]*manifest.Export, error) {
 // declares for each converted element repository; the `<target>` half is
 // the second segment of the cmake-target namespaced name (`Pkg::target`
 // -> `target`).
-func AsElement(elementName string, raw []*manifest.Export) *manifest.Element {
+//
+// LinkPaths, when non-nil, supplies the absolute link-fragment paths the
+// orchestrator computed for this element under the consumer's synth-
+// prefix tree (one set per consumer because the prefix root differs).
+// linkPathsFor maps cmake_target -> []absolute paths.
+func AsElement(elementName string, raw []*manifest.Export, linkPathsFor map[string][]string) *manifest.Element {
 	bazelRepo := bazelRepoFor(elementName)
 	out := make([]*manifest.Export, 0, len(raw))
 	for _, ex := range raw {
@@ -121,10 +161,16 @@ func AsElement(elementName string, raw []*manifest.Export) *manifest.Element {
 			continue
 		}
 		target := ex.CMakeTarget[idx+2:]
-		out = append(out, &manifest.Export{
+		stamped := &manifest.Export{
 			CMakeTarget: ex.CMakeTarget,
 			BazelLabel:  fmt.Sprintf("@%s//:%s", bazelRepo, target),
-		})
+		}
+		if linkPathsFor != nil {
+			if paths, ok := linkPathsFor[ex.CMakeTarget]; ok {
+				stamped.LinkPaths = append([]string(nil), paths...)
+			}
+		}
+		out = append(out, stamped)
 	}
 	return &manifest.Element{
 		Name:    bazelRepo,

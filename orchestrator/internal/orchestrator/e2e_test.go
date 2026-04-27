@@ -70,8 +70,23 @@ func TestE2E_Orchestrate_StubSubset(t *testing.T) {
 		}
 	}
 
-	build := mustReadFile(t, filepath.Join(out, "elements", "components", "hello", "BUILD.bazel"))
-	if !strings.Contains(string(build), `name = "hello"`) {
-		t.Errorf("hello BUILD.bazel doesn't declare hello target: %s", build)
+	helloBuild := mustReadFile(t, filepath.Join(out, "elements", "components", "hello", "BUILD.bazel"))
+	if !strings.Contains(string(helloBuild), `name = "hello"`) {
+		t.Errorf("hello BUILD.bazel doesn't declare hello target: %s", helloBuild)
+	}
+
+	// Architectural acceptance: uses_hello_bin's deps must include both
+	// the in-element dep (:uses_hello) and the cross-element label
+	// (@elem_components_hello//:hello). The latter only ends up in the
+	// codemodel's link.commandFragments as an absolute /opt/prefix path,
+	// resolved via the imports manifest's link_paths field.
+	usesBuild := mustReadFile(t, filepath.Join(out, "elements", "components", "uses-hello", "BUILD.bazel"))
+	for _, want := range []string{
+		`":uses_hello"`,
+		`"@elem_components_hello//:hello"`,
+	} {
+		if !strings.Contains(string(usesBuild), want) {
+			t.Errorf("uses-hello BUILD.bazel missing %s\n%s", want, usesBuild)
+		}
 	}
 }
