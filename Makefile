@@ -1,5 +1,5 @@
 .PHONY: all converter orchestrator diff history test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
-        e2e-orchestrate e2e-bazel-build fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
+        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
 # enforced softly here for dev-loop visibility.
@@ -75,6 +75,12 @@ e2e-orchestrate: check-tools converter orchestrator
 # downstream consumer that depends on a converted element.
 e2e-bazel-build: check-tools converter orchestrator
 	$(GO) test -tags=e2e -run TestE2E_BazelBuild ./orchestrator/...
+
+# M5 CMake-side acceptance gate. Configures a downstream find_package
+# consumer against the orchestrator's synth-prefix tree. No bazel
+# required; just real cmake + bwrap (already covered by check-tools).
+e2e-cmake-consumer: check-tools converter orchestrator
+	$(GO) test -tags=e2e -run TestE2E_CMakeConsumer ./orchestrator/...
 
 # Fetch the M2 acceptance package out-of-band. Idempotent.
 fetch-fmt:
