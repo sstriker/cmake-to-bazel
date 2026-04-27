@@ -125,3 +125,19 @@ func mergeFlags(a, b []string) []string {
 	}
 	return out
 }
+
+// stripDuplicates returns items minus anything in exclude,
+// preserving order. Used by Observe to compute per-variant
+// deltas as "this variant's flags - baseline flags".
+func stripDuplicates(items []string, exclude map[string]bool) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, x := range items {
+		if !exclude[x] {
+			out = append(out, x)
+		}
+	}
+	return out
+}

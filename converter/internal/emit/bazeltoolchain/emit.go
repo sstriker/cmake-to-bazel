@@ -41,6 +41,13 @@ type Config struct {
 	// `toolchain_identifier`. Defaults to
 	// "<target_os>_<target_cpu>_<compiler_id>" lowercased.
 	ToolchainIdentifier string
+
+	// VariantMapping classifies each Variant into a Bazel feature
+	// slot at emit time. Nil falls back to
+	// toolchain.DefaultVariantMapping (CMake build type → dbg /
+	// opt). Operators with custom matrices (sanitizers, alt-
+	// compilers) override.
+	VariantMapping toolchain.VariantMapping
 }
 
 // Bundle is the result of Emit: a map from filename (relative to the
@@ -68,10 +75,11 @@ func Emit(m *toolchain.Model, cfg Config) (*Bundle, error) {
 	return emit(m, nil, cfg)
 }
 
-// EmitResolved is the variant-aware entrypoint: rt.Base provides the
-// always-on flag set, rt.PerBuildType provides per-build-type
-// deltas. Bazel's compilation_mode toggles (dbg, opt) map from
-// CMake build types via toolchain.CompilationMode.
+// EmitResolved is the variant-aware entrypoint: rt.Base provides
+// the always-on flag set, rt.Variants provides per-variant deltas.
+// Bazel's compilation_mode toggles (dbg, opt) and other features
+// are populated by routing each variant's delta through
+// cfg.VariantMapping (defaults to DefaultVariantMapping if unset).
 func EmitResolved(rt *toolchain.ResolvedToolchain, cfg Config) (*Bundle, error) {
 	if rt == nil || rt.Base == nil {
 		return nil, fmt.Errorf("bazeltoolchain.EmitResolved: nil ResolvedToolchain")
@@ -235,9 +243,10 @@ func emitConfigBzl(m *toolchain.Model, rt *toolchain.ResolvedToolchain, cfg Conf
 	emitStringList(&buf, "link_libs", []string{}, "        ")
 
 	// Per-mode flag sets drawn from the variant matrix when
-	// available; empty otherwise.
-	dbgCompile, dbgLink := variantFlagsFor(rt, "dbg")
-	optCompile, optLink := variantFlagsFor(rt, "opt")
+	// available; empty otherwise. cfg.VariantMapping (or the
+	// default) classifies each variant into a Bazel feature slot.
+	dbgCompile, dbgLink := variantFlagsFor(rt, cfg.VariantMapping, toolchain.BazelFeatureDbg)
+	optCompile, optLink := variantFlagsFor(rt, cfg.VariantMapping, toolchain.BazelFeatureOpt)
 	emitStringList(&buf, "opt_compile_flags", optCompile, "        ")
 	emitStringList(&buf, "opt_link_flags", optLink, "        ")
 	emitStringList(&buf, "dbg_compile_flags", dbgCompile, "        ")
@@ -250,20 +259,24 @@ func emitConfigBzl(m *toolchain.Model, rt *toolchain.ResolvedToolchain, cfg Conf
 	return buf.Bytes(), nil
 }
 
-// variantFlagsFor walks the ResolvedToolchain's per-build-type map
-// looking for entries that fold to the requested compilation mode
-// ("dbg" / "opt"). Returns the merged compile + link flag slices.
+// variantFlagsFor walks the ResolvedToolchain's variants and
+// folds every variant whose VariantMapping classification equals
+// the requested feature ("dbg", "opt") into a merged compile +
+// link delta. Returns nil/nil when rt is nil or no variants map.
 //
-// Multiple CMake build types map to the same Bazel mode (e.g.
-// Release / RelWithDebInfo / MinSizeRel all become "opt"); we
-// merge dedup-preserving-order rather than picking one. Operators
-// who need finer control post-process the .bzl.
-func variantFlagsFor(rt *toolchain.ResolvedToolchain, mode string) (compile []string, link []string) {
+// Multiple variants can fold to the same feature (e.g. Release +
+// RelWithDebInfo + MinSizeRel → "opt"); we dedup-preserve-order
+// rather than picking one. Operators who need finer control
+// supply their own VariantMapping or post-process the .bzl.
+func variantFlagsFor(rt *toolchain.ResolvedToolchain, mapping toolchain.VariantMapping, feature toolchain.BazelFeature) (compile []string, link []string) {
 	if rt == nil {
 		return nil, nil
 	}
-	for buildType, delta := range rt.PerBuildType {
-		if toolchain.CompilationMode(buildType) != mode {
+	if mapping == nil {
+		mapping = toolchain.DefaultVariantMapping
+	}
+	for _, delta := range rt.Variants {
+		if mapping(delta.Spec) != feature {
 			continue
 		}
 		// LanguageFlags["C"] is the canonical shared set; CXX
