@@ -27,6 +27,13 @@ type Options struct {
 	// /opt/prefix.
 	HostPrefixDir string
 
+	// HostToolchainCMakeFile, when non-empty, is mounted read-only
+	// at /toolchain.cmake in the sandbox and passed to cmake via
+	// -DCMAKE_TOOLCHAIN_FILE. Pre-derived by derive-toolchain;
+	// skips cmake's compiler-detection probe, cutting per-conversion
+	// configure latency.
+	HostToolchainCMakeFile string
+
 	// BuildType is passed as -DCMAKE_BUILD_TYPE. M1 always passes "Release".
 	BuildType string
 
@@ -96,6 +103,14 @@ func Configure(ctx context.Context, opts Options) (Reply, error) {
 			"--trace-format=json-v1",
 			"--trace-redirect="+opts.TracePath,
 		)
+	}
+	if opts.HostToolchainCMakeFile != "" {
+		// The toolchain file gets mounted at /toolchain.cmake in
+		// the sandbox; pass that in-sandbox path to cmake.
+		cmakeArgv = append(cmakeArgv, "-DCMAKE_TOOLCHAIN_FILE=/toolchain.cmake")
+		extraBinds = append(extraBinds, [2]string{
+			opts.HostToolchainCMakeFile, "/toolchain.cmake",
+		})
 	}
 
 	sb := hermetic.Sandbox{

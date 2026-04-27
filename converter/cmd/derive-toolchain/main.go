@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/bazeltoolchain"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/cmaketoolchain"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/toolchain"
 )
@@ -66,6 +67,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// CMake-side toolchain file lets the orchestrator's per-element
+	// cmake invocations skip the compiler-detection probe — a
+	// measurable per-conversion latency win at distro scale.
+	cmakeBody, err := cmaketoolchain.Emit(m)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "derive-toolchain: emit cmake toolchain: %v\n", err)
+		os.Exit(1)
+	}
+
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "derive-toolchain: mkdir %s: %v\n", *outDir, err)
 		os.Exit(1)
@@ -78,4 +88,10 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "derive-toolchain: wrote %s (%d bytes)\n", dst, len(body))
 	}
+	cmakeDst := filepath.Join(*outDir, "toolchain.cmake")
+	if err := os.WriteFile(cmakeDst, cmakeBody, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "derive-toolchain: write %s: %v\n", cmakeDst, err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "derive-toolchain: wrote %s (%d bytes)\n", cmakeDst, len(cmakeBody))
 }
