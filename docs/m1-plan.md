@@ -153,7 +153,7 @@ structure as small pure functions over IR.
 | M3a | Local orchestrator: BuildStream YAML reader, per-element subprocess loop, shadow + imports + synth-prefix + allowlist registry + action-key cache | 1.5 | Every FDSDK kind:cmake element converts via `os/exec`; determinism test passes on three fresh tmpdirs |
 | M3b | REAPI submission layer wrapping the M3a orchestrator | 1 | Same outputs as M3a but actions execute remotely against Buildbarn; CAS hit-rate measurable |
 | M3c | `bst source checkout` integration: orchestrator drives source provisioning for `kind: git`, `kind: tar`, etc. M3a/M3b operate on pre-checked-out trees via `--sources-base` and document the workaround. | 0.5 | Orchestrator converts an FDSDK subset starting from BuildStream YAMLs alone, no pre-staging |
-| M4 | Tiered failures + regression detection + fingerprint registry | 1.5 | Deliberate breakage produces structured regression report |
+| M4 | Tiered failures + regression detection + fingerprint registry — see `docs/m4-plan.md` | 1.5 | Deliberate breakage produces structured regression report |
 | M5 | Bazel envelope + `converted_pkg_repo` + CAS HTTP proxy | 1 | Downstream Bazel build consuming converted FDSDK element succeeds |
 | M6+ | Debian-scale bulk pass | open | Same binaries; only front-end changes |
 
