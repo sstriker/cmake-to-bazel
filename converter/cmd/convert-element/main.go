@@ -23,6 +23,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/lower"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 )
 
@@ -91,7 +92,19 @@ func run(a cli.Args) error {
 			return failure.New(failure.NinjaParseFailed, "parse %s: %v", ninjaPath, err)
 		}
 	}
-	pkg, err := lower.ToIR(r, g, lower.Options{HostSourceRoot: a.SourceRoot})
+
+	var imports *manifest.Resolver
+	if a.ImportsManifest != "" {
+		imports, err = manifest.Load(a.ImportsManifest)
+		if err != nil {
+			return err
+		}
+	}
+
+	pkg, err := lower.ToIR(r, g, lower.Options{
+		HostSourceRoot: a.SourceRoot,
+		Imports:        imports,
+	})
 	if err != nil {
 		return err
 	}
