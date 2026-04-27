@@ -38,10 +38,11 @@ func stubConverter() int {
 	outFailure := fs.String("out-failure", "", "")
 	outReadPaths := fs.String("out-read-paths", "", "")
 	importsManifest := fs.String("imports-manifest", "", "")
+	prefixDir := fs.String("prefix-dir", "", "")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 64
 	}
-	_ = replyDir
+	_, _ = replyDir, prefixDir
 
 	// Optional: record the imports-manifest path so the test can inspect it.
 	if recDir := os.Getenv("ORCHESTRATOR_STUB_RECORD_DIR"); recDir != "" {

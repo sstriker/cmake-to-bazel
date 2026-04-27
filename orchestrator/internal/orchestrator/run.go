@@ -28,10 +28,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/exports"
+	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/synthprefix"
 )
 
 // Options configures one Run call.
@@ -76,6 +78,11 @@ type FailureRecord struct {
 	Message string `json:"message"`
 }
 
+// sandboxPrefix is the in-sandbox path the converter's hermetic layer
+// mounts --prefix-dir at. Must match
+// converter/internal/hermetic/sandbox.go's --ro-bind target.
+const sandboxPrefix = "/opt/prefix/"
+
 // Run drives the conversion. Returns a populated Result on success even if
 // some elements failed Tier-1; only Tier-2/3 (or orchestrator-level)
 // errors return non-nil err.
@@ -107,13 +114,19 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	// depExports accumulates the exports from each successfully-converted
-	// element. Before invoking convert-element on B, we write a per-
-	// element imports.json containing the exports of B's dep closure
-	// (transitive). The converter consumes it via --imports-manifest;
-	// see internal/manifest/imports.go for the schema.
-	depExports := map[string]*manifest.Element{}
+	// depRecords accumulates per-element data needed to write a downstream
+	// element's imports manifest:
+	//   raw   — manifest.Export values with CMakeTarget set (no labels yet)
+	//   relLinkPaths — cmake_target -> prefix-relative IMPORTED_LOCATION paths
+	//   pkg   — the bundle's <Pkg> (drives lib/cmake/<Pkg>/ in the
+	//           consumer's synth-prefix)
+	//
+	// LinkPaths in the consumer's manifest are absolute paths under the
+	// consumer's prefix root, so they have to be stitched per-consumer
+	// rather than stored once per dep.
+	depRecords := map[string]*depRecord{}
 	importsRoot := filepath.Join(opts.Out, "imports")
+	prefixRoot := filepath.Join(opts.Out, "synth-prefix")
 	if err := os.MkdirAll(importsRoot, 0o755); err != nil {
 		return nil, err
 	}
@@ -127,12 +140,17 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		}
 		fmt.Fprintf(logOf(opts), "==> %s\n", name)
 
-		importsPath, err := writeImportsForElement(importsRoot, name, opts.Graph, depExports)
+		prefixPath, err := buildPrefixForElement(prefixRoot, name, opts.Graph, depRecords, opts.Out)
+		if err != nil {
+			return nil, fmt.Errorf("element %s: synth-prefix: %w", name, err)
+		}
+
+		importsPath, err := writeImportsForElement(importsRoot, name, opts.Graph, depRecords, prefixPath)
 		if err != nil {
 			return nil, fmt.Errorf("element %s: imports manifest: %w", name, err)
 		}
 
-		fr, err := convertOne(ctx, conv, name, srcRoot, importsPath, opts)
+		fr, err := convertOne(ctx, conv, name, srcRoot, importsPath, prefixPath, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -142,13 +160,26 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		}
 		res.Converted = append(res.Converted, name)
 
-		// Pick up this element's exports for downstream consumers.
+		// Pick up this element's bundle metadata for downstream consumers.
 		bundleDir := filepath.Join(opts.Out, "elements", name, "cmake-config")
 		raw, err := exports.FromBundle(bundleDir)
 		if err != nil {
 			return nil, fmt.Errorf("element %s: extract exports: %w", name, err)
 		}
-		depExports[name] = exports.AsElement(name, raw)
+		relPaths, err := exports.PrefixRelativeLinkPaths(bundleDir)
+		if err != nil {
+			return nil, fmt.Errorf("element %s: link paths: %w", name, err)
+		}
+		pkg, err := synthprefix.PkgFromBundle(bundleDir)
+		if err != nil {
+			return nil, fmt.Errorf("element %s: pkg-from-bundle: %w", name, err)
+		}
+		depRecords[name] = &depRecord{
+			ElementName:        name,
+			Pkg:                pkg,
+			RawExports:         raw,
+			PrefixRelLinkPaths: relPaths,
+		}
 	}
 
 	if err := writeManifest(opts.Out, res); err != nil {
@@ -159,7 +190,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 // convertOne runs the converter against one element. Returns (nil, nil) on
 // success, (FailureRecord, nil) on Tier-1, (nil, err) on Tier-2/3.
-func convertOne(ctx context.Context, conv, name, srcRoot, importsPath string, opts Options) (*FailureRecord, error) {
+func convertOne(ctx context.Context, conv, name, srcRoot, importsPath, prefixPath string, opts Options) (*FailureRecord, error) {
 	elemOut := filepath.Join(opts.Out, "elements", name)
 	if err := os.MkdirAll(elemOut, 0o755); err != nil {
 		return nil, err
@@ -174,6 +205,9 @@ func convertOne(ctx context.Context, conv, name, srcRoot, importsPath string, op
 	}
 	if importsPath != "" {
 		args = append(args, "--imports-manifest", importsPath)
+	}
+	if prefixPath != "" {
+		args = append(args, "--prefix-dir", prefixPath)
 	}
 
 	cmd := exec.CommandContext(ctx, conv, args...)
@@ -302,22 +336,48 @@ func logOf(opts Options) io.Writer {
 	return os.Stderr
 }
 
+// depRecord is the per-element bundle/exports state the orchestrator holds
+// across the per-element loop.
+type depRecord struct {
+	ElementName        string
+	Pkg                string
+	RawExports         []*manifest.Export
+	PrefixRelLinkPaths map[string][]string
+}
+
 // writeImportsForElement writes a per-element imports.json containing the
-// exports of every element transitively reachable from `name` via build/all
-// deps. Skipped (non-cmake or not-yet-converted) deps contribute no
-// exports — they're tracked through the graph but not in the dep-export
-// registry.
+// exports of every element transitively reachable from `name` via deps.
+// LinkPaths in each export are absolute paths under the consumer's
+// prefixPath (the synth-prefix tree built earlier this iteration). When
+// prefixPath is empty (no deps with bundles) LinkPaths are omitted.
 //
 // Returns the host path to the written file, or "" if there are no exports
-// to declare (avoids passing --imports-manifest with an empty document
-// which the converter accepts but flags as wasteful).
-func writeImportsForElement(importsRoot, name string, g *element.Graph, depExports map[string]*manifest.Element) (string, error) {
+// to declare (avoids passing --imports-manifest with an empty document).
+func writeImportsForElement(importsRoot, name string, g *element.Graph, depRecords map[string]*depRecord, prefixPath string) (string, error) {
 	closure := transitiveDeps(g, name)
 	var elems []*manifest.Element
 	for _, d := range closure {
-		if me, ok := depExports[d]; ok && len(me.Exports) > 0 {
-			elems = append(elems, me)
+		rec, ok := depRecords[d]
+		if !ok || len(rec.RawExports) == 0 {
+			continue
 		}
+		linkPathsFor := map[string][]string{}
+		if prefixPath != "" {
+			// CMake's codemodel records link.commandFragments paths as
+			// they appear *inside* the converter's bwrap sandbox, where
+			// the synth-prefix tree is mounted at /opt/prefix (per
+			// converter/internal/hermetic/sandbox.go's --ro-bind line).
+			// link_paths in the imports manifest must use the same
+			// anchoring so lower's path-match in
+			// LookupLinkPath actually fires.
+			for tgt, rels := range rec.PrefixRelLinkPaths {
+				for _, rel := range rels {
+					linkPathsFor[tgt] = append(linkPathsFor[tgt],
+						sandboxPrefix+strings.TrimPrefix(rel, "/"))
+				}
+			}
+		}
+		elems = append(elems, exports.AsElement(d, rec.RawExports, linkPathsFor))
 	}
 	if len(elems) == 0 {
 		return "", nil
@@ -337,6 +397,40 @@ func writeImportsForElement(importsRoot, name string, g *element.Graph, depExpor
 		return "", err
 	}
 	return out, nil
+}
+
+// buildPrefixForElement assembles a CMAKE_PREFIX_PATH-shaped tree under
+// <prefixRoot>/<element-name>/ holding the synthesized cmake-config
+// bundles for every dep with exports plus zero-byte stubs for each
+// IMPORTED_LOCATION_<CONFIG>. Returns the absolute prefix path the
+// converter should mount, or "" if there's nothing to stage.
+func buildPrefixForElement(prefixRoot, name string, g *element.Graph, depRecords map[string]*depRecord, outRoot string) (string, error) {
+	closure := transitiveDeps(g, name)
+	var deps []synthprefix.DepBundle
+	for _, d := range closure {
+		rec, ok := depRecords[d]
+		if !ok || rec.Pkg == "" {
+			continue // either non-cmake or had no Config.cmake
+		}
+		bundleDir := filepath.Join(outRoot, "elements", d, "cmake-config")
+		if _, err := os.Stat(bundleDir); err != nil {
+			continue
+		}
+		deps = append(deps, synthprefix.DepBundle{Pkg: rec.Pkg, SourceDir: bundleDir})
+	}
+	if len(deps) == 0 {
+		return "", nil
+	}
+	dst := filepath.Join(prefixRoot, filepath.FromSlash(name))
+	// Build is destructive on existing dst; M3a step 6's cache layer will
+	// reuse prefix trees, but until then we recreate from scratch.
+	if err := os.RemoveAll(dst); err != nil {
+		return "", err
+	}
+	if err := synthprefix.Build(dst, deps); err != nil {
+		return "", err
+	}
+	return dst, nil
 }
 
 // transitiveDeps walks the graph from `name` collecting every reachable

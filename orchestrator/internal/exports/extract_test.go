@@ -106,7 +106,7 @@ add_library(foo::extra SHARED IMPORTED)
 		t.Fatal(err)
 	}
 
-	el := exports.AsElement("components/foo", raw)
+	el := exports.AsElement("components/foo", raw, nil)
 	if el.Name != "elem_components_foo" {
 		t.Errorf("Element.Name = %q, want elem_components_foo", el.Name)
 	}

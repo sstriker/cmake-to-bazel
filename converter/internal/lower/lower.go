@@ -244,6 +244,33 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *nin
 			t.Name, cmakeName)
 	}
 
+	// Cross-element link fragments. CMake records IMPORTED_LOCATION
+	// paths in t.Link.CommandFragments[role="libraries"] as resolved
+	// absolute paths under the synth-prefix tree. The orchestrator's
+	// imports manifest carries each export's link paths so we can
+	// rewrite those fragments to Bazel labels.
+	if t.Link != nil {
+		seen := map[string]bool{}
+		for _, d := range irt.Deps {
+			seen[d] = true
+		}
+		for _, frag := range t.Link.CommandFragments {
+			if frag.Role != "libraries" {
+				continue
+			}
+			path := strings.TrimSpace(frag.Fragment)
+			if path == "" || !filepath.IsAbs(path) {
+				continue
+			}
+			if export := imports.LookupLinkPath(path); export != nil {
+				if !seen[export.BazelLabel] {
+					seen[export.BazelLabel] = true
+					irt.Deps = append(irt.Deps, export.BazelLabel)
+				}
+			}
+		}
+	}
+
 	if t.Install != nil && len(t.Install.Destinations) > 0 {
 		irt.Visibility = []string{"//visibility:public"}
 		irt.InstallDest = t.Install.Destinations[0].Path

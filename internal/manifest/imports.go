@@ -55,6 +55,14 @@ type Export struct {
 	// fragments or pkg-config-like names) the import expands into. Most
 	// imports won't set this; included for completeness.
 	LinkLibraries []string `json:"link_libraries,omitempty"`
+
+	// LinkPaths is the set of absolute paths the cmake codemodel records
+	// for this import in `target.link.commandFragments[role="libraries"]`.
+	// The orchestrator populates these when it stages the synth-prefix
+	// tree: each IMPORTED_LOCATION_<CONFIG> path resolved against the
+	// prefix root. Lower matches link-fragment paths against this list to
+	// rewrite them as the export's BazelLabel.
+	LinkPaths []string `json:"link_paths,omitempty"`
 }
 
 // Load reads and parses an imports manifest from disk. Returns a Resolver
@@ -85,6 +93,7 @@ func Index(im *Imports) (*Resolver, error) {
 	r := &Resolver{
 		byCMakeTarget: map[string]*Export{},
 		byElement:     map[string]*Element{},
+		byLinkPath:    map[string]*Export{},
 	}
 	for _, el := range im.Elements {
 		if el == nil || el.Name == "" {
@@ -106,6 +115,9 @@ func Index(im *Imports) (*Resolver, error) {
 					ex.CMakeTarget, el.Name, findElementForExport(im, existing))
 			}
 			r.byCMakeTarget[ex.CMakeTarget] = ex
+			for _, lp := range ex.LinkPaths {
+				r.byLinkPath[lp] = ex
+			}
 		}
 	}
 	return r, nil
@@ -127,6 +139,7 @@ func findElementForExport(im *Imports, ex *Export) string {
 type Resolver struct {
 	byCMakeTarget map[string]*Export
 	byElement     map[string]*Element
+	byLinkPath    map[string]*Export
 }
 
 // LookupCMakeTarget returns the export for a CMake namespaced target name
@@ -136,6 +149,17 @@ func (r *Resolver) LookupCMakeTarget(name string) *Export {
 		return nil
 	}
 	return r.byCMakeTarget[name]
+}
+
+// LookupLinkPath returns the export that owns a given absolute link-fragment
+// path, or nil if none. Used by lower to map cross-element library
+// fragments (CMake records IMPORTED_LOCATION_<CONFIG> file paths in
+// `target.link.commandFragments[role="libraries"]`) onto Bazel labels.
+func (r *Resolver) LookupLinkPath(path string) *Export {
+	if r == nil {
+		return nil
+	}
+	return r.byLinkPath[path]
 }
 
 // LookupElement returns an element by name, or nil if none.

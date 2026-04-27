@@ -66,6 +66,7 @@ func run(a cli.Args) error {
 		opts := cmakerun.Options{
 			HostSourceRoot: a.SourceRoot,
 			HostBuildDir:   buildDir,
+			HostPrefixDir:  a.PrefixDir,
 			Stdout:         os.Stderr, // route cmake noise to our stderr
 			Stderr:         os.Stderr,
 		}
