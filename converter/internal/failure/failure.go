@@ -18,14 +18,15 @@ import "fmt"
 type Code string
 
 const (
-	ConfigureFailed          Code = "configure-failed"
-	FileAPIMissing           Code = "fileapi-missing"
-	FileAPIMalformed         Code = "fileapi-malformed"
-	NinjaParseFailed         Code = "ninja-parse-failed"
-	UnsupportedTargetType    Code = "unsupported-target-type"
-	UnsupportedCustomCommand Code = "unsupported-custom-command"
-	UnresolvedInclude        Code = "unresolved-include"
-	UnresolvedLinkDep        Code = "unresolved-link-dep"
+	ConfigureFailed                Code = "configure-failed"
+	FileAPIMissing                 Code = "fileapi-missing"
+	FileAPIMalformed               Code = "fileapi-malformed"
+	NinjaParseFailed               Code = "ninja-parse-failed"
+	UnsupportedTargetType          Code = "unsupported-target-type"
+	UnsupportedCustomCommand       Code = "unsupported-custom-command"
+	UnsupportedCustomCommandScript Code = "unsupported-custom-command-script"
+	UnresolvedInclude              Code = "unresolved-include"
+	UnresolvedLinkDep              Code = "unresolved-link-dep"
 )
 
 // Error is a typed Tier-1 failure. It satisfies the error interface, and the

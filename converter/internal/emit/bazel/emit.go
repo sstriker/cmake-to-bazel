@@ -30,14 +30,20 @@ func Emit(pkg *ir.Package) ([]byte, error) {
 		if i > 0 {
 			buf.WriteString("\n")
 		}
-		if err := emitTarget(&buf, t); err != nil {
+		if t.Kind == ir.KindGenrule {
+			if err := emitGenrule(&buf, t); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err := emitCCTarget(&buf, t); err != nil {
 			return nil, err
 		}
 	}
 	return buf.Bytes(), nil
 }
 
-var ruleTmpl = template.Must(template.New("rule").Funcs(template.FuncMap{
+var ccRuleTmpl = template.Must(template.New("rule").Funcs(template.FuncMap{
 	"strList": strList,
 }).Parse(`{{.RuleKind}}(
     name = "{{.Name}}",
@@ -68,16 +74,36 @@ var ruleTmpl = template.Must(template.New("rule").Funcs(template.FuncMap{
 {{- if .Alwayslink}}
     alwayslink = True,
 {{- end}}
+{{- if .Tags}}
+    tags = {{strList .Tags}},
+{{- end}}
 {{- if .Visibility}}
     visibility = {{strList .Visibility}},
 {{- end}}
 )
 `))
 
-// templateView is what we hand to the template. We project ir.Target into it
-// so we can sort lists once and so the template doesn't need to know about
-// ir.Kind.
-type templateView struct {
+var genruleTmpl = template.Must(template.New("genrule").Funcs(template.FuncMap{
+	"strList": strList,
+}).Parse(`genrule(
+    name = "{{.Name}}",
+{{- if .Srcs}}
+    srcs = {{strList .Srcs}},
+{{- end}}
+    outs = {{strList .Outs}},
+    cmd = {{.CmdLiteral}},
+{{- if .Tags}}
+    tags = {{strList .Tags}},
+{{- end}}
+{{- if .Visibility}}
+    visibility = {{strList .Visibility}},
+{{- end}}
+)
+`))
+
+// ccView projects ir.Target into the cc-rule template. List attributes are
+// pre-sorted; the emitter doesn't make policy decisions.
+type ccView struct {
 	RuleKind   string
 	Name       string
 	Srcs       []string
@@ -89,11 +115,21 @@ type templateView struct {
 	Deps       []string
 	Linkstatic bool
 	Alwayslink bool
+	Tags       []string
 	Visibility []string
 }
 
-func emitTarget(w *bytes.Buffer, t ir.Target) error {
-	v := templateView{
+type genruleView struct {
+	Name       string
+	Srcs       []string
+	Outs       []string
+	CmdLiteral string // already-quoted Starlark string literal
+	Tags       []string
+	Visibility []string
+}
+
+func emitCCTarget(w *bytes.Buffer, t ir.Target) error {
+	v := ccView{
 		RuleKind:   t.Kind.String(),
 		Name:       t.Name,
 		Srcs:       sortedCopy(t.Srcs),
@@ -105,9 +141,22 @@ func emitTarget(w *bytes.Buffer, t ir.Target) error {
 		Deps:       sortedCopy(t.Deps),
 		Linkstatic: t.Linkstatic,
 		Alwayslink: t.Alwayslink,
+		Tags:       sortedCopy(t.Tags),
 		Visibility: append([]string(nil), t.Visibility...),
 	}
-	return ruleTmpl.Execute(w, v)
+	return ccRuleTmpl.Execute(w, v)
+}
+
+func emitGenrule(w *bytes.Buffer, t ir.Target) error {
+	v := genruleView{
+		Name:       t.Name,
+		Srcs:       sortedCopy(t.Srcs),
+		Outs:       sortedCopy(t.GenruleOuts),
+		CmdLiteral: fmt.Sprintf("%q", t.GenruleCmd),
+		Tags:       sortedCopy(t.Tags),
+		Visibility: append([]string(nil), t.Visibility...),
+	}
+	return genruleTmpl.Execute(w, v)
 }
 
 func sortedCopy(in []string) []string {

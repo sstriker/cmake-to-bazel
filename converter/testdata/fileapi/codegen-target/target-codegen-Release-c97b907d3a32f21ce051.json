@@ -64,7 +64,7 @@
 			[
 				{
 					"backtrace" : 4,
-					"path" : "/tmp/tmp.42oIwIKfmP"
+					"path" : "/tmp/tmp.1OoNOxgoxb"
 				}
 			],
 			"language" : "C",
@@ -138,13 +138,13 @@
 		{
 			"backtrace" : 1,
 			"isGenerated" : true,
-			"path" : "/tmp/tmp.42oIwIKfmP/version.h",
+			"path" : "/tmp/tmp.1OoNOxgoxb/version.h",
 			"sourceGroupIndex" : 1
 		},
 		{
 			"backtrace" : 0,
 			"isGenerated" : true,
-			"path" : "/tmp/tmp.42oIwIKfmP/version.h.rule",
+			"path" : "/tmp/tmp.1OoNOxgoxb/version.h.rule",
 			"sourceGroupIndex" : 2
 		}
 	],

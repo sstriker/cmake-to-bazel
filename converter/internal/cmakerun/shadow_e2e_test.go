@@ -86,7 +86,7 @@ func runConvert(t *testing.T, src, sandboxTracePath string) []byte {
 	if err != nil {
 		t.Fatalf("fileapi.Load: %v", err)
 	}
-	pkg, err := lower.ToIR(r, lower.Options{HostSourceRoot: src})
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src})
 	if err != nil {
 		t.Fatalf("ToIR: %v", err)
 	}

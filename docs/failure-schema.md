@@ -89,8 +89,13 @@ emitted.
 ### `unsupported-target-type`
 
 A target's CMake `type` is one the converter doesn't lower yet.
-Examples: `OBJECT_LIBRARY`, `UTILITY`, `INTERFACE_LIBRARY` with file
-sets we don't model.
+Examples: `OBJECT_LIBRARY`, `INTERFACE_LIBRARY` with file sets we
+don't model.
+
+`UTILITY` targets (`add_custom_target` / `add_dependencies` grouping
+nodes) are silently skipped, not error-emitted: the underlying
+`add_custom_command`s are recovered as genrules independently of the
+utility node.
 
 **Operator action:** if the target is essential, file an issue with
 the target name and type; otherwise the orchestrator marks the

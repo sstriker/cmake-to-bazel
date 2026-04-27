@@ -18,6 +18,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ir"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 )
 
 // Options controls behavior that the orchestrator (M3) overrides per-package.
@@ -41,9 +42,11 @@ var headerExts = map[string]bool{
 	".inl": true,
 }
 
-// ToIR lowers a parsed reply into a Package. M1 enforces single-config and
-// fails loudly on anything outside the supported subset.
-func ToIR(r *fileapi.Reply, opts Options) (*ir.Package, error) {
+// ToIR lowers a parsed reply into a Package. The optional ninja graph
+// enables genrule recovery for targets with isGenerated sources; pass nil to
+// disable (M1-style behavior — generated sources then trigger
+// unsupported-custom-command).
+func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 	if got := len(r.Codemodel.Configurations); got != 1 {
 		return nil, failure.New(failure.UnsupportedTargetType,
 			"M1 supports exactly one configuration; got %d", got)
@@ -51,6 +54,7 @@ func ToIR(r *fileapi.Reply, opts Options) (*ir.Package, error) {
 	cfg := r.Codemodel.Configurations[0]
 
 	cmakeSrc := r.Codemodel.Paths.Source
+	cmakeBuild := r.Codemodel.Paths.Build
 	hostSrc := opts.HostSourceRoot
 	if hostSrc == "" {
 		hostSrc = cmakeSrc
@@ -61,18 +65,31 @@ func ToIR(r *fileapi.Reply, opts Options) (*ir.Package, error) {
 		SourceRoot: hostSrc,
 	}
 
+	cc := newCodegenContext()
+
 	for _, tref := range cfg.Targets {
 		t, ok := r.Targets[tref.Id]
 		if !ok {
 			return nil, failure.New(failure.FileAPIMalformed,
 				"target id %q in codemodel but not loaded", tref.Id)
 		}
-		irt, err := lowerTarget(&t, cmakeSrc, hostSrc)
+		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, g, cc)
 		if err != nil {
 			return nil, err
 		}
+		if irt == nil {
+			// lowerTarget returned (nil, nil) to skip — UTILITY targets
+			// (add_custom_target nodes) and similar that have no Bazel
+			// equivalent.
+			continue
+		}
 		pkg.Targets = append(pkg.Targets, *irt)
 	}
+
+	// Append recovered genrules in deterministic order (build-statement
+	// declaration order is stable since cc.Genrules is appended on first
+	// encounter while walking targets in cfg order).
+	pkg.Targets = append(pkg.Targets, cc.Genrules...)
 	return pkg, nil
 }
 
@@ -83,7 +100,7 @@ func projectName(r *fileapi.Reply) string {
 	return ""
 }
 
-func lowerTarget(t *fileapi.Target, cmakeSrc, hostSrc string) (*ir.Target, error) {
+func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *ninja.Graph, cc *codegenContext) (*ir.Target, error) {
 	irt := &ir.Target{Name: t.Name}
 
 	switch t.Type {
@@ -96,24 +113,54 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, hostSrc string) (*ir.Target, error
 		irt.Kind = ir.KindCCBinary
 	case "INTERFACE_LIBRARY":
 		irt.Kind = ir.KindCCInterface
+	case "UTILITY":
+		// add_custom_target / add_dependencies grouping. The underlying
+		// add_custom_command is recovered separately via genrule lookup;
+		// the utility node itself has no Bazel equivalent.
+		return nil, nil
 	default:
 		return nil, failure.New(failure.UnsupportedTargetType,
 			"target %q has unsupported type %q", t.Name, t.Type)
 	}
 
-	for _, src := range t.Sources {
-		if src.IsGenerated {
-			return nil, failure.New(failure.UnsupportedCustomCommand,
-				"target %q references generated source %q (genrule recovery is M2)",
-				t.Name, src.Path)
+	consumesCodegen := false
+	for i, src := range t.Sources {
+		// CMake's bookkeeping `<build>/version.h.rule` files are internal
+		// re-run markers; skip them silently.
+		if strings.HasSuffix(src.Path, ".rule") {
+			continue
 		}
-		if src.CompileGroupIndex < 0 {
+
+		if src.IsGenerated {
+			relOut, _, err := cc.recoverGenrule(src.Path, cmakeBuild, g)
+			if err != nil {
+				return nil, err
+			}
+			consumesCodegen = true
+			ext := strings.ToLower(filepath.Ext(relOut))
+			switch {
+			case isInCompileGroup(t, i):
+				irt.Srcs = append(irt.Srcs, relOut)
+			case headerExts[ext]:
+				irt.Hdrs = append(irt.Hdrs, relOut)
+			default:
+				// Non-header, not compiled: still belongs in srcs so the
+				// genrule's output is included in the package's input set.
+				irt.Srcs = append(irt.Srcs, relOut)
+			}
+			continue
+		}
+
+		if !isInCompileGroup(t, i) {
 			// Not assigned to a compile group: probably a header in
-			// target_sources(); we'll discover hdrs via include-dir walking
-			// below. Skip here.
+			// target_sources(); we'll discover hdrs via include-dir
+			// walking below. Skip here.
 			continue
 		}
 		irt.Srcs = append(irt.Srcs, src.Path)
+	}
+	if consumesCodegen {
+		irt.Tags = append(irt.Tags, "has-cmake-codegen")
 	}
 
 	if len(t.CompileGroups) > 0 {
@@ -141,7 +188,11 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, hostSrc string) (*ir.Target, error
 	if err != nil {
 		return nil, err
 	}
-	irt.Hdrs = hdrs
+	// Merge filesystem-discovered headers with any generated headers
+	// already appended above; sort+dedupe so the emitter's stable.
+	merged := append(irt.Hdrs, hdrs...)
+	sort.Strings(merged)
+	irt.Hdrs = dedupeStrings(merged)
 
 	if t.Install != nil && len(t.Install.Destinations) > 0 {
 		irt.Visibility = []string{"//visibility:public"}
@@ -162,6 +213,37 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, hostSrc string) (*ir.Target, error
 	}
 
 	return irt, nil
+}
+
+// dedupeStrings returns a copy of in with consecutive duplicates removed. The
+// caller is expected to have sorted in.
+func dedupeStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	out = append(out, in[0])
+	for _, s := range in[1:] {
+		if s != out[len(out)-1] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// isInCompileGroup reports whether target source index i is referenced by any
+// of the target's compileGroups. The CompileGroupIndex field on TargetSource
+// can't be trusted on its own — it's an int with default 0, indistinguishable
+// from "in group 0" vs "absent".
+func isInCompileGroup(t *fileapi.Target, i int) bool {
+	for _, cg := range t.CompileGroups {
+		for _, idx := range cg.SourceIndexes {
+			if idx == i {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // splitCompileFragments parses each whitespace-delimited fragment piece. -D
