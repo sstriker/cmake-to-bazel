@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/hermetic"
@@ -76,8 +77,13 @@ func Configure(ctx context.Context, opts Options) (Reply, error) {
 		_ = f.Close()
 	}
 
+	cmakeBin, extraBinds, err := resolveToolchainBinaries()
+	if err != nil {
+		return Reply{}, err
+	}
+
 	cmakeArgv := []string{
-		"/usr/bin/cmake",
+		cmakeBin,
 		"-S", "/src",
 		"-B", "/build",
 		"-G", "Ninja",
@@ -93,12 +99,13 @@ func Configure(ctx context.Context, opts Options) (Reply, error) {
 	}
 
 	sb := hermetic.Sandbox{
-		SourceRoot: opts.HostSourceRoot,
-		BuildDir:   opts.HostBuildDir,
-		PrefixDir:  opts.HostPrefixDir,
-		Argv:       cmakeArgv,
-		Stdout:     opts.Stdout,
-		Stderr:     opts.Stderr,
+		SourceRoot:   opts.HostSourceRoot,
+		BuildDir:     opts.HostBuildDir,
+		PrefixDir:    opts.HostPrefixDir,
+		Argv:         cmakeArgv,
+		Stdout:       opts.Stdout,
+		Stderr:       opts.Stderr,
+		ExtraROBinds: extraBinds,
 	}
 
 	if err := sb.Run(ctx); err != nil {
@@ -109,4 +116,74 @@ func Configure(ctx context.Context, opts Options) (Reply, error) {
 		HostPath:    filepath.Join(opts.HostBuildDir, ".cmake", "api", "v1", "reply"),
 		SandboxPath: "/build/.cmake/api/v1/reply",
 	}, nil
+}
+
+// resolveToolchainBinaries finds cmake and ninja on the host PATH and returns
+// the cmake invocation path plus any extra read-only bind mounts the sandbox
+// needs to make the resolved binaries reachable inside it.
+//
+// On developer machines cmake is usually at /usr/bin/cmake — already covered
+// by the standard /usr ro-bind. On GitHub Actions runners the toolcache puts
+// cmake at /usr/local/bin/cmake (still under /usr) symlinked to
+// /opt/hostedtoolcache/cmake/<ver>/x64/bin/cmake — that target is outside
+// /usr and needs an extra mount. The same applies to ninja, which cmake
+// invokes by absolute path baked into CMakeCache.txt at configure time.
+func resolveToolchainBinaries() (cmakeArgv0 string, extraBinds [][2]string, err error) {
+	cmakeOnPath, err := exec.LookPath("cmake")
+	if err != nil {
+		return "", nil, fmt.Errorf("cmakerun: cmake not on PATH: %w", err)
+	}
+	binds, err := mountsForBinary(cmakeOnPath)
+	if err != nil {
+		return "", nil, err
+	}
+	extraBinds = append(extraBinds, binds...)
+
+	if ninjaOnPath, err := exec.LookPath("ninja"); err == nil {
+		nb, err := mountsForBinary(ninjaOnPath)
+		if err != nil {
+			return "", nil, err
+		}
+		extraBinds = append(extraBinds, nb...)
+	}
+	// dedupe
+	extraBinds = dedupeBinds(extraBinds)
+
+	return cmakeOnPath, extraBinds, nil
+}
+
+// mountsForBinary returns the ro-bind pairs required to make a host binary
+// accessible inside the sandbox at the same path. If the binary's symlink
+// target is outside /usr, both the symlink dir and the target dir are
+// mounted; otherwise no extra mount is needed.
+func mountsForBinary(host string) ([][2]string, error) {
+	target, err := filepath.EvalSymlinks(host)
+	if err != nil {
+		return nil, fmt.Errorf("cmakerun: eval %s: %w", host, err)
+	}
+	var out [][2]string
+	for _, p := range []string{filepath.Dir(host), filepath.Dir(target)} {
+		if isUnderUsr(p) {
+			continue
+		}
+		out = append(out, [2]string{p, p})
+	}
+	return out, nil
+}
+
+func isUnderUsr(p string) bool {
+	return p == "/usr" || len(p) >= 5 && p[:5] == "/usr/"
+}
+
+func dedupeBinds(in [][2]string) [][2]string {
+	seen := map[[2]string]struct{}{}
+	out := make([][2]string, 0, len(in))
+	for _, m := range in {
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	return out
 }
