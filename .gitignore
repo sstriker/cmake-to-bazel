@@ -1,6 +1,9 @@
 # Build outputs
 build/
-bazel-*
+# Bazel symlink trees at the repo root (bazel-bin, bazel-out, bazel-testlogs).
+# Anchored to the root so testdata directories like
+# orchestrator/testdata/bazel-downstream/ aren't swept up.
+/bazel-*
 
 # Test outputs
 *.test
