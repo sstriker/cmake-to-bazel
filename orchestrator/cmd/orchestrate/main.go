@@ -52,6 +52,7 @@ func main() {
 		casToken        = fs.String("cas-token-file", "", "file containing a bearer token (gRPC mode only)")
 		remoteExec      = fs.String("execute", "", "remote execution endpoint: grpc://host:port | grpcs://host:port. when set, conversions submit a REAPI Action instead of forking convert-element locally")
 		remoteExecInst  = fs.String("execute-instance", "", "REAPI Execute instance_name; defaults to --cas-instance")
+		concurrency     = fs.Int("concurrency", 0, "max in-flight per-element conversions (<=0 = NumCPU). Topology is preserved; deps still land before dependents.")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -117,6 +118,7 @@ func main() {
 		ConverterBinary: *converterBinary,
 		Store:           store,
 		Executor:        executor,
+		Concurrency:     *concurrency,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
