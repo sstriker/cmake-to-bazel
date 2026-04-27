@@ -8,10 +8,11 @@ place — see the M3b row in `docs/m1-plan.md`'s milestone table.
 Validation against a real Buildbarn (vs the in-process fake) is the
 remaining 🔧 item; docker-compose Buildbarn integration is queued.
 
-The `bst source push/pull` Remote Asset API flow originally implied
-by "M3c" was reshaped: M3c shipped as orchestrator-driven `kind: git`
-checkouts (simpler), and the BuildStream-CAS-via-Asset-API approach
-moved to M3d (queued).
+The `bst source push/pull` flow originally implied by "M3c" was
+reshaped: M3c shipped as orchestrator-driven `kind: git` checkouts
+(simpler, decoupled from BuildStream), and the actual BuildStream
+source-CAS integration — sourcing FDSDK element trees by digest from
+the project's existing CAS — moved to M3d (queued).
 
 ## Context
 
