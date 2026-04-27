@@ -7,12 +7,12 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/toolchain"
 )
 
-// TestEmitResolved_RoutesPerBuildTypeFlagsIntoBazelSlots: a
-// hand-built ResolvedToolchain with -O3 on Release and -O0 on
-// Debug must land -O3 in opt_compile_flags, -O0 in
-// dbg_compile_flags. Bazel's compilation_mode toggles drive the
-// right flag set without us re-running cmake.
-func TestEmitResolved_RoutesPerBuildTypeFlagsIntoBazelSlots(t *testing.T) {
+// TestEmitResolved_RoutesPerVariantFlagsViaMapping: a hand-built
+// ResolvedToolchain with -O3 on a Release-tagged variant and -O0
+// on a Debug-tagged variant must land -O3 in opt_compile_flags,
+// -O0 in dbg_compile_flags, via cfg.VariantMapping (the default
+// CMake build-type classifier).
+func TestEmitResolved_RoutesPerVariantFlagsViaMapping(t *testing.T) {
 	rt := &toolchain.ResolvedToolchain{
 		Base: &toolchain.Model{
 			HostPlatform:   toolchain.Platform{OS: "Linux", CPU: "x86_64"},
@@ -27,9 +27,15 @@ func TestEmitResolved_RoutesPerBuildTypeFlagsIntoBazelSlots(t *testing.T) {
 				},
 			},
 		},
-		PerBuildType: map[string]toolchain.BuildTypeDelta{
-			"RELEASE": {LanguageFlags: map[string][]string{"C": {"-O3"}}},
-			"DEBUG":   {LanguageFlags: map[string][]string{"C": {"-O0", "-g"}}},
+		Variants: map[string]*toolchain.VariantDelta{
+			"release": {
+				Spec:          toolchain.Variant{Name: "release", CacheVars: map[string]string{"CMAKE_BUILD_TYPE": "Release"}},
+				LanguageFlags: map[string][]string{"C": {"-O3"}},
+			},
+			"debug": {
+				Spec:          toolchain.Variant{Name: "debug", CacheVars: map[string]string{"CMAKE_BUILD_TYPE": "Debug"}},
+				LanguageFlags: map[string][]string{"C": {"-O0", "-g"}},
+			},
 		},
 	}
 	b, err := EmitResolved(rt, Config{})
@@ -53,8 +59,9 @@ func TestEmitResolved_RoutesPerBuildTypeFlagsIntoBazelSlots(t *testing.T) {
 }
 
 // TestEmitResolved_OptModeMergesAcrossCMakeBuildTypes: Release
-// adds -O3, MinSizeRel adds -Os; both fold to Bazel's "opt" mode.
-// The merged opt_compile_flags must dedup-preserve order.
+// adds -O3, MinSizeRel adds -Os; both fold to "opt" via the
+// default mapping. The merged opt_compile_flags must dedup-
+// preserve order.
 func TestEmitResolved_OptModeMergesAcrossCMakeBuildTypes(t *testing.T) {
 	rt := &toolchain.ResolvedToolchain{
 		Base: &toolchain.Model{
@@ -62,9 +69,15 @@ func TestEmitResolved_OptModeMergesAcrossCMakeBuildTypes(t *testing.T) {
 				"C": {CompilerPath: "/usr/bin/gcc"},
 			},
 		},
-		PerBuildType: map[string]toolchain.BuildTypeDelta{
-			"RELEASE":    {LanguageFlags: map[string][]string{"C": {"-O3", "-DNDEBUG"}}},
-			"MINSIZEREL": {LanguageFlags: map[string][]string{"C": {"-Os", "-DNDEBUG"}}},
+		Variants: map[string]*toolchain.VariantDelta{
+			"release": {
+				Spec:          toolchain.Variant{Name: "release", CacheVars: map[string]string{"CMAKE_BUILD_TYPE": "Release"}},
+				LanguageFlags: map[string][]string{"C": {"-O3", "-DNDEBUG"}},
+			},
+			"minsizerel": {
+				Spec:          toolchain.Variant{Name: "minsizerel", CacheVars: map[string]string{"CMAKE_BUILD_TYPE": "MinSizeRel"}},
+				LanguageFlags: map[string][]string{"C": {"-Os", "-DNDEBUG"}},
+			},
 		},
 	}
 	b, _ := EmitResolved(rt, Config{})
@@ -78,6 +91,39 @@ func TestEmitResolved_OptModeMergesAcrossCMakeBuildTypes(t *testing.T) {
 	count := strings.Count(cfg, `"-DNDEBUG"`)
 	if count != 1 {
 		t.Errorf("-DNDEBUG appears %d times, want 1 (dedup)", count)
+	}
+}
+
+// TestEmitResolved_CustomMapping: a custom VariantMapping routes
+// a sanitizer variant into BazelFeatureNone, dropping it; the dbg
+// and opt slots stay empty.
+func TestEmitResolved_CustomMapping(t *testing.T) {
+	rt := &toolchain.ResolvedToolchain{
+		Base: &toolchain.Model{
+			Languages: map[string]toolchain.Language{
+				"C": {CompilerPath: "/usr/bin/gcc"},
+			},
+		},
+		Variants: map[string]*toolchain.VariantDelta{
+			"asan": {
+				Spec:          toolchain.Variant{Name: "asan", CacheVars: map[string]string{"CMAKE_C_FLAGS": "-fsanitize=address"}},
+				LanguageFlags: map[string][]string{"C": {"-fsanitize=address"}},
+			},
+		},
+	}
+	cfg := Config{
+		// Custom mapping: route nothing.
+		VariantMapping: func(v toolchain.Variant) toolchain.BazelFeature {
+			return toolchain.BazelFeatureNone
+		},
+	}
+	b, err := EmitResolved(rt, cfg)
+	if err != nil {
+		t.Fatalf("EmitResolved: %v", err)
+	}
+	body := string(b.Files["cc_toolchain_config.bzl"])
+	if strings.Contains(body, "-fsanitize=address") {
+		t.Errorf("variant flag should not have been routed when mapping returns None\n%s", body)
 	}
 }
 
