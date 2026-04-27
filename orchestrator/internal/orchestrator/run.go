@@ -30,8 +30,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/sstriker/cmake-to-bazel/internal/cas"
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
@@ -83,6 +85,13 @@ type Options struct {
 	// linux/x86_64 with the cmake/ninja/bwrap pins from the Makefile.
 	// Two orchestrators must use the same Platform to share cache hits.
 	Platform []reapi.PlatformProperty
+
+	// Concurrency caps how many elements process in parallel. <=0 falls
+	// back to runtime.NumCPU(). Topological ordering is preserved —
+	// dependents wait for their deps to finish — but independent
+	// subgraphs run in parallel. Set to 1 for sequential, deterministic
+	// log output (tests + dev loops).
+	Concurrency int
 
 	// Log captures orchestrator progress messages and per-element
 	// converter stdout/stderr (merged). Defaults to os.Stderr when nil.
@@ -164,8 +173,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	//
 	// LinkPaths in the consumer's manifest are absolute paths under the
 	// consumer's prefix root, so they have to be stitched per-consumer
-	// rather than stored once per dep.
-	depRecords := map[string]*depRecord{}
+	// rather than stored once per dep. The runner owns this map.
 	importsRoot := filepath.Join(opts.Out, "imports")
 	prefixRoot := filepath.Join(opts.Out, "synth-prefix")
 	shadowRoot := filepath.Join(opts.Out, "shadow")
@@ -189,128 +197,278 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		platform = defaultPlatform
 	}
 
-	resolver := newResolver(opts)
-
-	res := &Result{}
-	for _, name := range cmakeOrder {
-		el := opts.Project.Elements[name]
-		realSrcRoot, err := resolver.Resolve(ctx, el)
-		if err != nil {
-			return nil, fmt.Errorf("element %s: %w", name, err)
-		}
-		fmt.Fprintf(logOf(opts), "==> %s\n", name)
-
-		// Load any persisted allowlist entries for this element from a
-		// previous orchestrator run; build a shadow tree using the
-		// default allowlist union'd with the registered paths. cmake
-		// runs against the shadow tree so editing a non-allowlisted
-		// .c file's content doesn't change the action key.
-		if err := registry.Load(name); err != nil {
-			return nil, fmt.Errorf("element %s: load allowlist registry: %w", name, err)
-		}
-		shadowSrc, err := buildShadowForElement(shadowRoot, name, realSrcRoot, registry.Matcher(name))
-		if err != nil {
-			return nil, fmt.Errorf("element %s: shadow tree: %w", name, err)
-		}
-
-		prefixPath, err := buildPrefixForElement(prefixRoot, name, opts.Graph, depRecords, opts.Out)
-		if err != nil {
-			return nil, fmt.Errorf("element %s: synth-prefix: %w", name, err)
-		}
-
-		importsPath, err := writeImportsForElement(importsRoot, name, opts.Graph, depRecords, prefixPath)
-		if err != nil {
-			return nil, fmt.Errorf("element %s: imports manifest: %w", name, err)
-		}
-
-		// REAPI ActionCache: build a real Action proto for this
-		// conversion, query AC for a cached ActionResult, materialize
-		// outputs on hit. On miss, run the converter locally and
-		// publish the result. Two orchestrators share work via the
-		// same AC.
-		built, err := reapi.Build(reapi.Inputs{
-			ShadowDir:       shadowSrc,
-			ImportsManifest: importsPath,
-			PrefixDir:       prefixPath,
-			ConverterBin:    convAbs,
-			Platform:        platform,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("element %s: build action: %w", name, err)
-		}
-		elemOut := filepath.Join(opts.Out, "elements", name)
-		hit, fr, err := tryActionCacheHit(ctx, store, built, elemOut)
-		if err != nil {
-			return nil, fmt.Errorf("element %s: action cache lookup: %w", name, err)
-		}
-		if hit {
-			fmt.Fprintf(logOf(opts), "    cache hit %s\n", built.ActionDigest.Hash[:12])
-			res.CacheHits = append(res.CacheHits, name)
-		} else {
-			if err := os.RemoveAll(elemOut); err != nil {
-				return nil, fmt.Errorf("element %s: clear elemOut: %w", name, err)
-			}
-			if opts.Executor != nil {
-				fr, err = remoteExecute(ctx, store, opts.Executor, built, elemOut, name)
-			} else {
-				fr, err = convertOne(ctx, conv, name, shadowSrc, importsPath, prefixPath, opts)
-				if err == nil && fr == nil {
-					if err = publishActionResult(ctx, store, built, elemOut); err != nil {
-						err = fmt.Errorf("element %s: publish action result: %w", name, err)
-					}
-				}
-			}
-			if err != nil {
-				return nil, err
-			}
-			// Successes count as a cache miss; Tier-1 failures don't
-			// (same shape as the M3a action-key cache).
-			if fr == nil {
-				res.CacheMisses = append(res.CacheMisses, name)
-			}
-		}
-		if fr != nil {
-			res.Failed = append(res.Failed, *fr)
-			continue
-		}
-		res.Converted = append(res.Converted, name)
-
-		// Merge this run's read paths into the persistent registry so
-		// the next run uses an augmented shadow allowlist.
-		readPaths, err := loadReadPaths(filepath.Join(opts.Out, "elements", name, "read_paths.json"))
-		if err != nil {
-			return nil, fmt.Errorf("element %s: load read_paths: %w", name, err)
-		}
-		if err := registry.Update(name, readPaths); err != nil {
-			return nil, fmt.Errorf("element %s: update allowlist registry: %w", name, err)
-		}
-
-		// Pick up this element's bundle metadata for downstream consumers.
-		bundleDir := filepath.Join(opts.Out, "elements", name, "cmake-config")
-		raw, err := exports.FromBundle(bundleDir)
-		if err != nil {
-			return nil, fmt.Errorf("element %s: extract exports: %w", name, err)
-		}
-		relPaths, err := exports.PrefixRelativeLinkPaths(bundleDir)
-		if err != nil {
-			return nil, fmt.Errorf("element %s: link paths: %w", name, err)
-		}
-		pkg, err := synthprefix.PkgFromBundle(bundleDir)
-		if err != nil {
-			return nil, fmt.Errorf("element %s: pkg-from-bundle: %w", name, err)
-		}
-		depRecords[name] = &depRecord{
-			ElementName:        name,
-			Pkg:                pkg,
-			RawExports:         raw,
-			PrefixRelLinkPaths: relPaths,
-		}
+	r := &runner{
+		opts:         opts,
+		conv:         conv,
+		convAbs:      convAbs,
+		store:        store,
+		platform:     platform,
+		resolver:     newResolver(opts),
+		importsRoot:  importsRoot,
+		prefixRoot:   prefixRoot,
+		shadowRoot:   shadowRoot,
+		registry:     registry,
+		depRecords:   map[string]*depRecord{},
+		res:          &Result{},
 	}
 
-	if err := writeManifest(opts.Out, res); err != nil {
+	if err := r.driveElements(ctx, cmakeOrder); err != nil {
 		return nil, err
 	}
-	return res, nil
+
+	// Topo-order driver may complete elements out of input order under
+	// concurrency; sort the result lists for stable diffs.
+	sort.Strings(r.res.Converted)
+	sort.Strings(r.res.CacheHits)
+	sort.Strings(r.res.CacheMisses)
+	sort.Slice(r.res.Failed, func(i, j int) bool { return r.res.Failed[i].Element < r.res.Failed[j].Element })
+
+	if err := writeManifest(opts.Out, r.res); err != nil {
+		return nil, err
+	}
+	return r.res, nil
+}
+
+// runner holds the per-Run state shared across element-processing
+// goroutines. The mutex protects the maps and slices written by
+// completing elements (depRecords, res) and the registry's persistent
+// state.
+type runner struct {
+	opts     Options
+	conv     string
+	convAbs  string
+	store    cas.Store
+	platform []reapi.PlatformProperty
+	resolver *sourcecheckout.Resolver
+
+	importsRoot, prefixRoot, shadowRoot string
+	registry                            *allowlistreg.Registry
+
+	mu         sync.Mutex
+	depRecords map[string]*depRecord
+	res        *Result
+}
+
+// driveElements fans the cmake-only topo-ordered slice across a
+// goroutine pool. Each element waits for its deps' done channels
+// before processing; the pool size caps in-flight work without
+// reshaping topology. Tier-1 failures stay local to the element;
+// Tier-2/3 cancel the run via ctx.
+func (r *runner) driveElements(ctx context.Context, cmakeOrder []string) error {
+	concurrency := r.opts.Concurrency
+	if concurrency <= 0 {
+		concurrency = runtime.NumCPU()
+	}
+
+	// One done channel per element so dependents can wait without
+	// polling. Pre-allocate so racy readers don't see a missing entry.
+	done := make(map[string]chan struct{}, len(cmakeOrder))
+	for _, n := range cmakeOrder {
+		done[n] = make(chan struct{})
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		errMu    sync.Mutex
+		firstErr error
+	)
+	recordErr := func(e error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = e
+			cancel()
+		}
+		errMu.Unlock()
+	}
+
+	// Concurrency cap. Independent subgraphs share the slot pool.
+	sem := make(chan struct{}, concurrency)
+
+	var wg sync.WaitGroup
+	for _, name := range cmakeOrder {
+		name := name
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Always close the done channel — even on error or abort —
+			// so dependents that haven't picked up runCtx cancellation
+			// yet aren't stuck waiting.
+			defer close(done[name])
+
+			// Wait for cmake-kind deps to land. Non-cmake deps don't
+			// have done channels; skip them.
+			for _, dep := range r.opts.Graph.Edges[name] {
+				ch, ok := done[dep]
+				if !ok {
+					continue
+				}
+				select {
+				case <-ch:
+				case <-runCtx.Done():
+					return
+				}
+			}
+			if runCtx.Err() != nil {
+				return
+			}
+
+			// Acquire a concurrency slot.
+			select {
+			case sem <- struct{}{}:
+			case <-runCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			if err := r.processElement(runCtx, name); err != nil {
+				recordErr(err)
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+// processElement runs the full per-element pipeline. Returns nil on
+// success or Tier-1 (failure recorded in r.res); error on Tier-2/3.
+func (r *runner) processElement(ctx context.Context, name string) error {
+	el := r.opts.Project.Elements[name]
+	realSrcRoot, err := r.resolver.Resolve(ctx, el)
+	if err != nil {
+		return fmt.Errorf("element %s: %w", name, err)
+	}
+	fmt.Fprintf(logOf(r.opts), "==> %s\n", name)
+
+	// allowlist registry is shared persistent state — serialize.
+	r.mu.Lock()
+	if err := r.registry.Load(name); err != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("element %s: load allowlist registry: %w", name, err)
+	}
+	matcher := r.registry.Matcher(name)
+	r.mu.Unlock()
+
+	shadowSrc, err := buildShadowForElement(r.shadowRoot, name, realSrcRoot, matcher)
+	if err != nil {
+		return fmt.Errorf("element %s: shadow tree: %w", name, err)
+	}
+
+	// depRecords is populated by completed dependents. Snapshot under
+	// the lock and let buildPrefixForElement / writeImportsForElement
+	// work on the immutable copy.
+	r.mu.Lock()
+	depSnapshot := make(map[string]*depRecord, len(r.depRecords))
+	for k, v := range r.depRecords {
+		depSnapshot[k] = v
+	}
+	r.mu.Unlock()
+
+	prefixPath, err := buildPrefixForElement(r.prefixRoot, name, r.opts.Graph, depSnapshot, r.opts.Out)
+	if err != nil {
+		return fmt.Errorf("element %s: synth-prefix: %w", name, err)
+	}
+	importsPath, err := writeImportsForElement(r.importsRoot, name, r.opts.Graph, depSnapshot, prefixPath)
+	if err != nil {
+		return fmt.Errorf("element %s: imports manifest: %w", name, err)
+	}
+
+	built, err := reapi.Build(reapi.Inputs{
+		ShadowDir:       shadowSrc,
+		ImportsManifest: importsPath,
+		PrefixDir:       prefixPath,
+		ConverterBin:    r.convAbs,
+		Platform:        r.platform,
+	})
+	if err != nil {
+		return fmt.Errorf("element %s: build action: %w", name, err)
+	}
+	elemOut := filepath.Join(r.opts.Out, "elements", name)
+	hit, fr, err := tryActionCacheHit(ctx, r.store, built, elemOut)
+	if err != nil {
+		return fmt.Errorf("element %s: action cache lookup: %w", name, err)
+	}
+
+	if hit {
+		fmt.Fprintf(logOf(r.opts), "    cache hit %s\n", built.ActionDigest.Hash[:12])
+		r.appendCacheHit(name)
+	} else {
+		if err := os.RemoveAll(elemOut); err != nil {
+			return fmt.Errorf("element %s: clear elemOut: %w", name, err)
+		}
+		if r.opts.Executor != nil {
+			fr, err = remoteExecute(ctx, r.store, r.opts.Executor, built, elemOut, name)
+		} else {
+			fr, err = convertOne(ctx, r.conv, name, shadowSrc, importsPath, prefixPath, r.opts)
+			if err == nil && fr == nil {
+				if err = publishActionResult(ctx, r.store, built, elemOut); err != nil {
+					err = fmt.Errorf("element %s: publish action result: %w", name, err)
+				}
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if fr == nil {
+			r.appendCacheMiss(name)
+		}
+	}
+	if fr != nil {
+		r.appendFailure(*fr)
+		return nil
+	}
+
+	readPaths, err := loadReadPaths(filepath.Join(r.opts.Out, "elements", name, "read_paths.json"))
+	if err != nil {
+		return fmt.Errorf("element %s: load read_paths: %w", name, err)
+	}
+
+	bundleDir := filepath.Join(r.opts.Out, "elements", name, "cmake-config")
+	raw, err := exports.FromBundle(bundleDir)
+	if err != nil {
+		return fmt.Errorf("element %s: extract exports: %w", name, err)
+	}
+	relPaths, err := exports.PrefixRelativeLinkPaths(bundleDir)
+	if err != nil {
+		return fmt.Errorf("element %s: link paths: %w", name, err)
+	}
+	pkg, err := synthprefix.PkgFromBundle(bundleDir)
+	if err != nil {
+		return fmt.Errorf("element %s: pkg-from-bundle: %w", name, err)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.registry.Update(name, readPaths); err != nil {
+		return fmt.Errorf("element %s: update allowlist registry: %w", name, err)
+	}
+	r.depRecords[name] = &depRecord{
+		ElementName:        name,
+		Pkg:                pkg,
+		RawExports:         raw,
+		PrefixRelLinkPaths: relPaths,
+	}
+	r.res.Converted = append(r.res.Converted, name)
+	return nil
+}
+
+func (r *runner) appendCacheHit(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.res.CacheHits = append(r.res.CacheHits, name)
+}
+
+func (r *runner) appendCacheMiss(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.res.CacheMisses = append(r.res.CacheMisses, name)
+}
+
+func (r *runner) appendFailure(fr FailureRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.res.Failed = append(r.res.Failed, fr)
 }
 
 // convertOne runs the converter against one element. Returns (nil, nil) on
