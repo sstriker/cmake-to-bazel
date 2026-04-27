@@ -1,5 +1,5 @@
 .PHONY: all converter orchestrator diff history test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
-        e2e-orchestrate fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
+        e2e-orchestrate e2e-bazel-build fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
 # enforced softly here for dev-loop visibility.
@@ -67,6 +67,14 @@ e2e-fmt: check-tools converter fetch-fmt
 
 e2e-orchestrate: check-tools converter orchestrator
 	$(GO) test -tags=e2e -run TestE2E_Orchestrate ./orchestrator/...
+
+# M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
+# in addition to the standard cmake/ninja/bwrap; if absent the test
+# self-skips (runtime LookPath check). Spins the orchestrator against
+# the FDSDK subset, then runs `bazel build //:smoke` against a
+# downstream consumer that depends on a converted element.
+e2e-bazel-build: check-tools converter orchestrator
+	$(GO) test -tags=e2e -run TestE2E_BazelBuild ./orchestrator/...
 
 # Fetch the M2 acceptance package out-of-band. Idempotent.
 fetch-fmt:
