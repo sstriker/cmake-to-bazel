@@ -1,5 +1,5 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
-        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-buildbarn e2e-buildbarn-execute \
+        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-buildbarn e2e-buildbarn-execute \
         buildbarn-up buildbarn-down \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -94,6 +94,14 @@ e2e-bazel-build: check-tools converter orchestrator
 # required; just real cmake + bwrap (already covered by check-tools).
 e2e-cmake-consumer: check-tools converter orchestrator
 	$(GO) test -tags=e2e -run TestE2E_CMakeConsumer ./orchestrator/...
+
+# Toolchain configure-skip e2e: runs the orchestrator twice against the
+# fdsdk-subset (without and with --toolchain-cmake-file) and asserts
+# the second pass's cumulative cmake-configure wall-clock is shorter.
+# Validates the derive-toolchain -> toolchain.cmake -> cmakerun
+# integration end-to-end.
+e2e-toolchain-skip: check-tools converter orchestrator derive-toolchain
+	$(GO) test -tags=e2e -run TestE2E_Toolchain_SkipReducesConfigureTime ./orchestrator/...
 
 # Real-Buildbarn validation. Brings up bb-storage via docker compose,
 # runs the cache-share keystone test against grpc://127.0.0.1:8980,
