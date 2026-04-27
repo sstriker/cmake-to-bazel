@@ -1,4 +1,4 @@
-// Package failure carries the typed Tier-1 failure taxonomy (per-element
+// Package failure carries the typed Tier-1 failure taxonomy (per-codebase
 // converter errors that the orchestrator in M3 collects into the manifest's
 // `excluded` block without aborting the bulk pass).
 //

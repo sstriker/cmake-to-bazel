@@ -32,9 +32,10 @@ type Options struct {
 	// a different path (e.g. /src). Defaults to the codemodel's source path.
 	HostSourceRoot string
 
-	// Imports resolves cross-element imported targets (find_package-style
-	// names) to Bazel labels. Optional; nil disables manifest lookup, in
-	// which case unresolved link deps trigger unresolved-link-dep.
+	// Imports resolves out-of-tree imported targets (find_package-style
+	// names that aren't part of the current codebase) to Bazel labels.
+	// Optional; nil disables manifest lookup, in which case unresolved
+	// link deps trigger unresolved-link-dep.
 	Imports *manifest.Resolver
 }
 
@@ -73,7 +74,7 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 
 	cc := newCodegenContext()
 
-	// Build the in-element id -> Bazel-rule-name map up front so dep
+	// Build the in-codebase id -> Bazel-rule-name map up front so dep
 	// lowering can map t.Dependencies[].Id to a label without re-walking
 	// configurations. UTILITY targets (add_custom_target nodes) are
 	// excluded — they have no Bazel equivalent, so depending on them is a
@@ -217,13 +218,13 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *nin
 	sort.Strings(merged)
 	irt.Hdrs = dedupeStrings(merged)
 
-	// Lower dependencies. In-element target ids look like `<name>::@<hash>`
-	// where <name> is the CMake target name; cross-element find_package-
+	// Lower dependencies. In-codebase target ids look like `<name>::@<hash>`
+	// where <name> is the CMake target name; out-of-tree find_package-
 	// imported targets carry a namespaced name like `Pkg::tgt::@<hash>`.
 	// Resolution order:
 	//
-	//   1. In-element non-UTILITY target -> ":<name>"
-	//   2. In-element UTILITY target -> skip silently (no Bazel equivalent)
+	//   1. In-codebase non-UTILITY target -> ":<name>"
+	//   2. In-codebase UTILITY target -> skip silently (no Bazel equivalent)
 	//   3. CMake target name in imports manifest -> bazel_label
 	//   4. Otherwise -> Tier-1 unresolved-link-dep.
 	for _, dep := range t.Dependencies {
@@ -240,15 +241,15 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *nin
 			continue
 		}
 		return nil, failure.New(failure.UnresolvedLinkDep,
-			"target %q depends on %q which is neither in-element nor in the imports manifest",
+			"target %q depends on %q which is neither in-codebase nor in the imports manifest",
 			t.Name, cmakeName)
 	}
 
-	// Cross-element link fragments. CMake records IMPORTED_LOCATION
-	// paths in t.Link.CommandFragments[role="libraries"] as resolved
-	// absolute paths under the synth-prefix tree. The orchestrator's
-	// imports manifest carries each export's link paths so we can
-	// rewrite those fragments to Bazel labels.
+	// Out-of-tree link fragments. CMake records IMPORTED_LOCATION paths
+	// in t.Link.CommandFragments[role="libraries"] as resolved absolute
+	// paths under the synth-prefix tree. The orchestrator's imports
+	// manifest carries each export's link paths so we can rewrite those
+	// fragments to Bazel labels.
 	if t.Link != nil {
 		seen := map[string]bool{}
 		for _, d := range irt.Deps {

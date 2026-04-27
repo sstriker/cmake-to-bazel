@@ -32,7 +32,7 @@ func TestToIR_CrossElementDep_ResolvedViaManifest(t *testing.T) {
 					SourceIndexes: []int{0},
 				}},
 				Dependencies: []fileapi.TargetDependency{
-					// In-element ids hash on `::@`. Cross-element ones use
+					// In-codebase ids hash on `::@`. Out-of-tree ones use
 					// the same shape — only the namespace prefix differs.
 					{Id: "Glibc::c::@somehash"},
 				},
@@ -69,9 +69,13 @@ func TestToIR_CrossElementDep_ResolvedViaManifest(t *testing.T) {
 	}
 }
 
-// TestToIR_CrossElementDep_UnresolvedFails verifies that a dep id absent from
-// both the in-element table and the imports manifest produces a typed
-// unresolved-link-dep error rather than silently dropping.
+// TestToIR_CrossElementDep_UnresolvedFails verifies that a dep id absent
+// from both the in-codebase table and the imports manifest produces a
+// typed unresolved-link-dep error rather than silently dropping.
+//
+// The test name says "CrossElement" (orchestrator-side terminology) for
+// historical reasons; the converter sees these only as out-of-tree
+// CMake target names.
 func TestToIR_CrossElementDep_UnresolvedFails(t *testing.T) {
 	r := &fileapi.Reply{
 		Codemodel: fileapi.Codemodel{
