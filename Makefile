@@ -1,5 +1,5 @@
-.PHONY: all converter test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
-        fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
+.PHONY: all converter orchestrator test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
+        e2e-orchestrate fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
 # enforced softly here for dev-loop visibility.
@@ -17,15 +17,22 @@ GOFLAGS   ?=
 BUILD_DIR ?= build
 BIN_DIR   := $(BUILD_DIR)/bin
 
-CONVERTER := $(BIN_DIR)/convert-element
+CONVERTER    := $(BIN_DIR)/convert-element
+ORCHESTRATOR := $(BIN_DIR)/orchestrate
 
-all: converter
+all: converter orchestrator
 
 converter: $(CONVERTER)
+
+orchestrator: $(ORCHESTRATOR)
 
 $(CONVERTER):
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(CONVERTER) ./converter/cmd/convert-element
+
+$(ORCHESTRATOR):
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(ORCHESTRATOR) ./orchestrator/cmd/orchestrate
 
 # Unit tests: pre-recorded File API fixtures, no cmake required.
 test:
@@ -43,6 +50,9 @@ e2e-libdrm: check-tools converter
 
 e2e-fmt: check-tools converter fetch-fmt
 	$(GO) test -tags=e2e -run TestE2E_Fmt ./converter/...
+
+e2e-orchestrate: check-tools converter orchestrator
+	$(GO) test -tags=e2e -run TestE2E_Orchestrate ./orchestrator/...
 
 # Fetch the M2 acceptance package out-of-band. Idempotent.
 fetch-fmt:

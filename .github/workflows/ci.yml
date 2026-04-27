@@ -64,6 +64,9 @@ jobs:
       - name: fmt e2e (M2 acceptance)
         run: make e2e-fmt
 
+      - name: orchestrate e2e (M3a step 2)
+        run: make e2e-orchestrate
+
       # libdrm e2e is gated on M1 milestone completion; enable when ready.
       # - name: libdrm e2e
       #   run: make e2e-libdrm
