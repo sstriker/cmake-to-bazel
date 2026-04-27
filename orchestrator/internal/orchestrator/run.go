@@ -40,6 +40,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/allowlistreg"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/exports"
+	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/sourcecheckout"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/synthprefix"
 )
 
@@ -188,10 +189,12 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		platform = defaultPlatform
 	}
 
+	resolver := newResolver(opts)
+
 	res := &Result{}
 	for _, name := range cmakeOrder {
 		el := opts.Project.Elements[name]
-		realSrcRoot, err := resolveSource(el, opts.SourcesBase)
+		realSrcRoot, err := resolver.Resolve(ctx, el)
 		if err != nil {
 			return nil, fmt.Errorf("element %s: %w", name, err)
 		}
@@ -354,38 +357,17 @@ func convertOne(ctx context.Context, conv, name, srcRoot, importsPath, prefixPat
 	return nil, fmt.Errorf("element %s: convert-element: %w", name, err)
 }
 
-// resolveSource picks the source tree path for an element. If
-// SourcesBase is set, uses <SourcesBase>/<element-name>. Otherwise falls
-// back to the first `kind: local` source's path, resolved relative to the
-// .bst file's directory.
-func resolveSource(el *element.Element, sourcesBase string) (string, error) {
-	if sourcesBase != "" {
-		// Use the element name (with directory components) under the
-		// shared base. e.g. components/hello -> <base>/components/hello.
-		p := filepath.Join(sourcesBase, filepath.FromSlash(el.Name))
-		if _, err := os.Stat(p); err != nil {
-			return "", fmt.Errorf("source dir %q: %w", p, err)
-		}
-		return p, nil
+// newResolver builds a sourcecheckout.Resolver wired to the
+// orchestrator's source cache (under <Out>/sources/) and respecting
+// the --sources-base override when set.
+func newResolver(opts Options) *sourcecheckout.Resolver {
+	return &sourcecheckout.Resolver{
+		CacheDir:    filepath.Join(opts.Out, "sources"),
+		SourcesBase: opts.SourcesBase,
+		ElementSourceDir: func(el *element.Element) string {
+			return filepath.Dir(el.SourcePath)
+		},
 	}
-	for _, s := range el.Sources {
-		if s.Kind == "local" {
-			path, ok := s.Extra["path"].(string)
-			if !ok || path == "" {
-				return "", errors.New("local source missing path")
-			}
-			abs := path
-			if !filepath.IsAbs(path) {
-				abs = filepath.Join(filepath.Dir(el.SourcePath), path)
-			}
-			abs = filepath.Clean(abs)
-			if _, err := os.Stat(abs); err != nil {
-				return "", fmt.Errorf("source dir %q: %w", abs, err)
-			}
-			return abs, nil
-		}
-	}
-	return "", errors.New("no kind:local source; pass --sources-base to override")
 }
 
 func loadFailure(name, path string) (*FailureRecord, error) {
