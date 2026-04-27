@@ -1,4 +1,4 @@
-.PHONY: all converter orchestrator test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
+.PHONY: all converter orchestrator diff test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
         e2e-orchestrate fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
@@ -19,12 +19,15 @@ BIN_DIR   := $(BUILD_DIR)/bin
 
 CONVERTER    := $(BIN_DIR)/convert-element
 ORCHESTRATOR := $(BIN_DIR)/orchestrate
+DIFF         := $(BIN_DIR)/orchestrate-diff
 
-all: converter orchestrator
+all: converter orchestrator diff
 
 converter: $(CONVERTER)
 
 orchestrator: $(ORCHESTRATOR)
+
+diff: $(DIFF)
 
 $(CONVERTER):
 	@mkdir -p $(BIN_DIR)
@@ -33,6 +36,10 @@ $(CONVERTER):
 $(ORCHESTRATOR):
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(ORCHESTRATOR) ./orchestrator/cmd/orchestrate
+
+$(DIFF):
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(DIFF) ./orchestrator/cmd/orchestrate-diff
 
 # Unit tests: pre-recorded File API fixtures, no cmake required.
 test:
