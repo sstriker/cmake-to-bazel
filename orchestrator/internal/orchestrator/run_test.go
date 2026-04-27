@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/orchestrator"
@@ -66,6 +67,14 @@ func stubConverter() int {
 	// that worker output reaches the orchestrator.
 	if sentinel := os.Getenv("ORCHESTRATOR_STUB_STDOUT_SENTINEL"); sentinel != "" {
 		fmt.Println(sentinel)
+	}
+	// Optional sleep, used by timeout tests. Values parsed via
+	// time.ParseDuration; bad values fall through silently (the test
+	// will then fail because no work happened).
+	if sleep := os.Getenv("ORCHESTRATOR_STUB_SLEEP"); sleep != "" {
+		if d, err := time.ParseDuration(sleep); err == nil {
+			time.Sleep(d)
+		}
 	}
 
 	switch mode {

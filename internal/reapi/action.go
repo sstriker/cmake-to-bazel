@@ -33,8 +33,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/sstriker/cmake-to-bazel/internal/cas"
 )
@@ -68,6 +70,11 @@ type Inputs struct {
 	// with different cmake/ninja/bwrap pins produce different Action
 	// digests by design.
 	Platform []PlatformProperty
+
+	// Timeout, when non-zero, is encoded into Action.timeout so
+	// remote workers enforce a hard cap on this conversion. Zero
+	// leaves Action.timeout unset (worker-default applies).
+	Timeout time.Duration
 }
 
 // BuiltAction is the result of Build: a complete REAPI Action plus
@@ -141,6 +148,9 @@ func Build(in Inputs) (*BuiltAction, error) {
 		InputRootDigest: ir.RootDigest,
 		DoNotCache:      false,
 		Platform:        cmd.Platform,
+	}
+	if in.Timeout > 0 {
+		action.Timeout = durationpb.New(in.Timeout)
 	}
 	actionDigest, actionBlob, err := cas.DigestProto(action)
 	if err != nil {

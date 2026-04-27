@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sstriker/cmake-to-bazel/internal/cas"
 )
@@ -137,6 +138,32 @@ func TestBuild_ArgvHasCanonicalPaths(t *testing.T) {
 		if args[i] != want[i] {
 			t.Errorf("argv[%d]: got %q want %q", i, args[i], want[i])
 		}
+	}
+}
+
+func TestBuild_TimeoutSetsAction(t *testing.T) {
+	in := fixture(t, false, false)
+	in.Timeout = 17 * time.Minute
+	a, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if a.Action.Timeout == nil {
+		t.Fatalf("Action.Timeout is nil; should have been set from Inputs.Timeout")
+	}
+	if got := a.Action.Timeout.AsDuration(); got != 17*time.Minute {
+		t.Errorf("Action.Timeout = %v, want 17m", got)
+	}
+}
+
+func TestBuild_NoTimeoutLeavesActionUnset(t *testing.T) {
+	in := fixture(t, false, false)
+	a, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if a.Action.Timeout != nil {
+		t.Errorf("Action.Timeout should be unset when Inputs.Timeout is zero, got %v", a.Action.Timeout.AsDuration())
 	}
 }
 
