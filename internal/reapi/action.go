@@ -17,6 +17,7 @@
 //	cmake-config           (directory; the bundle)
 //	failure.json           (only on Tier-1 failure)
 //	read_paths.json
+//	timings.json           (per-phase wall-clock timings)
 //
 // Outputs sit at the top level of the action's working directory, NOT
 // nested under the input layout — they don't exist before the run
@@ -119,6 +120,7 @@ const (
 	pathOutBundle  = "cmake-config"
 	pathOutFailure = "failure.json"
 	pathOutReads   = "read_paths.json"
+	pathOutTimings = "timings.json"
 )
 
 // Build constructs the Action / Command / InputRoot for one conversion.
@@ -177,6 +179,7 @@ func buildCommand(in Inputs) *repb.Command {
 		"--out-bundle-dir", pathOutBundle,
 		"--out-failure", pathOutFailure,
 		"--out-read-paths", pathOutReads,
+		"--out-timings", pathOutTimings,
 	}
 	if in.ImportsManifest != "" {
 		args = append(args, "--imports-manifest", pathImports)
@@ -202,6 +205,7 @@ func buildCommand(in Inputs) *repb.Command {
 			pathOutBundle,
 			pathOutFailure,
 			pathOutReads,
+			pathOutTimings,
 		},
 		WorkingDirectory: "",
 		Platform:         platform,

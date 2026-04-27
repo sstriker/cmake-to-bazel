@@ -128,6 +128,7 @@ func TestBuild_ArgvHasCanonicalPaths(t *testing.T) {
 		"--out-bundle-dir", "cmake-config",
 		"--out-failure", "failure.json",
 		"--out-read-paths", "read_paths.json",
+		"--out-timings", "timings.json",
 		"--imports-manifest", "imports.json",
 		"--prefix-dir", "prefix",
 	}
@@ -170,7 +171,7 @@ func TestBuild_NoTimeoutLeavesActionUnset(t *testing.T) {
 func TestBuild_OutputPaths(t *testing.T) {
 	in := fixture(t, false, false)
 	a, _ := Build(in)
-	want := []string{"BUILD.bazel", "cmake-config", "failure.json", "read_paths.json"}
+	want := []string{"BUILD.bazel", "cmake-config", "failure.json", "read_paths.json", "timings.json"}
 	if len(a.OutputPaths) != len(want) {
 		t.Fatalf("output_paths len: got %d want %d", len(a.OutputPaths), len(want))
 	}

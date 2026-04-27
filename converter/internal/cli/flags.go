@@ -61,6 +61,13 @@ type Args struct {
 	// per-package allowlist registries.
 	OutReadPaths string
 
+	// OutTimings, when non-empty, writes a JSON document with
+	// per-phase wall-clock timings: cmake configure, translation
+	// (lower + emit), and total. M3 aggregates these into a final
+	// summary so operators can see configure-vs-translate ratios
+	// across a distro.
+	OutTimings string
+
 	// AllowCMakeVersionMismatch lets the converter run with a cmake
 	// version below the architectural floor (3.20 — codemodel-v2 minimum).
 	// Local-dev only; M3 must never set this.
@@ -88,6 +95,7 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.OutFailure, "out-failure", "", "write Tier-1 failure JSON here on per-codebase errors (optional)")
 	fs.StringVar(&a.ImportsManifest, "imports-manifest", "", "path to JSON imports manifest mapping out-of-tree CMake targets to Bazel labels (optional)")
 	fs.StringVar(&a.OutReadPaths, "out-read-paths", "", "write JSON array of source-tree paths cmake read at configure time (requires --source-root, optional)")
+	fs.StringVar(&a.OutTimings, "out-timings", "", "write JSON with per-phase wall-clock timings (cmake configure, translation, total)")
 	fs.BoolVar(&a.AllowCMakeVersionMismatch, "allow-cmake-version-mismatch", false, "let convert-element run with cmake older than the codemodel-v2 floor (local-dev escape hatch)")
 	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory mounted at /opt/prefix and added to CMAKE_PREFIX_PATH (out-of-tree synth-prefix; orchestrator-driven)")
 
