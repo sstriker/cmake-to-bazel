@@ -39,7 +39,7 @@ func TestE2E_HelloWorld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fileapi.Load: %v", err)
 	}
-	pkg, err := lower.ToIR(r, lower.Options{HostSourceRoot: src})
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src})
 	if err != nil {
 		t.Fatalf("ToIR: %v", err)
 	}

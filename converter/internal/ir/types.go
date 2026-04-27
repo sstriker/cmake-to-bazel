@@ -102,4 +102,19 @@ type Target struct {
 	// LinkLanguage feeds IMPORTED_LINK_INTERFACE_LANGUAGES_<CONFIG> in the
 	// per-config bundle file. Single language per target in M1.
 	LinkLanguage string
+
+	// Tags maps to Bazel's tags attribute. Stable taxonomy is documented
+	// in docs/codegen-tags.md. Sorted by the emitter for deterministic
+	// output.
+	Tags []string
+
+	// Genrule-specific fields. Populated only when Kind == KindGenrule.
+
+	// GenruleCmd is the shell command to run, with $(SRCS), $(OUTS), etc.
+	// in Bazel's locations() form (or the literal command if no in-Bazel
+	// substitutions are needed).
+	GenruleCmd string
+
+	// GenruleOuts are package-relative output paths the genrule produces.
+	GenruleOuts []string
 }

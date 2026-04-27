@@ -50,7 +50,7 @@
 	"kind" : "codemodel",
 	"paths" : 
 	{
-		"build" : "/tmp/tmp.eiXTOh7QY2",
+		"build" : "/tmp/tmp.t2sQEy0OnB",
 		"source" : "/home/user/cmake-to-bazel/converter/testdata/sample-projects/hello-world"
 	},
 	"version" : 

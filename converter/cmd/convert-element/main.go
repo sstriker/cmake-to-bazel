@@ -23,6 +23,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/lower"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 )
 
 func main() {
@@ -37,6 +38,7 @@ func main() {
 
 func run(a cli.Args) error {
 	replyDir := a.ReplyDir
+	var ninjaPath string
 	if replyDir == "" {
 		// Real-cmake path: spin a tmp build dir, configure under bwrap, then
 		// load the reply produced inside it.
@@ -57,13 +59,39 @@ func run(a cli.Args) error {
 			return failure.New(failure.ConfigureFailed, "%v", err)
 		}
 		replyDir = reply.HostPath
+		ninjaPath = filepath.Join(buildDir, "build.ninja")
+	} else {
+		// Offline path: a build.ninja is sometimes checked in alongside the
+		// reply (recording script captures both); use it if present.
+		candidate := filepath.Join(filepath.Dir(replyDir), "..", "..", "..", "build.ninja")
+		// fileapi reply directory layout is <build>/.cmake/api/v1/reply, so
+		// build.ninja lives four parents up. Resolve and check.
+		candidate, _ = filepath.Abs(candidate)
+		if _, err := os.Stat(candidate); err == nil {
+			ninjaPath = candidate
+		}
+		// Test fixtures stash build.ninja directly inside the reply dir for
+		// convenience; check there too.
+		if direct := filepath.Join(replyDir, "build.ninja"); ninjaPath == "" {
+			if _, err := os.Stat(direct); err == nil {
+				ninjaPath = direct
+			}
+		}
 	}
 
 	r, err := fileapi.Load(replyDir)
 	if err != nil {
 		return failure.New(failure.FileAPIMissing, "load reply: %v", err)
 	}
-	pkg, err := lower.ToIR(r, lower.Options{HostSourceRoot: a.SourceRoot})
+
+	var g *ninja.Graph
+	if ninjaPath != "" {
+		g, err = ninja.ParseFile(ninjaPath)
+		if err != nil {
+			return failure.New(failure.NinjaParseFailed, "parse %s: %v", ninjaPath, err)
+		}
+	}
+	pkg, err := lower.ToIR(r, g, lower.Options{HostSourceRoot: a.SourceRoot})
 	if err != nil {
 		return err
 	}

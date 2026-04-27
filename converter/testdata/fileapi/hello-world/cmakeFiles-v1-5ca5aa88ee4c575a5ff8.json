@@ -16,7 +16,7 @@
 		},
 		{
 			"isGenerated" : true,
-			"path" : "/tmp/tmp.eiXTOh7QY2/CMakeFiles/3.28.3/CMakeSystem.cmake"
+			"path" : "/tmp/tmp.t2sQEy0OnB/CMakeFiles/3.28.3/CMakeSystem.cmake"
 		},
 		{
 			"isCMake" : true,
@@ -290,7 +290,7 @@
 		},
 		{
 			"isGenerated" : true,
-			"path" : "/tmp/tmp.eiXTOh7QY2/CMakeFiles/3.28.3/CMakeCCompiler.cmake"
+			"path" : "/tmp/tmp.t2sQEy0OnB/CMakeFiles/3.28.3/CMakeCCompiler.cmake"
 		},
 		{
 			"isCMake" : true,
@@ -414,13 +414,13 @@
 		},
 		{
 			"isGenerated" : true,
-			"path" : "/tmp/tmp.eiXTOh7QY2/CMakeFiles/3.28.3/CMakeCCompiler.cmake"
+			"path" : "/tmp/tmp.t2sQEy0OnB/CMakeFiles/3.28.3/CMakeCCompiler.cmake"
 		}
 	],
 	"kind" : "cmakeFiles",
 	"paths" : 
 	{
-		"build" : "/tmp/tmp.eiXTOh7QY2",
+		"build" : "/tmp/tmp.t2sQEy0OnB",
 		"source" : "/home/user/cmake-to-bazel/converter/testdata/sample-projects/hello-world"
 	},
 	"version" : 

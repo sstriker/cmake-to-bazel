@@ -45,8 +45,14 @@ record_one() {
     mkdir -p "$out"
     cp -R "$build/.cmake/api/v1/reply/." "$out/"
 
-    # Also stash build.ninja for genrule recovery tests in M2; harmless in M1.
+    # Also stash build.ninja and CMakeFiles/rules.ninja for genrule recovery
+    # tests; the included rules file lives next door and is opaque to ninja
+    # consumers but our parser exposes it via the include directive.
     cp "$build/build.ninja" "$out/build.ninja"
+    if [[ -f "$build/CMakeFiles/rules.ninja" ]]; then
+        mkdir -p "$out/CMakeFiles"
+        cp "$build/CMakeFiles/rules.ninja" "$out/CMakeFiles/rules.ninja"
+    fi
 
     echo "    -> $(find "$out" -type f | wc -l) files in $out"
     rm -rf "$build"

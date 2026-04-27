@@ -58,7 +58,7 @@ func TestE2E_HelloWorld_BundleDropIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	pkg, err := lower.ToIR(r, lower.Options{HostSourceRoot: helloSrc})
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: helloSrc})
 	if err != nil {
 		t.Fatalf("ToIR: %v", err)
 	}

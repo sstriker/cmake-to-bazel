@@ -14,21 +14,25 @@ import (
 // either exercised here or marked (M2)/reserved in the doc.
 
 func TestFailure_UnsupportedTargetType(t *testing.T) {
+	// OBJECT_LIBRARY isn't lowered yet; UTILITY (M2) is silently skipped
+	// since the underlying add_custom_command is recovered separately, so
+	// we use OBJECT_LIBRARY here to exercise the unsupported-target-type
+	// emission point.
 	r := &fileapi.Reply{
 		Codemodel: fileapi.Codemodel{
 			Configurations: []fileapi.Configuration{{
 				Name:    "Release",
-				Targets: []fileapi.ConfigTargetRef{{Name: "util", Id: "util::@1"}},
+				Targets: []fileapi.ConfigTargetRef{{Name: "obj", Id: "obj::@1"}},
 			}},
 		},
 		Targets: map[string]fileapi.Target{
-			"util::@1": {
-				Name: "util",
-				Type: "UTILITY", // not in lower's switch
+			"obj::@1": {
+				Name: "obj",
+				Type: "OBJECT_LIBRARY",
 			},
 		},
 	}
-	_, err := lower.ToIR(r, lower.Options{})
+	_, err := lower.ToIR(r, nil, lower.Options{})
 	assertCode(t, err, failure.UnsupportedTargetType)
 }
 
@@ -51,7 +55,7 @@ func TestFailure_UnsupportedCustomCommand_GeneratedSource(t *testing.T) {
 			},
 		},
 	}
-	_, err := lower.ToIR(r, lower.Options{})
+	_, err := lower.ToIR(r, nil, lower.Options{})
 	assertCode(t, err, failure.UnsupportedCustomCommand)
 }
 
@@ -67,7 +71,7 @@ func TestFailure_FileAPIMalformed_DanglingTargetRef(t *testing.T) {
 		},
 		Targets: map[string]fileapi.Target{}, // ref not present
 	}
-	_, err := lower.ToIR(r, lower.Options{})
+	_, err := lower.ToIR(r, nil, lower.Options{})
 	assertCode(t, err, failure.FileAPIMalformed)
 }
 
@@ -83,7 +87,7 @@ func TestFailure_UnsupportedTargetType_MultiConfig(t *testing.T) {
 			},
 		},
 	}
-	_, err := lower.ToIR(r, lower.Options{})
+	_, err := lower.ToIR(r, nil, lower.Options{})
 	assertCode(t, err, failure.UnsupportedTargetType)
 }
 
