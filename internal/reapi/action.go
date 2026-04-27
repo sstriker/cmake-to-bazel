@@ -13,10 +13,15 @@
 //
 // Canonical output paths (declared in Command.output_paths):
 //
-//	out/BUILD.bazel
-//	out/cmake-config       (directory; the bundle)
-//	out/failure.json       (only on Tier-1 failure)
-//	out/read_paths.json
+//	BUILD.bazel
+//	cmake-config           (directory; the bundle)
+//	failure.json           (only on Tier-1 failure)
+//	read_paths.json
+//
+// Outputs sit at the top level of the action's working directory, NOT
+// nested under the input layout — they don't exist before the run
+// (which is exactly what input/output separation requires) and the
+// orchestrator's existing per-element layout already uses these paths.
 //
 // The argv inside the action references those paths; the host paths
 // the orchestrator actually uses are NOT part of the Action — that's
@@ -103,10 +108,10 @@ const (
 	pathImports    = "imports.json"
 	pathBinDir     = "bin"
 	pathConverter  = "convert-element"
-	pathOutBuild   = "out/BUILD.bazel"
-	pathOutBundle  = "out/cmake-config"
-	pathOutFailure = "out/failure.json"
-	pathOutReads   = "out/read_paths.json"
+	pathOutBuild   = "BUILD.bazel"
+	pathOutBundle  = "cmake-config"
+	pathOutFailure = "failure.json"
+	pathOutReads   = "read_paths.json"
 )
 
 // Build constructs the Action / Command / InputRoot for one conversion.

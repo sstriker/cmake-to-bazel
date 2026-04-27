@@ -16,18 +16,17 @@ func stageOutputs(t *testing.T) (rootDir string, outputPaths []string) {
 	t.Helper()
 	rootDir = t.TempDir()
 
-	out := filepath.Join(rootDir, "out")
-	mustMkdirP(t, out, "cmake-config")
-	mustWrite(t, filepath.Join(out, "BUILD.bazel"), "cc_library(name = \"x\")\n")
-	mustWrite(t, filepath.Join(out, "read_paths.json"), `{"version":1,"paths":[]}`)
-	mustWrite(t, filepath.Join(out, "cmake-config", "xConfig.cmake"), "include(...)\n")
-	mustWrite(t, filepath.Join(out, "cmake-config", "xTargets.cmake"), "add_library(x INTERFACE)\n")
+	mustMkdirP(t, rootDir, "cmake-config")
+	mustWrite(t, filepath.Join(rootDir, "BUILD.bazel"), "cc_library(name = \"x\")\n")
+	mustWrite(t, filepath.Join(rootDir, "read_paths.json"), `{"version":1,"paths":[]}`)
+	mustWrite(t, filepath.Join(rootDir, "cmake-config", "xConfig.cmake"), "include(...)\n")
+	mustWrite(t, filepath.Join(rootDir, "cmake-config", "xTargets.cmake"), "add_library(x INTERFACE)\n")
 	// no failure.json — successful run
 	return rootDir, []string{
-		"out/BUILD.bazel",
-		"out/cmake-config",
-		"out/failure.json",
-		"out/read_paths.json",
+		"BUILD.bazel",
+		"cmake-config",
+		"failure.json",
+		"read_paths.json",
 	}
 }
 
@@ -47,28 +46,25 @@ func TestSynthAndMaterialize_RoundTrip(t *testing.T) {
 	if ar.ExitCode != 0 {
 		t.Errorf("exit_code: got %d want 0", ar.ExitCode)
 	}
-	// failure.json wasn't on disk -> not in result.
 	for _, of := range ar.OutputFiles {
-		if of.Path == "out/failure.json" {
+		if of.Path == "failure.json" {
 			t.Errorf("failure.json should not appear when missing on disk")
 		}
 	}
-	// stdout uploaded.
 	if ar.StdoutDigest == nil {
 		t.Errorf("stdout digest should be set")
 	}
 
-	// Materialize into a fresh dir and diff.
 	dst := t.TempDir()
 	if err := MaterializeResult(ctx, store, ar, dst); err != nil {
 		t.Fatalf("MaterializeResult: %v", err)
 	}
 
 	for _, rel := range []string{
-		"out/BUILD.bazel",
-		"out/read_paths.json",
-		"out/cmake-config/xConfig.cmake",
-		"out/cmake-config/xTargets.cmake",
+		"BUILD.bazel",
+		"read_paths.json",
+		"cmake-config/xConfig.cmake",
+		"cmake-config/xTargets.cmake",
 	} {
 		srcBody, err := os.ReadFile(filepath.Join(src, rel))
 		if err != nil {
@@ -86,7 +82,7 @@ func TestSynthAndMaterialize_RoundTrip(t *testing.T) {
 
 func TestSynthesize_FailureJSONIncludedWhenPresent(t *testing.T) {
 	rootDir, paths := stageOutputs(t)
-	mustWrite(t, filepath.Join(rootDir, "out", "failure.json"), `{"code":"x"}`)
+	mustWrite(t, filepath.Join(rootDir, "failure.json"), `{"code":"x"}`)
 
 	store, _ := cas.NewLocalStore(t.TempDir())
 	ar, err := SynthesizeResult(context.Background(), store, rootDir, paths, 1, nil, nil)
@@ -95,7 +91,7 @@ func TestSynthesize_FailureJSONIncludedWhenPresent(t *testing.T) {
 	}
 	found := false
 	for _, of := range ar.OutputFiles {
-		if of.Path == "out/failure.json" {
+		if of.Path == "failure.json" {
 			found = true
 		}
 	}
@@ -113,7 +109,6 @@ func TestMaterialize_MissingBlobReturnsErrMissingBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SynthesizeResult: %v", err)
 	}
-	// Evict one blob from the store to simulate cache eviction.
 	if len(ar.OutputFiles) == 0 {
 		t.Fatalf("no output files to evict")
 	}
@@ -152,7 +147,6 @@ func TestSynthesize_DirectoryBlobs_AllUploaded(t *testing.T) {
 		t.Fatalf("expected 1 OutputDirectory, got %d", len(ar.OutputDirectories))
 	}
 	od := ar.OutputDirectories[0]
-	// The Tree blob itself must be in CAS.
 	body, err := store.GetBlob(ctx, od.TreeDigest)
 	if err != nil {
 		t.Fatalf("Tree blob missing: %v", err)
