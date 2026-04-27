@@ -18,8 +18,8 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ir"
-	"github.com/sstriker/cmake-to-bazel/converter/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
+	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 )
 
 // Options controls behavior that the orchestrator (M3) overrides per-package.

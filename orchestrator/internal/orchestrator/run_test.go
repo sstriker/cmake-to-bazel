@@ -37,10 +37,18 @@ func stubConverter() int {
 	outBundle := fs.String("out-bundle-dir", "", "")
 	outFailure := fs.String("out-failure", "", "")
 	outReadPaths := fs.String("out-read-paths", "", "")
+	importsManifest := fs.String("imports-manifest", "", "")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 64
 	}
 	_ = replyDir
+
+	// Optional: record the imports-manifest path so the test can inspect it.
+	if recDir := os.Getenv("ORCHESTRATOR_STUB_RECORD_DIR"); recDir != "" {
+		_ = os.MkdirAll(recDir, 0o755)
+		recPath := filepath.Join(recDir, filepath.Base(*srcRoot)+".imports.txt")
+		_ = os.WriteFile(recPath, []byte(*importsManifest), 0o644)
+	}
 
 	mode := os.Getenv("ORCHESTRATOR_STUB_MODE")
 	if mode == "" {
@@ -61,7 +69,11 @@ func stubConverter() int {
 			}
 			pkg := strings.ToLower(filepath.Base(*srcRoot))
 			_ = os.WriteFile(filepath.Join(*outBundle, pkg+"Config.cmake"), []byte("# stub config\n"), 0o644)
-			_ = os.WriteFile(filepath.Join(*outBundle, pkg+"Targets.cmake"), []byte("# stub targets\n"), 0o644)
+			// Realistic Targets.cmake so the orchestrator's exports-extraction
+			// picks up the import declaration when building the next element's
+			// imports manifest.
+			targets := fmt.Sprintf("add_library(%s::%s STATIC IMPORTED)\n", pkg, pkg)
+			_ = os.WriteFile(filepath.Join(*outBundle, pkg+"Targets.cmake"), []byte(targets), 0o644)
 			_ = os.WriteFile(filepath.Join(*outBundle, pkg+"Targets-release.cmake"), []byte("# stub release\n"), 0o644)
 		}
 		if *outReadPaths != "" {
@@ -164,6 +176,43 @@ func TestRun_StubTier2(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "components/hello") {
 		t.Errorf("err = %v, want to mention element name", err)
+	}
+}
+
+// TestRun_ImportsManifestForDownstream: the second element to convert
+// (uses-hello) sees an --imports-manifest path containing hello's exports
+// — the dep-export registry is propagating correctly.
+func TestRun_ImportsManifestForDownstream(t *testing.T) {
+	out := t.TempDir()
+	rec := t.TempDir()
+	t.Setenv("ORCHESTRATOR_STUB_RECORD_DIR", rec)
+	res := runOrchestrator(t, out, "success")
+	if len(res.Failed) != 0 {
+		t.Fatalf("Failed = %v", res.Failed)
+	}
+
+	// hello converts first; its imports manifest should be empty since
+	// `base` (its only dep) is kind:manual, not in the export registry.
+	helloRec := mustReadFile(t, filepath.Join(rec, "hello-world.imports.txt"))
+	if len(helloRec) != 0 {
+		t.Errorf("hello got --imports-manifest=%q, want empty (no cmake deps)", helloRec)
+	}
+
+	// uses-hello sees a non-empty imports.json.
+	usesRec := mustReadFile(t, filepath.Join(rec, "uses-hello.imports.txt"))
+	if len(usesRec) == 0 {
+		t.Fatal("uses-hello did not receive --imports-manifest")
+	}
+	importsBody := mustReadFile(t, string(usesRec))
+	for _, want := range []string{
+		`"version": 1`,
+		`"name": "elem_components_hello"`,
+		`"cmake_target": "hello-world::hello-world"`,
+		`"bazel_label": "@elem_components_hello//:hello-world"`,
+	} {
+		if !strings.Contains(string(importsBody), want) {
+			t.Errorf("imports.json missing %q\n%s", want, importsBody)
+		}
 	}
 }
 
