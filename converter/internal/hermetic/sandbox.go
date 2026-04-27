@@ -44,6 +44,12 @@ type Sandbox struct {
 	// ExtraSetEnv is k/v pairs added on top of the standard hermetic env.
 	// Use sparingly — anything here defeats hermeticity by definition.
 	ExtraSetEnv map[string]string
+
+	// ExtraROBinds is a list of host->sandbox path pairs to mount read-only
+	// in addition to the standard /usr/lib/etc set. Needed when toolchain
+	// binaries live outside /usr (CI runner toolcaches, custom prefixes).
+	// Each pair is {hostPath, sandboxPath}.
+	ExtraROBinds [][2]string
 }
 
 // SOURCEDateEpoch is the project-wide fixed timestamp for deterministic
@@ -121,6 +127,10 @@ func (s Sandbox) Build() ([]string, error) {
 	if s.PrefixDir != "" {
 		args = append(args, "--ro-bind", s.PrefixDir, "/opt/prefix")
 		args = append(args, "--setenv", "CMAKE_PREFIX_PATH", "/opt/prefix")
+	}
+
+	for _, m := range s.ExtraROBinds {
+		args = append(args, "--ro-bind", m[0], m[1])
 	}
 
 	for k, v := range s.ExtraSetEnv {
