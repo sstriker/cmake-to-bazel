@@ -156,7 +156,7 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *nin
 		}
 
 		if src.IsGenerated {
-			relOut, _, err := cc.recoverGenrule(src.Path, cmakeBuild, g)
+			relOut, _, err := cc.recoverGenrule(src.Path, cmakeSrc, cmakeBuild, g)
 			if err != nil {
 				return nil, err
 			}

@@ -13,7 +13,7 @@ cc_library(
 
 genrule(
     name = "gen_version_h",
-    srcs = ["gen_version.py"],
+    srcs = ["scripts/gen_version.py"],
     outs = ["version.h"],
     cmd = "cd <BUILD_TMP> && /usr/bin/python3 <SRC>/scripts/gen_version.py <BUILD_TMP>/version.h 0.1.0",
     tags = [

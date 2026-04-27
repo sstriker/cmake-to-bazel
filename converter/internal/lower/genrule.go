@@ -45,7 +45,7 @@ func newCodegenContext() *codegenContext {
 // buildDir is the cmake-side build directory (r.Codemodel.Paths.Build);
 // generated source paths in the File API are absolute under it, and ninja's
 // build statements are relative to it.
-func (cc *codegenContext) recoverGenrule(srcPath, buildDir string, g *ninja.Graph) (relOut, name string, err error) {
+func (cc *codegenContext) recoverGenrule(srcPath, cmakeSrc, buildDir string, g *ninja.Graph) (relOut, name string, err error) {
 	relOut, ok := relativeIfInside(buildDir, srcPath)
 	if !ok {
 		// Generated source outside the build dir is unusual; bail out
@@ -102,7 +102,7 @@ func (cc *codegenContext) recoverGenrule(srcPath, buildDir string, g *ninja.Grap
 	name = genruleNameFor(b)
 
 	outs := genruleOuts(b, buildDir)
-	srcs := genruleSrcs(b, buildDir)
+	srcs := genruleSrcs(b, cmakeSrc, buildDir)
 	tags := genruleTags(cmd, b, g)
 
 	gen := ir.Target{
@@ -165,27 +165,63 @@ func genruleOuts(b *ninja.Build, buildDir string) []string {
 	return out
 }
 
-// genruleSrcs returns explicit and implicit inputs as package-relative paths
-// where the relativization succeeds. The custom command's Inputs in ninja are
-// frequently absolute paths under the source root.
-func genruleSrcs(b *ninja.Build, buildDir string) []string {
+// genruleSrcs returns explicit and implicit inputs as package-relative
+// paths. CMake records absolute paths in custom-command inputs; we
+// relativize against the source root (cmakeSrc) so two inputs with the
+// same basename in different subdirectories don't collide.
+//
+// Inputs that aren't under cmakeSrc fall back to basename — those are
+// typically host-leak references the orchestrator's downstream layer
+// will re-anchor (or refuse). The fallback is rare and noisy on
+// purpose: anything resolving here points at a real concern.
+func genruleSrcs(b *ninja.Build, cmakeSrc, buildDir string) []string {
 	all := append([]string{}, b.Inputs...)
 	all = append(all, b.ImplicitInputs...)
-	// We don't have the source root here directly; the consumer will
-	// remap or fold these. For M2 we just emit the basenames in srcs and
-	// leave fuller path resolution to step 4 (imports manifest) when it
-	// adds out-of-tree path remapping.
+
 	seen := map[string]struct{}{}
 	var out []string
 	for _, in := range all {
-		base := filepath.Base(in)
-		if _, dup := seen[base]; !dup {
-			seen[base] = struct{}{}
-			out = append(out, base)
+		key := normalizeInput(in, cmakeSrc, buildDir)
+		if key == "" {
+			continue
 		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// normalizeInput picks the most-qualified package-relative representation
+// of an input path for genrule srcs.
+//
+//  1. If `in` is under cmakeSrc, return cmakeSrc-relative slash form.
+//  2. If under buildDir, return buildDir-relative — same shape genrule
+//     outputs use, so an in-element generator binary's output is
+//     matchable.
+//  3. Otherwise basename, with a comment in the emitted BUILD.bazel
+//     that flags the under-qualified entry. (Not implemented as a
+//     comment yet; M4.x adds the audit hook.)
+func normalizeInput(in, cmakeSrc, buildDir string) string {
+	if !filepath.IsAbs(in) {
+		return filepath.ToSlash(in)
+	}
+	if cmakeSrc != "" {
+		if rel, ok := relativeIfInside(cmakeSrc, in); ok {
+			return rel
+		}
+	}
+	if buildDir != "" {
+		if rel, ok := relativeIfInsideRelaxed(buildDir, in); ok {
+			return rel
+		}
+	}
+	// Fallback: basename. Documented as a known under-qualification
+	// site; M5's converted_pkg_repo layer will need to surface these.
+	return filepath.Base(in)
 }
 
 // genruleTags computes the cmake-codegen-* tag set for one recovered build.
