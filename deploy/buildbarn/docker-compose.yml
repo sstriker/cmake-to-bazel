@@ -1,23 +1,24 @@
-# Minimal Buildbarn deployment for M5 cache-substrate validation.
+# Buildbarn deployment for M5 cache-substrate + M3b execution
+# validation.
 #
-# Brings up bb-storage as a single-node REAPI ContentAddressableStorage
-# + ActionCache server on grpc://localhost:8980. The orchestrator's
-# --cas=grpc://localhost:8980 flag points at this and exercises the
-# full M5 protocol against actual Buildbarn code (vs the in-process
-# fake used in unit tests).
+# Brings up:
+#   - bb-storage    CAS + AC frontend (validates M5)
+#   - bb-scheduler  queues Actions for execution (validates M3b)
+#   - bb-worker     pulls actions, materializes input roots
+#   - bb-runner-bare  exec's commands on behalf of bb-worker
 #
-# This is NOT a production deployment — single replica, no auth,
-# in-container blobstore. Use it to validate end-to-end + run the
-# cache-share keystone test against real Buildbarn before pointing
-# the orchestrator at a production endpoint.
+# This is NOT a production deployment — single replica, no auth, in-
+# container blobstore, bare runner without sandboxing. Use it to
+# validate end-to-end protocol round trips before pointing the
+# orchestrator at a production endpoint.
 #
 # Bring up:    docker compose -f deploy/buildbarn/docker-compose.yml up -d
 # Tear down:   docker compose -f deploy/buildbarn/docker-compose.yml down -v
 # Logs:        docker compose -f deploy/buildbarn/docker-compose.yml logs -f
 #
-# The bb-storage image tag is pinned (rather than :latest) so config
-# schema drift doesn't surprise CI; bumping requires re-validating
-# storage.jsonnet against the new schema.
+# Image tags are pinned (rather than :latest) so config schema drift
+# doesn't surprise CI; bumping requires re-validating the .jsonnet
+# files against the new schema.
 
 services:
   bb-storage:
@@ -29,15 +30,57 @@ services:
       - ./config:/config:ro
       - bb-storage-data:/storage
     ports:
-      - "127.0.0.1:8980:8980"  # REAPI gRPC
-      - "127.0.0.1:9980:9980"  # diagnostics http (Prometheus, pprof)
+      - "127.0.0.1:8980:8980"  # REAPI gRPC (Action Cache + CAS + ByteStream)
+      - "127.0.0.1:9980:9980"  # diagnostics http
     healthcheck:
-      # bb-storage exposes /-/healthy on the diagnostics http server.
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9980/-/healthy"]
       interval: 5s
       timeout: 2s
       retries: 12
       start_period: 5s
 
+  bb-scheduler:
+    image: ghcr.io/buildbarn/bb-scheduler:20251015T103016Z-89ad8a4
+    container_name: bb-scheduler
+    restart: unless-stopped
+    command: ["/config/scheduler.jsonnet"]
+    volumes:
+      - ./config:/config:ro
+    ports:
+      - "127.0.0.1:8983:8983"  # REAPI Execution gRPC (orchestrator submits here)
+      - "127.0.0.1:9982:9982"  # diagnostics http
+    depends_on:
+      bb-storage:
+        condition: service_healthy
+
+  bb-worker:
+    image: ghcr.io/buildbarn/bb-worker:20251015T103016Z-89ad8a4
+    container_name: bb-worker
+    restart: unless-stopped
+    command: ["/config/worker.jsonnet"]
+    volumes:
+      - ./config:/config:ro
+      - bb-worker-build:/worker/build
+      - bb-worker-cache:/worker/cache
+    depends_on:
+      bb-storage:
+        condition: service_healthy
+      bb-scheduler:
+        condition: service_started
+
+  bb-runner-bare:
+    image: ghcr.io/buildbarn/bb-runner-bare:20251015T103016Z-89ad8a4
+    container_name: bb-runner-bare
+    restart: unless-stopped
+    command: ["/config/runner.jsonnet"]
+    volumes:
+      - ./config:/config:ro
+      - bb-worker-build:/worker/build
+    depends_on:
+      bb-worker:
+        condition: service_started
+
 volumes:
   bb-storage-data:
+  bb-worker-build:
+  bb-worker-cache:

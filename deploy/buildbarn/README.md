@@ -1,43 +1,48 @@
 # Buildbarn validation deployment
 
-A single-node Buildbarn instance for validating the orchestrator's M5
-REAPI cache substrate against real Buildbarn code (vs the in-process
-fake the unit tests use).
+A single-node Buildbarn instance for validating the orchestrator's
+M5 (REAPI cache substrate) and M3b (REAPI Execute) paths against
+real Buildbarn code, vs the in-process fake the unit tests use.
 
-## Scope
+## Components
 
-- `bb-storage` only — CAS + ActionCache. Sufficient to validate M5's
-  cache-share claim end to end.
-- No execution service. M3b's `--execute` path needs `bb-scheduler` +
-  `bb-runner-bare`; queued as a separate deployment.
-- No authentication. Localhost-only port mapping.
-- File-backed blobstore at 1 GiB (CAS) + 64 MiB (AC). Tear down with
-  `docker compose down -v` to wipe.
+- `bb-storage`    — CAS + ActionCache (gRPC :8980)
+- `bb-scheduler`  — queues Actions, dispatches to workers (gRPC :8983 client, :8984 worker)
+- `bb-worker`     — pulls actions, materializes input roots, calls runner
+- `bb-runner-bare` — exec's commands directly inside the shared build volume
+
+No auth, localhost-only port mapping, file-backed blobstore at
+1 GiB CAS / 64 MiB AC. Tear down with `docker compose down -v` to
+wipe.
 
 ## Bring up
 
 ```sh
 docker compose -f deploy/buildbarn/docker-compose.yml up -d
-# wait for healthcheck
+# wait for bb-storage healthcheck
 until curl -fsS http://127.0.0.1:9980/-/healthy >/dev/null; do sleep 1; done
 ```
 
 ## Validate
 
+Two acceptance gates depend on this stack:
+
 ```sh
-make e2e-buildbarn
+make e2e-buildbarn         # M5 cache-share keystone (CAS+AC only)
+make e2e-buildbarn-execute # M3b Execute keystone (full pipeline)
 ```
 
-This runs the orchestrator twice against the fdsdk-subset fixture,
-both times pointed at `grpc://127.0.0.1:8980`:
+`e2e-buildbarn` runs the orchestrator twice against the fdsdk-subset
+fixture, each pointed at `grpc://127.0.0.1:8980`; the second pass
+must hit AC for every element and produce byte-identical outputs.
 
-1. Cold pass populates Buildbarn's CAS+AC.
-2. Second pass with a clean tmpdir hits AC for every element and
-   produces byte-identical outputs.
-
-This is the same architectural claim the in-process-fake
-`TestRun_CacheShare_TwoOrchestratorsViaSharedAC` test makes, now
-proven against real Buildbarn.
+`e2e-buildbarn-execute` submits a synthetic Action through
+`grpc://127.0.0.1:8983` (the scheduler's client port) and verifies
+the worker actually exec's it and returns a populated ActionResult.
+The synthetic action is a `/bin/sh` script — it does NOT exercise
+the converter end-to-end, since the bb-runner-bare image doesn't
+have cmake/ninja/bwrap installed. For full conversion through real
+workers, build a custom worker image with the toolchain pre-baked.
 
 ## Tear down
 
@@ -45,17 +50,37 @@ proven against real Buildbarn.
 docker compose -f deploy/buildbarn/docker-compose.yml down -v
 ```
 
-`-v` removes the named volume so a re-run starts cold. Omit `-v` to
-inspect a populated CAS across runs (e.g. via `bb-browser`, not
-deployed here).
+`-v` removes named volumes so a re-run starts cold. Omit `-v` to
+inspect a populated CAS across runs.
 
 ## Schema drift
 
-The bb-storage image version in `docker-compose.yml` is pinned. When
-bumping it, reconcile `config/storage.jsonnet` against:
+Image tags in `docker-compose.yml` are pinned. When bumping them,
+reconcile each `.jsonnet` against:
 
-- [`blobstore.proto`](https://github.com/buildbarn/bb-storage/blob/master/pkg/proto/configuration/blobstore/blobstore.proto)
-- [`global.proto`](https://github.com/buildbarn/bb-storage/blob/master/pkg/proto/configuration/global/global.proto)
+- [`bb-storage` blobstore.proto + global.proto](https://github.com/buildbarn/bb-storage/tree/master/pkg/proto/configuration)
+- [`bb-scheduler` scheduler/scheduler.proto](https://github.com/buildbarn/bb-remote-execution/blob/master/pkg/proto/configuration/bb_scheduler/bb_scheduler.proto)
+- [`bb-worker` bb_worker.proto](https://github.com/buildbarn/bb-remote-execution/blob/master/pkg/proto/configuration/bb_worker/bb_worker.proto)
+- [`bb-runner-bare` bb_runner.proto](https://github.com/buildbarn/bb-remote-execution/blob/master/pkg/proto/configuration/bb_runner/bb_runner.proto)
 
-Test schema changes by running `make e2e-buildbarn` against the new
-image before merging.
+Test schema changes by running both make targets above against the
+new images before merging.
+
+## Production worker image (out of scope here)
+
+bb-runner-bare exec's whatever command the action declares. For our
+real conversion flow (`bin/convert-element ...`) the worker
+container needs to provide:
+
+- The bare runner binary (or any runner — bare is just easiest)
+- `cmake`, `ninja`, `bwrap` at the versions encoded in the
+  orchestrator's `--platform` / `defaultPlatform` properties
+- `/bin/sh` (already present in the official image)
+
+A simple custom Dockerfile FROM the runner image, layered with `apt
+install cmake ninja-build bubblewrap`, would close the loop for full
+end-to-end conversion. We don't ship that here because the platform
+properties + version pins cross too many deployment-specific
+concerns; the documented path is "build your own runner image,
+update worker.jsonnet's platform properties, point the orchestrator
+at it".
