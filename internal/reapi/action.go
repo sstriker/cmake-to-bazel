@@ -9,6 +9,7 @@
 //	source/                ← shadow tree (the converter's --source-root)
 //	prefix/                ← synth-prefix (--prefix-dir, optional)
 //	imports.json           ← imports manifest (--imports-manifest, optional)
+//	toolchain.cmake        ← derive-toolchain output (--toolchain-cmake-file, optional)
 //	bin/convert-element    ← the converter binary, +x
 //
 // Canonical output paths (declared in Command.output_paths):
@@ -63,6 +64,14 @@ type Inputs struct {
 	// this element has no cross-element deps.
 	PrefixDir string
 
+	// ToolchainCMakeFile is the optional path to a CMake toolchain
+	// file (typically derive-toolchain's toolchain.cmake) that
+	// pre-populates compiler-detection cache so cmake skips its
+	// probe. When set, the file lands at toolchain.cmake in the
+	// input root and the converter's argv passes
+	// --toolchain-cmake-file=toolchain.cmake.
+	ToolchainCMakeFile string
+
 	// ConverterBin is the local path to the convert-element binary.
 	// Required.
 	ConverterBin string
@@ -111,12 +120,13 @@ type InputRoot struct {
 
 // canonical input-root paths.
 const (
-	pathSource     = "source"
-	pathPrefix     = "prefix"
-	pathImports    = "imports.json"
-	pathBinDir     = "bin"
-	pathConverter  = "convert-element"
-	pathOutBuild   = "BUILD.bazel"
+	pathSource         = "source"
+	pathPrefix         = "prefix"
+	pathImports        = "imports.json"
+	pathToolchainCMake = "toolchain.cmake"
+	pathBinDir         = "bin"
+	pathConverter      = "convert-element"
+	pathOutBuild       = "BUILD.bazel"
 	pathOutBundle  = "cmake-config"
 	pathOutFailure = "failure.json"
 	pathOutReads   = "read_paths.json"
@@ -187,6 +197,9 @@ func buildCommand(in Inputs) *repb.Command {
 	if in.PrefixDir != "" {
 		args = append(args, "--prefix-dir", pathPrefix)
 	}
+	if in.ToolchainCMakeFile != "" {
+		args = append(args, "--toolchain-cmake-file", pathToolchainCMake)
+	}
 
 	platform := &repb.Platform{}
 	props := append([]PlatformProperty(nil), in.Platform...)
@@ -243,6 +256,24 @@ func buildInputRoot(in Inputs) (*InputRoot, error) {
 		ir.Files[d.Hash] = in.ImportsManifest
 		root.Files = append(root.Files, &repb.FileNode{
 			Name:   pathImports,
+			Digest: d,
+		})
+	}
+
+	// toolchain.cmake (optional, top-level file). Lands in the
+	// input root so remote workers see it; argv references the
+	// in-action path. The action's input-root digest changes when
+	// the toolchain file does, so a host bumping its toolchain
+	// invalidates every cache entry derived from the prior one —
+	// exactly the desired cache-coherence property.
+	if in.ToolchainCMakeFile != "" {
+		d, err := cas.DigestFile(in.ToolchainCMakeFile)
+		if err != nil {
+			return nil, fmt.Errorf("reapi: digest toolchain cmake file: %w", err)
+		}
+		ir.Files[d.Hash] = in.ToolchainCMakeFile
+		root.Files = append(root.Files, &repb.FileNode{
+			Name:   pathToolchainCMake,
 			Digest: d,
 		})
 	}

@@ -530,12 +530,13 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 	}
 
 	built, err := reapi.Build(reapi.Inputs{
-		ShadowDir:       shadowSrc,
-		ImportsManifest: importsPath,
-		PrefixDir:       prefixPath,
-		ConverterBin:    r.convAbs,
-		Platform:        r.platform,
-		Timeout:         r.timeout,
+		ShadowDir:          shadowSrc,
+		ImportsManifest:    importsPath,
+		PrefixDir:          prefixPath,
+		ToolchainCMakeFile: r.opts.ToolchainCMakeFile,
+		ConverterBin:       r.convAbs,
+		Platform:           r.platform,
+		Timeout:            r.timeout,
 	})
 	if err != nil {
 		return fmt.Errorf("element %s: build action: %w", name, err)
