@@ -144,8 +144,13 @@ element/yaml + graph
    message, context }] }`. Codes are the same Tier-1 set from
    `docs/failure-schema.md`.
 5. **Source-checkout responsibility.** Orchestrator expects
-   pre-checked-out sources for M3. `bst source checkout` integration
-   lives in M3.x or M5.
+   pre-checked-out sources for M3a/M3b. `bst source checkout`
+   integration is **M3c** — explicitly tracked in `docs/m1-plan.md`'s
+   subsequent-milestones table. Until then operators run `bst source
+   checkout --deps build <element>:<dest>` per element and pass
+   `orchestrate --sources-base <root>`; the orchestrator's per-element
+   `resolveSource` honors `kind: local` paths only and refuses other
+   source kinds with a clear error.
 
 ## Risks
 

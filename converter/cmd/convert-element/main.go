@@ -1,7 +1,8 @@
 // convert-element converts one CMake source tree into a fully-declared
-// BUILD.bazel plus a synthetic <Pkg>Config.cmake bundle. Per-element entry
-// point invoked by the M3 orchestrator (one REAPI action per element) and
-// also runnable standalone for development.
+// BUILD.bazel plus a synthetic <Pkg>Config.cmake bundle. Each invocation
+// handles exactly one codebase; the M3 orchestrator drives many such
+// invocations across a distro (one REAPI action per codebase) and also
+// runnable standalone for development.
 //
 // M1 surface: --source-root for the in-development real-cmake path (NYI in
 // step 4) and --reply-dir for offline runs against pre-recorded File API

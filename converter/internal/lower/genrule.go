@@ -174,7 +174,7 @@ func genruleSrcs(b *ninja.Build, buildDir string) []string {
 	// We don't have the source root here directly; the consumer will
 	// remap or fold these. For M2 we just emit the basenames in srcs and
 	// leave fuller path resolution to step 4 (imports manifest) when it
-	// adds element-aware path remapping.
+	// adds out-of-tree path remapping.
 	seen := map[string]struct{}{}
 	var out []string
 	for _, in := range all {
@@ -324,7 +324,7 @@ func hasCmakeE(cmd string) bool {
 }
 
 // toolFromTarget returns true if the command's driver tool is itself the
-// output of another build statement in the graph (i.e. an in-element
+// output of another build statement in the graph (i.e. an in-codebase
 // generator binary).
 func toolFromTarget(b *ninja.Build, g *ninja.Graph) bool {
 	cmd, ok := ninja.CommandFor(g, b)

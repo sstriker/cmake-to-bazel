@@ -13,7 +13,7 @@ import (
 // Exit codes documented in the README. These map onto the failure-tier model:
 //
 //	0   success
-//	1   Tier-1 (per-element conversion error; failure.json written)
+//	1   Tier-1 (per-codebase conversion error; failure.json written)
 //	64  CLI usage error
 //	65  Tier-2 (converter bug / malformed cmake output)
 //	70  Tier-3 (infrastructure)
@@ -48,9 +48,10 @@ type Args struct {
 
 	// ImportsManifest, when non-empty, is the path to a per-orchestration
 	// imports manifest (see docs/codegen-tags.md sibling and
-	// internal/manifest/imports.go for schema). Cross-element deps are
-	// resolved via this map; the orchestrator (M3) writes one before each
-	// per-element conversion.
+	// internal/manifest/imports.go for schema). Out-of-tree deps (CMake
+	// targets the current codebase imports via find_package) are resolved
+	// via this map; the orchestrator (M3) writes one before each
+	// per-codebase conversion.
 	ImportsManifest string
 
 	// OutReadPaths, when non-empty and the converter ran cmake itself
@@ -68,9 +69,9 @@ type Args struct {
 	// PrefixDir, when non-empty, is mounted read-only into the sandbox at
 	// /opt/prefix and exposed to cmake via CMAKE_PREFIX_PATH. Holds the
 	// synthesized cmake-config bundles + zero-byte IMPORTED_LOCATION
-	// stubs for cross-element find_package resolution. The orchestrator
-	// (M3a step 4) builds the tree per-element from the converted-deps
-	// registry; standalone runs leave this empty.
+	// stubs that let find_package resolve out-of-tree deps. The
+	// orchestrator (M3a step 4) builds the tree per-codebase from the
+	// converted-deps registry; standalone runs leave this empty.
 	PrefixDir string
 }
 
@@ -84,11 +85,11 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.ReplyDir, "reply-dir", "", "skip cmake invocation; read File API reply from this dir (testing)")
 	fs.StringVar(&a.OutBuild, "out-build", "BUILD.bazel", "destination path for generated BUILD.bazel")
 	fs.StringVar(&a.OutBundleDir, "out-bundle-dir", "", "directory for synthesized cmake-config bundle (optional)")
-	fs.StringVar(&a.OutFailure, "out-failure", "", "write Tier-1 failure JSON here on per-element errors (optional)")
-	fs.StringVar(&a.ImportsManifest, "imports-manifest", "", "path to JSON imports manifest mapping cross-element CMake targets to Bazel labels (optional)")
+	fs.StringVar(&a.OutFailure, "out-failure", "", "write Tier-1 failure JSON here on per-codebase errors (optional)")
+	fs.StringVar(&a.ImportsManifest, "imports-manifest", "", "path to JSON imports manifest mapping out-of-tree CMake targets to Bazel labels (optional)")
 	fs.StringVar(&a.OutReadPaths, "out-read-paths", "", "write JSON array of source-tree paths cmake read at configure time (requires --source-root, optional)")
 	fs.BoolVar(&a.AllowCMakeVersionMismatch, "allow-cmake-version-mismatch", false, "let convert-element run with cmake older than the codemodel-v2 floor (local-dev escape hatch)")
-	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory mounted at /opt/prefix and added to CMAKE_PREFIX_PATH (cross-element synth-prefix; orchestrator-driven)")
+	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory mounted at /opt/prefix and added to CMAKE_PREFIX_PATH (out-of-tree synth-prefix; orchestrator-driven)")
 
 	if err := fs.Parse(argv); err != nil {
 		return a, ExitUsage
