@@ -1,4 +1,4 @@
-.PHONY: all converter orchestrator diff history test test-e2e e2e-hello-world e2e-libdrm e2e-fmt \
+.PHONY: all converter orchestrator diff history test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-buildbarn buildbarn-up buildbarn-down \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -59,9 +59,6 @@ test-e2e: check-tools converter
 
 e2e-hello-world: check-tools converter
 	$(GO) test -tags=e2e -run TestE2E_HelloWorld ./converter/...
-
-e2e-libdrm: check-tools converter
-	$(GO) test -tags=e2e -run TestE2E_Libdrm ./converter/...
 
 e2e-fmt: check-tools converter fetch-fmt
 	$(GO) test -tags=e2e -run TestE2E_Fmt ./converter/...
