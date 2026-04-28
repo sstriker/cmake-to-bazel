@@ -32,12 +32,12 @@ services:
     ports:
       - "127.0.0.1:8980:8980"  # REAPI gRPC (Action Cache + CAS + ByteStream)
       - "127.0.0.1:9980:9980"  # diagnostics http
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9980/-/healthy"]
-      interval: 5s
-      timeout: 2s
-      retries: 12
-      start_period: 5s
+    # No in-container healthcheck: bb-storage is a distroless image
+    # with only the bb_storage binary — no shell, no wget, no curl —
+    # so any CMD-form healthcheck would always fail and compose's
+    # depends_on: condition: service_healthy would abort the whole
+    # bring-up. Readiness is gated externally by `make buildbarn-up`'s
+    # curl loop against http://127.0.0.1:9980/-/healthy.
 
   bb-scheduler:
     image: ghcr.io/buildbarn/bb-scheduler:20251031T081715Z-4415657
@@ -51,7 +51,7 @@ services:
       - "127.0.0.1:9982:9982"  # diagnostics http
     depends_on:
       bb-storage:
-        condition: service_healthy
+        condition: service_started
 
   bb-worker:
     image: ghcr.io/buildbarn/bb-worker:20251031T081715Z-4415657
@@ -64,7 +64,7 @@ services:
       - bb-worker-cache:/worker/cache
     depends_on:
       bb-storage:
-        condition: service_healthy
+        condition: service_started
       bb-scheduler:
         condition: service_started
 
