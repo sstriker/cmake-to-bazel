@@ -147,11 +147,12 @@ e2e-buildbarn: buildbarn-up
 
 # M3b execution validation against real Buildbarn workers (scheduler +
 # bb-worker + bb-runner-bare from the same docker-compose stack).
-# Submits a synthetic /bin/sh action — does NOT run the converter
-# end-to-end, since the bb-runner-bare image lacks cmake/ninja/bwrap.
-# Closes the loop on the protocol round trip; full conversion needs
-# a custom worker image (see deploy/buildbarn/README.md).
-e2e-buildbarn-execute: buildbarn-up
+# Runs both the synthetic /bin/sh round-trip test and the real-converter
+# test (which depends on the custom worker image at
+# deploy/buildbarn/runner/Dockerfile having cmake/ninja/bwrap installed).
+# `make converter` is a prerequisite of the real-converter test; if the
+# binary isn't present that subtest skips with a clear message.
+e2e-buildbarn-execute: converter buildbarn-up
 	$(GO) test -tags=buildbarn -run TestE2E_Buildbarn_Execute ./internal/reapi/...
 	$(MAKE) buildbarn-down
 
