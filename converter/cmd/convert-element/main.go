@@ -32,12 +32,12 @@ import (
 
 // timings is the on-disk schema for --out-timings. Captured per-phase
 // wall-clock seconds let operators see configure-vs-translation ratios
-// across a distro. version=1 fences future readers.
+// across a project. version=1 fences future readers.
 type timings struct {
-	Version             int     `json:"version"`
-	CMakeConfigureSecs  float64 `json:"cmake_configure_seconds"`
-	TranslationSecs     float64 `json:"translation_seconds"`
-	TotalSecs           float64 `json:"total_seconds"`
+	Version            int     `json:"version"`
+	CMakeConfigureSecs float64 `json:"cmake_configure_seconds"`
+	TranslationSecs    float64 `json:"translation_seconds"`
+	TotalSecs          float64 `json:"total_seconds"`
 }
 
 func main() {

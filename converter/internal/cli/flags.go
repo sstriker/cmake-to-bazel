@@ -65,7 +65,7 @@ type Args struct {
 	// per-phase wall-clock timings: cmake configure, translation
 	// (lower + emit), and total. M3 aggregates these into a final
 	// summary so operators can see configure-vs-translate ratios
-	// across a distro.
+	// across a project.
 	OutTimings string
 
 	// AllowCMakeVersionMismatch lets the converter run with a cmake

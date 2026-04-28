@@ -11,7 +11,7 @@
 //     produces a parallel tree where every translatable source is
 //     rewritten to kind:remote-asset.
 //  3. orchestrate --fdsdk-root=<wherever> --elements-dir=elements-cas
-//                 --source-cas=grpc://<cas>
+//     --source-cas=grpc://<cas>
 //     converts using digest-resolved sources — no git clones, no
 //     re-fetching.
 //

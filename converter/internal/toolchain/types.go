@@ -1,13 +1,13 @@
 // Package toolchain derives Bazel cc_toolchain / platform definitions
 // from cmake File API output. The flow is:
 //
-//   1. Probe: run `cmake -S probe -B build` once per variant (build
-//      type, optional toolchain file).
-//   2. Extract: turn each File API reply into a typed Model.
-//   3. Diff: compare Models across variants to derive per-build-type
-//      flag deltas.
-//   4. Emit (separate package): render Model + variants to Bazel
-//      cc_toolchain_config / cc_toolchain / platform / toolchain rules.
+//  1. Probe: run `cmake -S probe -B build` once per variant (build
+//     type, optional toolchain file).
+//  2. Extract: turn each File API reply into a typed Model.
+//  3. Diff: compare Models across variants to derive per-build-type
+//     flag deltas.
+//  4. Emit (separate package): render Model + variants to Bazel
+//     cc_toolchain_config / cc_toolchain / platform / toolchain rules.
 //
 // The extract step is a pure function over fileapi.Reply, so unit
 // tests run without invoking cmake.

@@ -801,8 +801,8 @@ func writeManifest(out string, res *Result) error {
 	}
 
 	timingsDoc := struct {
-		Version  int            `json:"version"`
-		Summary  TimingsSummary `json:"summary"`
+		Version int            `json:"version"`
+		Summary TimingsSummary `json:"summary"`
 	}{
 		Version: 1,
 		Summary: res.Timings,
