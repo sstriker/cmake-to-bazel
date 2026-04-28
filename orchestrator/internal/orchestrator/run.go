@@ -1035,7 +1035,7 @@ func buildPrefixForElement(prefixRoot, name string, g *element.Graph, depRecords
 // buildShadowForElement creates <shadowRoot>/<element-name>/ as a path-only
 // mirror of the real source tree, with file content preserved only for
 // allowlisted paths. cmake's access(R_OK)-only configure-time semantics
-// (cmake_analysis.md §0) make a shadow tree configure-equivalent to the
+// (docs/cmake_analysis.md §0) make a shadow tree configure-equivalent to the
 // real one for every non-allowlisted file. The orchestrator points
 // convert-element at the shadow tree so content-only edits to .c files
 // are absorbed at the cache key (M3a step 6).
