@@ -339,7 +339,7 @@ func sanitizeID(s string) string {
 // names Bazel's @platforms//cpu:* uses. Common case: cmake reports
 // "x86_64" while Bazel uses "x86_64"; aarch64 -> arm64. Operators
 // can override at emit time via Config.ToolchainIdentifier if a
-// distro names architectures differently.
+// platform names architectures differently.
 func normalizeBazelCPU(cmakeCPU string) string {
 	switch strings.ToLower(cmakeCPU) {
 	case "amd64", "x86_64":
