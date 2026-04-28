@@ -85,7 +85,7 @@ type Args struct {
 	// file (typically derive-toolchain's toolchain.cmake) that pre-
 	// populates the compiler-detection cache. cmakerun passes it via
 	// -DCMAKE_TOOLCHAIN_FILE so cmake skips the compiler-detection
-	// probe — a measurable per-conversion latency win at distro
+	// probe — a measurable per-conversion latency win at project
 	// scale. The file is mounted into the sandbox alongside the
 	// source root.
 	ToolchainCMakeFile string

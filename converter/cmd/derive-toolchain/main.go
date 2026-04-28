@@ -69,7 +69,7 @@ func main() {
 
 	// CMake-side toolchain file lets the orchestrator's per-element
 	// cmake invocations skip the compiler-detection probe — a
-	// measurable per-conversion latency win at distro scale.
+	// measurable per-conversion latency win at project scale.
 	cmakeBody, err := cmaketoolchain.Emit(m)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "derive-toolchain: emit cmake toolchain: %v\n", err)
