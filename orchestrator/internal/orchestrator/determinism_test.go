@@ -11,7 +11,7 @@ import (
 // three independent runs of the same source tree into fresh tmpdirs. If
 // per-element BUILD.bazel, cmake-config bundles, or read_paths.json
 // drift, determinism.json's sha256 entries do too — and the whole
-// architectural premise of "same source -> same converted distro across
+// architectural premise of "same source -> same converted project across
 // machines" needs investigation.
 //
 // Why three not two: a stable two-run diff could mask alternating
@@ -39,7 +39,7 @@ func TestRun_Deterministic_ThreeTmpdirReplay(t *testing.T) {
 }
 
 // TestRun_Deterministic_ContentEditUnderShadowDoesntDrift demonstrates the
-// keystone shadow-tree claim end-to-end at distro scale: editing a non-
+// keystone shadow-tree claim end-to-end at project scale: editing a non-
 // allowlisted source file's content (.c body) leaves determinism.json
 // byte-identical because the shadow tree zero-byte-stubs the file.
 func TestRun_Deterministic_ContentEditUnderShadowDoesntDrift(t *testing.T) {

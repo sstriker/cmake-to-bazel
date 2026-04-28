@@ -1,6 +1,6 @@
 // Package failure carries the typed Tier-1 failure taxonomy (per-codebase
 // converter errors that the orchestrator in M3 collects into the manifest's
-// `excluded` block without aborting the bulk pass).
+// `excluded` block without aborting orchestration).
 //
 // Tier 2 (converter crashed / produced malformed output) and Tier 3
 // (infrastructure errors) are not modeled here — they bubble up as generic

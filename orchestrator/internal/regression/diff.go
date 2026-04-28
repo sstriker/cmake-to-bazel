@@ -13,7 +13,7 @@ type Diff struct {
 
 	// Stable: converted in both runs with identical fingerprint. The
 	// architecturally-claimed common case; we expose it as a count
-	// rather than a name list to keep reports legible at distro scale.
+	// rather than a name list to keep reports legible at project scale.
 	StableCount int
 
 	// FingerprintDrifted: converted in both runs but the per-element

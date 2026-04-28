@@ -14,7 +14,7 @@ import (
 
 // Snapshot is one orchestrator run's per-element state captured for the
 // fingerprint history. Two snapshots with identical Sig represent the
-// same converted distro; the registry uses Sig for content-addressed
+// same converted project; the registry uses Sig for content-addressed
 // dedupe so "rerun, no source changes" doesn't bloat the history.
 type Snapshot struct {
 	// Sig is sha256 over a deterministic projection of the run's
