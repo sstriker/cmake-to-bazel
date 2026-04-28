@@ -11,3 +11,9 @@ module(
     version = "0.0.0",
     compatibility_level = 1,
 )
+
+# Required so converted_pkg_repo's extension-generated repos can
+# `load("@rules_cc//cc:defs.bzl", ...)`. Without this declaration,
+# the synthesized repos can't see rules_cc and Bazel reports
+# "No repository visible as '@rules_cc'" at analysis time.
+bazel_dep(name = "rules_cc", version = "0.2.17")
