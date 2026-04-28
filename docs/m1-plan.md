@@ -2,16 +2,23 @@
 
 ## Context
 
-We're migrating the FreeDesktop SDK BuildStream project from CMake to Bazel
-+ Buildbarn remote execution. The strategic decision is **not to translate
-CMake source to Starlark**: CMake's runtime model
-(function-blocker stack reconstructing control flow, textual macro substitution,
-late-binding through string-valued variable references) makes static translation
-intractable. Instead, run real CMake in a hermetic bwrap sandbox and translate
-its **structured output** — File API JSON (`.cmake/api/v1/reply/`) plus parsed
-`build.ninja` — into fully-declared `BUILD.bazel` rules and synthetic
-`<Pkg>Config.cmake` bundles. See `cmake_analysis.md` for the detailed analysis
-that drives this decision.
+We're migrating the **FreeDesktop SDK** BuildStream project from CMake to
+Bazel + Buildbarn remote execution. FDSDK has both `kind: cmake` elements
+(the focus of this work) and non-cmake elements (`kind: manual / autotools
+/ meson / …`) that need to land in the same Bazel build graph. M1–M5b cover
+the cmake side end-to-end; the non-cmake side is deferred to a follow-up
+plan (`docs/fdsdk-whole-project-plan.md`) — it builds **without** conversion,
+with the architectural strategy picked after fmt fidelity is green.
+
+The strategic decision is **not to translate CMake source to Starlark**:
+CMake's runtime model (function-blocker stack reconstructing control flow,
+textual macro substitution, late-binding through string-valued variable
+references) makes static translation intractable. Instead, run real CMake
+in a hermetic bwrap sandbox and translate its **structured output** — File
+API JSON (`.cmake/api/v1/reply/`) plus parsed `build.ninja` — into
+fully-declared `BUILD.bazel` rules and synthetic `<Pkg>Config.cmake`
+bundles. See `cmake_analysis.md` for the detailed analysis that drives
+this decision.
 
 This plan covers **M1 only**: a standalone `convert-element` binary that
 converts a single CMake element end-to-end. M2–M5b extend this into a
