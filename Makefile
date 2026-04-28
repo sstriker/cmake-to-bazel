@@ -1,6 +1,6 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
-        buildbarn-up buildbarn-down \
+        buildbarn-up buildbarn-down install-bazelisk \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
@@ -161,6 +161,13 @@ e2e-buildbarn: buildbarn-up
 e2e-buildbarn-execute: converter buildbarn-up
 	$(GO) test -tags=buildbarn -run TestE2E_Buildbarn_Execute ./internal/reapi/...
 	$(MAKE) buildbarn-down
+
+# Local-dev bazelisk bootstrap. Installs to ~/.local/bin by default
+# (override with PREFIX=). The bazel-tagged e2e tests self-skip when
+# bazel is missing; this gets them out of skip-mode without operators
+# having to read README footnotes.
+install-bazelisk:
+	tools/install-bazelisk.sh
 
 # Fetch the M2 acceptance package out-of-band. Idempotent.
 fetch-fmt:

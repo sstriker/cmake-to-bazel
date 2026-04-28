@@ -30,6 +30,9 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: Scale-fixture concurrency gate (no e2e tooling needed)
+        run: make e2e-orchestrate-scale
+
   e2e:
     name: End-to-end (cmake + bwrap)
     runs-on: ubuntu-24.04
@@ -104,8 +107,20 @@ jobs:
       - name: bazel-build downstream e2e (M5 step 10)
         run: make e2e-bazel-build
 
-      - name: fidelity e2e (M5b symbol equivalence)
+      - name: fidelity e2e — hello-world (smoke fixture)
         run: make e2e-fidelity
+
+      - name: Fetch fmt (real-world fidelity fixture)
+        run: make fetch-fmt
+
+      - name: fidelity e2e — fmt (real-world fixture)
+        # fmt fidelity is iterative: each delta surfaced lands in
+        # docs/fidelity-known-deltas.md before this gate goes green.
+        # Until then, allow the step to fail without aborting the
+        # job (continue-on-error) so reviewers see the diff output
+        # in the log without losing the rest of the pipeline.
+        continue-on-error: true
+        run: make e2e-fidelity-fmt
 
   buildbarn-e2e:
     name: End-to-end (real Buildbarn cache substrate)
@@ -119,8 +134,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build orchestrator
-        run: make orchestrator
+      - name: Build converter + orchestrator
+        # The real-converter Buildbarn execute test
+        # (TestE2E_Buildbarn_ExecuteRealConvertElement) uploads
+        # build/bin/convert-element into CAS as the Action's binary,
+        # so the converter binary must exist before the test runs.
+        run: make converter orchestrator
+
+      - name: Build custom bb-runner image (cmake/ninja/bwrap layered on bb-runner-bare)
+        # Building the worker image as an explicit step surfaces
+        # Dockerfile / apt-repo issues independently of the test run
+        # below. docker compose up would build it implicitly anyway,
+        # but the failure mode there is opaque.
+        run: docker compose -f deploy/buildbarn/docker-compose.yml build bb-runner-bare
 
       - name: Run M5 cache-share keystone against real bb-storage
         run: make e2e-buildbarn
