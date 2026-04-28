@@ -185,6 +185,15 @@ func emitCCTarget(w *bytes.Buffer, t ir.Target) error {
 		Tags:       sortedCopy(t.Tags),
 		Visibility: append([]string(nil), t.Visibility...),
 	}
+	// cc_binary doesn't accept `hdrs` (Bazel 9 errors out where older
+	// versions silently ignored). Fold any header into srcs so the
+	// translation unit still sees them, even though that's the
+	// rules_cc convention for binaries.
+	if t.Kind == ir.KindCCBinary && len(v.Hdrs) > 0 {
+		v.Srcs = append(append([]string{}, v.Srcs...), v.Hdrs...)
+		sort.Strings(v.Srcs)
+		v.Hdrs = nil
+	}
 	return ccRuleTmpl.Execute(w, v)
 }
 
