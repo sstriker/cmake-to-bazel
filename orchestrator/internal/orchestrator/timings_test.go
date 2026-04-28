@@ -52,12 +52,15 @@ func TestRun_TimingsAggregation(t *testing.T) {
 		t.Errorf("PerElement count = %d, want 2", len(res.Timings.PerElement))
 	}
 
-	// Summary lines must appear in the log.
+	// Structured summary records must appear in the log (slog text handler
+	// format: key=value pairs after the msg).
 	logText := captured.String()
 	for _, want := range []string{
-		"summary: converted=2",
-		"converter wall-clock total=4.0s",
-		"ratio=3.00",
+		`msg="run summary"`,
+		"converted=2",
+		`msg="converter wall-clock"`,
+		"total_seconds=4",
+		"configure_to_translation_ratio=3",
 	} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("log missing %q\n%s", want, logText)

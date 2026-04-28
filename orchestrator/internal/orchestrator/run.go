@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,9 +122,19 @@ type Options struct {
 	// scale. The orchestrator validates the file exists at startup.
 	ToolchainCMakeFile string
 
-	// Log captures orchestrator progress messages and per-element
-	// converter stdout/stderr (merged). Defaults to os.Stderr when nil.
+	// Log is a back-compat shim: when set and Logger is nil, the
+	// orchestrator builds a slog.NewTextHandler(Log) and uses that
+	// for structured progress records. Per-element converter
+	// stdout/stderr capture (merged) also flows here. Defaults to
+	// os.Stderr when both Log and Logger are nil.
 	Log io.Writer
+
+	// Logger, when non-nil, takes precedence over Log for structured
+	// progress records. The CLI wires either a TextHandler (default)
+	// or JSONHandler (--log-format=json) here. Per-element converter
+	// stdout/stderr still flow through Log (or Stderr as fallback)
+	// since subprocess output is line-oriented bytes, not records.
+	Logger *slog.Logger
 }
 
 // defaultPerElementTimeout is the cap when Options.PerElementTimeout
@@ -286,6 +297,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		registry:    registry,
 		depRecords:  map[string]*depRecord{},
 		res:         &Result{},
+		logger:      loggerFor(opts),
 	}
 
 	if err := r.driveElements(ctx, cmakeOrder); err != nil {
@@ -303,7 +315,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// pass. Cache hits don't re-emit timings.json so they're absent
 	// from the per-element map and contribute zero to the totals.
 	r.res.Timings = aggregateTimings(opts.Out, r.res.CacheMisses)
-	logTimingsSummary(logOf(opts), r.res)
+	logTimingsSummary(r.logger, r.res)
 
 	if err := writeManifest(opts.Out, r.res); err != nil {
 		return nil, err
@@ -344,19 +356,23 @@ func aggregateTimings(out string, ranElements []string) TimingsSummary {
 	}
 }
 
-// logTimingsSummary prints a one-line summary of the run plus the
-// cumulative timings to the orchestrator's log writer. Operator-
-// facing; the full per-element breakdown is in r.res.Timings for
-// callers (and writeManifest persists it).
-func logTimingsSummary(w io.Writer, res *Result) {
-	fmt.Fprintf(w, "summary: converted=%d cache_hits=%d cache_misses=%d failed=%d\n",
-		len(res.Converted), len(res.CacheHits), len(res.CacheMisses), len(res.Failed))
+// logTimingsSummary emits a structured run-summary record plus a
+// converter-wall-clock record (when timings populated). Operator-facing;
+// the full per-element breakdown is in r.res.Timings for callers (and
+// writeManifest persists it).
+func logTimingsSummary(logger *slog.Logger, res *Result) {
+	logger.Info("run summary",
+		"converted", len(res.Converted),
+		"cache_hits", len(res.CacheHits),
+		"cache_misses", len(res.CacheMisses),
+		"failed", len(res.Failed),
+	)
 	if res.Timings.TotalConverterSecs > 0 {
-		fmt.Fprintf(w, "summary: converter wall-clock total=%.1fs (cmake=%.1fs translate=%.1fs ratio=%.2f)\n",
-			res.Timings.TotalConverterSecs,
-			res.Timings.TotalCMakeConfigureSecs,
-			res.Timings.TotalTranslationSecs,
-			res.Timings.ConfigureToTranslationRatio,
+		logger.Info("converter wall-clock",
+			"total_seconds", res.Timings.TotalConverterSecs,
+			"cmake_configure_seconds", res.Timings.TotalCMakeConfigureSecs,
+			"translation_seconds", res.Timings.TotalTranslationSecs,
+			"configure_to_translation_ratio", res.Timings.ConfigureToTranslationRatio,
 		)
 	}
 }
@@ -380,6 +396,7 @@ type runner struct {
 	mu         sync.Mutex
 	depRecords map[string]*depRecord
 	res        *Result
+	logger     *slog.Logger
 }
 
 // driveElements fans the cmake-only topo-ordered slice across a
@@ -485,7 +502,7 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 			Code:    "dep-failed",
 			Message: fmt.Sprintf("transitive cmake dep %s failed Tier-1; skipped to surface root cause", failedDep),
 		})
-		fmt.Fprintf(logOf(r.opts), "==> %s\n    skipped: dep %s failed\n", name, failedDep)
+		r.logger.Info("element skipped", "name", name, "reason", "dep_failed", "failed_dep", failedDep)
 		return nil
 	}
 
@@ -494,7 +511,7 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("element %s: %w", name, err)
 	}
-	fmt.Fprintf(logOf(r.opts), "==> %s\n", name)
+	r.logger.Info("element start", "name", name)
 
 	// allowlist registry is shared persistent state — serialize.
 	r.mu.Lock()
@@ -548,7 +565,7 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 	}
 
 	if hit {
-		fmt.Fprintf(logOf(r.opts), "    cache hit %s\n", built.ActionDigest.Hash[:12])
+		r.logger.Info("cache hit", "name", name, "action_digest", built.ActionDigest.Hash)
 		r.appendCacheHit(name)
 	} else {
 		if err := os.RemoveAll(elemOut); err != nil {
@@ -906,6 +923,16 @@ func logOf(opts Options) io.Writer {
 		return opts.Log
 	}
 	return os.Stderr
+}
+
+// loggerFor returns the structured logger to use for orchestrator progress
+// records. Precedence: Options.Logger > Options.Log (wrapped as
+// TextHandler) > os.Stderr (TextHandler).
+func loggerFor(opts Options) *slog.Logger {
+	if opts.Logger != nil {
+		return opts.Logger
+	}
+	return slog.New(slog.NewTextHandler(logOf(opts), nil))
 }
 
 // depRecord is the per-element bundle/exports state the orchestrator holds
