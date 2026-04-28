@@ -23,7 +23,14 @@
 {
   global: {
     diagnosticsHttpServer: {
-      listenAddress: ':9980',
+      // Newer schema: diagnosticsHttpServer takes a list of HTTP servers,
+      // not a single listenAddress string. Each server has its own
+      // listenAddresses + authenticationPolicy. Mirrors the gRPC
+      // server shape.
+      httpServers: [{
+        listenAddresses: [':9980'],
+        authenticationPolicy: { allow: {} },
+      }],
       enablePrometheus: true,
       enablePprof: true,
     },
@@ -57,6 +64,10 @@
     findMissingAuthorizer: { allow: {} },
   },
   actionCache: {
+    // Bazel clients require completenessChecking on AC reads — they
+    // depend on every output blob a cached ActionResult references
+    // being still present in CAS. Wrapping the local backend with the
+    // completenessChecking decorator guarantees this.
     backend: {
       completenessChecking: {
         backend: {
@@ -82,6 +93,7 @@
             },
           },
         },
+        maximumTotalTreeSizeBytes: 64 * 1024 * 1024,
       },
     },
     getAuthorizer: { allow: {} },
