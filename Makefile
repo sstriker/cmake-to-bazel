@@ -1,5 +1,5 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
-        e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-buildbarn e2e-buildbarn-execute \
+        e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
         buildbarn-up buildbarn-down \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -112,13 +112,19 @@ e2e-cmake-consumer: check-tools converter orchestrator
 e2e-toolchain-skip: check-tools converter orchestrator derive-toolchain
 	$(GO) test -tags=e2e -run TestE2E_Toolchain_SkipReducesConfigureTime ./orchestrator/...
 
-# M5b fidelity gate. Builds hello-world via cmake and via
-# convert-element + bazel, asserts identical `nm` symbol set on
-# the resulting libhello.a. Catches converter bugs where a
-# translation unit gets dropped or compile flags drift enough to
-# change exports.
+# Fidelity gate. Parameterized harness: hello-world is the smoke
+# fixture; fmt (when fetched via `fetch-fmt`) is the real-world
+# fixture. Each fixture builds the project two ways (cmake reference
+# vs convert-element + bazel) and asserts symbol equivalence on the
+# resulting library. Each new delta is recorded in
+# docs/fidelity-known-deltas.md.
 e2e-fidelity: check-tools converter
 	$(GO) test -tags=e2e -run TestE2E_Fidelity ./orchestrator/...
+
+# Same as e2e-fidelity but ensures the fmt fixture is fetched first
+# so TestE2E_Fidelity_Fmt_SymbolEquivalent doesn't self-skip.
+e2e-fidelity-fmt: check-tools converter fetch-fmt
+	$(GO) test -tags=e2e -run TestE2E_Fidelity_Fmt ./orchestrator/...
 
 # Real-Buildbarn validation. Brings up bb-storage via docker compose,
 # runs the cache-share keystone test against grpc://127.0.0.1:8980,
