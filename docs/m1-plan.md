@@ -7,7 +7,7 @@ Bazel + Buildbarn remote execution. FDSDK has both `kind: cmake` elements
 (the focus of this work) and non-cmake elements (`kind: manual / autotools
 / meson / …`) that need to land in the same Bazel build graph. M1–M5b cover
 the cmake side end-to-end; the non-cmake side is deferred to a follow-up
-plan (`docs/fdsdk-whole-project-plan.md`) — it builds **without** conversion,
+plan (`docs/whole-project-plan.md`) — it builds **without** conversion,
 with the architectural strategy picked after fmt fidelity is green.
 
 The strategic decision is **not to translate CMake source to Starlark**:
