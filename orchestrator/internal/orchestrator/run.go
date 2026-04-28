@@ -117,7 +117,7 @@ type Options struct {
 	// toolchain file (typically derive-toolchain's toolchain.cmake)
 	// passed to every per-element converter invocation via
 	// --toolchain-cmake-file. Lets cmake skip its compiler-detection
-	// probe — a measurable per-conversion latency win at distro
+	// probe — a measurable per-conversion latency win at project
 	// scale. The orchestrator validates the file exists at startup.
 	ToolchainCMakeFile string
 

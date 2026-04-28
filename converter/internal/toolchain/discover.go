@@ -343,7 +343,7 @@ func mergeVariants(a, b Variant) Variant {
 // knows about for the given source root, by running a one-off
 // `cmake --system-information` parse. Useful when a project
 // declares custom CMAKE_CONFIGURATION_TYPES; rare in practice for
-// our target distros, so the function exists as an opt-in
+// our target projects, so the function exists as an opt-in
 // extension to DiscoverBuildTypes() rather than the default.
 //
 // Returns the union of CMake's standard four plus any custom

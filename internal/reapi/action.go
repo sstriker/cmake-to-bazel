@@ -127,10 +127,10 @@ const (
 	pathBinDir         = "bin"
 	pathConverter      = "convert-element"
 	pathOutBuild       = "BUILD.bazel"
-	pathOutBundle  = "cmake-config"
-	pathOutFailure = "failure.json"
-	pathOutReads   = "read_paths.json"
-	pathOutTimings = "timings.json"
+	pathOutBundle      = "cmake-config"
+	pathOutFailure     = "failure.json"
+	pathOutReads       = "read_paths.json"
+	pathOutTimings     = "timings.json"
 )
 
 // Build constructs the Action / Command / InputRoot for one conversion.
