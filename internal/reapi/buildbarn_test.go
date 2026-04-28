@@ -84,7 +84,7 @@ func TestE2E_Buildbarn_ExecuteSyntheticAction(t *testing.T) {
 	}
 
 	cmd := &repb.Command{
-		Arguments: []string{"/bin/sh", "-c", "echo hello > BUILD.bazel"},
+		Arguments:   []string{"/bin/sh", "-c", "echo hello > BUILD.bazel"},
 		OutputPaths: []string{"BUILD.bazel"},
 		Platform: &repb.Platform{
 			Properties: []*repb.Platform_Property{

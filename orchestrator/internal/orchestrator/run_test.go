@@ -108,10 +108,10 @@ func stubConverter() int {
 			// Tests assert that aggregation works; the actual numbers
 			// don't matter, but the schema does.
 			tbody, _ := json.MarshalIndent(map[string]any{
-				"version":                  1,
-				"cmake_configure_seconds":  1.5,
-				"translation_seconds":      0.5,
-				"total_seconds":            2.0,
+				"version":                 1,
+				"cmake_configure_seconds": 1.5,
+				"translation_seconds":     0.5,
+				"total_seconds":           2.0,
 			}, "", "  ")
 			_ = os.MkdirAll(filepath.Dir(*outTimings), 0o755)
 			_ = os.WriteFile(*outTimings, append(tbody, '\n'), 0o644)
