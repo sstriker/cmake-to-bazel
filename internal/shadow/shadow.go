@@ -5,7 +5,7 @@
 // directories + symlinks + filenames + permissions. File content is preserved
 // only for paths matched by Matcher m; every other file becomes a zero-byte
 // stub. The trick is that CMake's configure phase only `access(R_OK)`s source
-// files (verified at Source/cmSourceFile.cxx:184; see cmake_analysis.md) — so
+// files (verified at Source/cmSourceFile.cxx:184; see docs/cmake_analysis.md) — so
 // from cmake's perspective the stub is indistinguishable from the real file.
 //
 // Call Build before pointing cmakerun.Configure at the destination via

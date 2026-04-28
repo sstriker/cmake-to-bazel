@@ -10,7 +10,7 @@
 // Environment is fully cleared and re-seeded with the minimum cmake needs:
 // PATH, HOME (pointed at a tmpfs to defeat ~/.cmake/packages), LC_ALL/LANG=C,
 // SOURCE_DATE_EPOCH for deterministic timestamps, and the
-// CMAKE_FIND_USE_*_PATH=OFF cluster from cmake_analysis.md to suppress
+// CMAKE_FIND_USE_*_PATH=OFF cluster from docs/cmake_analysis.md to suppress
 // host-leak find_package paths. find_package itself isn't exercised by
 // hello-world but the env should match what we'll feed real packages.
 package hermetic

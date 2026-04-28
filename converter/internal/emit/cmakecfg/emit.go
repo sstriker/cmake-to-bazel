@@ -14,7 +14,7 @@
 // Synthesis intentionally drops the multi-inclusion-protection block from
 // upstream's emitter; consumers that re-include in the same scope can opt in
 // later. The EXISTS-check loop at the bottom of <Pkg>Targets.cmake is
-// preserved because cmake_analysis.md documents that loop as the reason the
+// preserved because docs/cmake_analysis.md documents that loop as the reason the
 // shadow-prefix tree just needs to satisfy access(R_OK) — not actually carry
 // content.
 package cmakecfg
