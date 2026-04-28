@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -58,6 +59,7 @@ func main() {
 		platformFlag    = fs.String("platform", "", "Action.platform overrides as comma-separated name=value (e.g. cmake-version=3.30.0,ninja-version=1.12.0). Overrides built-in defaults; the orchestrator MUST agree with workers on platform values to share cache hits.")
 		elemTimeout     = fs.Duration("element-timeout", 0, "per-element pipeline cap (e.g. 30m, 2h). Zero = orchestrator default (30m). Mirrored into Action.timeout for remote workers.")
 		toolchainCMake  = fs.String("toolchain-cmake-file", "", "CMake toolchain file (typically derive-toolchain's toolchain.cmake) passed to every per-element converter invocation. Skips cmake's compiler-detection probe — measurable per-conversion latency win.")
+		logFormat       = fs.String("log-format", "text", "structured-log handler: text (human-readable, default) or json (one record per line for ingestion)")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -144,6 +146,12 @@ func main() {
 		os.Exit(64)
 	}
 
+	logger, err := buildLogger(*logFormat)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
+		os.Exit(64)
+	}
+
 	res, err := orchestrator.Run(ctx, orchestrator.Options{
 		Project:            proj,
 		Graph:              g,
@@ -157,6 +165,7 @@ func main() {
 		Platform:           platform,
 		PerElementTimeout:  *elemTimeout,
 		ToolchainCMakeFile: *toolchainCMake,
+		Logger:             logger,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "orchestrate: %v\n", err)
@@ -166,6 +175,21 @@ func main() {
 		len(res.Converted), len(res.Failed), len(res.CacheHits), len(res.CacheMisses))
 	if len(res.Failed) > 0 {
 		os.Exit(2)
+	}
+}
+
+// buildLogger returns a slog.Logger backed by the requested handler kind.
+// Both handlers write to stderr; the orchestrator's per-element subprocess
+// stdout/stderr capture stays on the same fd, so operators see log
+// records and converter output interleaved in chronological order.
+func buildLogger(format string) (*slog.Logger, error) {
+	switch strings.ToLower(format) {
+	case "text", "":
+		return slog.New(slog.NewTextHandler(os.Stderr, nil)), nil
+	case "json":
+		return slog.New(slog.NewJSONHandler(os.Stderr, nil)), nil
+	default:
+		return nil, fmt.Errorf("--log-format must be text or json, got %q", format)
 	}
 }
 
