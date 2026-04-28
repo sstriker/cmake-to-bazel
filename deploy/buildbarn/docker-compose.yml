@@ -21,7 +21,7 @@
 
 services:
   bb-storage:
-    image: ghcr.io/buildbarn/bb-storage:20251030T170156Z-d096203
+    image: ghcr.io/buildbarn/bb-storage:20251008T080857Z-b207a91
     container_name: bb-storage
     restart: unless-stopped
     command: ["/config/storage.jsonnet"]

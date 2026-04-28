@@ -31,3 +31,9 @@ install(EXPORT uses_helloTargets
         FILE uses_helloTargets.cmake
         NAMESPACE uses_hello::
         DESTINATION lib/cmake/uses_hello)
+# Mark the executable as installed too so the converter emits
+# visibility = ["//visibility:public"] on it. Bazel 9 enforces
+# visibility strictly; the M5 downstream-Bazel test depends on
+# @elem_components_uses_hello//:uses_hello_bin from //:smoke and
+# the dep would be rejected as private without the install hint.
+install(TARGETS uses_hello_bin RUNTIME DESTINATION bin)
