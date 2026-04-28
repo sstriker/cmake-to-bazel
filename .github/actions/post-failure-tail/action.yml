@@ -1,0 +1,75 @@
+name: Post job failure tail to PR
+description: >
+  On step failure within a CI job, fetch this job's accumulated log via
+  the REST API, slice off the last ~150 lines, and post the result as a
+  PR comment on every pull request associated with the head commit. The
+  runner-injected GITHUB_TOKEN is sufficient — no PAT required.
+
+  Usage (must run with `if: failure()`):
+
+      - uses: ./.github/actions/post-failure-tail
+        if: failure()
+
+  Skips silently when the head commit isn't associated with a PR (push
+  to claude/** without a corresponding open PR).
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/github-script@v7
+      with:
+        script: |
+          // Locate THIS job's id from the run's job list — context.job is
+          // the job NAME, the REST endpoint takes id.
+          const runId = context.runId;
+          const jobs = await github.rest.actions.listJobsForWorkflowRun({
+            ...context.repo, run_id: runId,
+          });
+          const job = jobs.data.jobs.find(j => j.name === context.job);
+          if (!job) {
+            core.warning(`post-failure-tail: job ${context.job} not in run ${runId}`);
+            return;
+          }
+          // downloadJobLogsForWorkflowRun returns the plaintext log for
+          // a single job (octokit follows the redirect for us).
+          let log;
+          try {
+            const resp = await github.rest.actions.downloadJobLogsForWorkflowRun({
+              ...context.repo, job_id: job.id,
+            });
+            log = String(resp.data || '');
+          } catch (err) {
+            core.warning(`post-failure-tail: download log failed: ${err}`);
+            return;
+          }
+          const lines = log.split('\n');
+          const TAIL = 150;
+          const tail = lines.slice(-TAIL).join('\n');
+          const truncated = lines.length > TAIL ? `(showing last ${TAIL} of ${lines.length} lines)\n\n` : '';
+          const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+            ...context.repo, commit_sha: context.sha,
+          });
+          if (!prs.data.length) {
+            core.notice(`post-failure-tail: no PR for commit ${context.sha}; skipping comment`);
+            return;
+          }
+          const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
+          const body = [
+            `## CI failure: \`${context.workflow} / ${context.job}\``,
+            ``,
+            `[full log](${runUrl}) · commit \`${context.sha.slice(0, 7)}\``,
+            ``,
+            '<details open><summary>tail</summary>',
+            ``,
+            truncated + '```',
+            tail,
+            '```',
+            ``,
+            '</details>',
+          ].join('\n');
+          for (const pr of prs.data) {
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: pr.number, body,
+            });
+            core.notice(`post-failure-tail: posted to PR #${pr.number}`);
+          }
