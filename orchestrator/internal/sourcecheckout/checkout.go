@@ -7,9 +7,9 @@
 //   - kind: local         relative path; same behavior the orchestrator had.
 //   - kind: git           clones url, checks out ref.
 //   - kind: remote-asset  M3d: looks up uri+qualifiers via Remote Asset API
-//                         and materializes the resulting Directory from CAS.
-//                         Used for FDSDK sources already published via
-//                         `bst source push`.
+//     and materializes the resulting Directory from CAS.
+//     Used for FDSDK sources already published via
+//     `bst source push`.
 //
 // Other kinds (tar, ostree, deb, bst-junction) are explicitly out of
 // scope and surface as a clear error so the operator knows to either
