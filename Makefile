@@ -1,5 +1,5 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
-        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-buildbarn e2e-buildbarn-execute \
+        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-buildbarn e2e-buildbarn-execute \
         buildbarn-up buildbarn-down \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -102,6 +102,14 @@ e2e-cmake-consumer: check-tools converter orchestrator
 # integration end-to-end.
 e2e-toolchain-skip: check-tools converter orchestrator derive-toolchain
 	$(GO) test -tags=e2e -run TestE2E_Toolchain_SkipReducesConfigureTime ./orchestrator/...
+
+# M5b fidelity gate. Builds hello-world via cmake and via
+# convert-element + bazel, asserts identical `nm` symbol set on
+# the resulting libhello.a. Catches converter bugs where a
+# translation unit gets dropped or compile flags drift enough to
+# change exports.
+e2e-fidelity: check-tools converter
+	$(GO) test -tags=e2e -run TestE2E_Fidelity ./orchestrator/...
 
 # Real-Buildbarn validation. Brings up bb-storage via docker compose,
 # runs the cache-share keystone test against grpc://127.0.0.1:8980,
