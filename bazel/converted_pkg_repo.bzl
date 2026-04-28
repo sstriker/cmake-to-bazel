@@ -94,10 +94,9 @@ def _from_manifest_impl(mctx):
 
 _from_manifest = tag_class(
     attrs = {
-        "manifest": attr.label(
+        "manifest": attr.string(
             mandatory = True,
-            doc = "label or path to the orchestrator's <out>/manifest/converted.json",
-            allow_single_file = True,
+            doc = "filesystem path (absolute or workspace-relative) to the orchestrator's <out>/manifest/converted.json. String, not Label, because the manifest typically lives in an out-of-workspace tmpdir produced by the orchestrator.",
         ),
     },
 )
