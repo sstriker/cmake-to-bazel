@@ -29,31 +29,32 @@ ARG NINJA_VERSION=1.11.1
 ARG BWRAP_VERSION=0.8.0
 
 # bookworm ships:
-#   cmake          3.25.1   (need 3.28.3 — install from kitware apt repo)
+#   cmake          3.25.1   (need 3.28.3 — download from Kitware GitHub releases)
 #   ninja-build    1.11.1   (matches NINJA_VERSION pin exactly)
 #   bubblewrap     0.8.0    (matches BWRAP_VERSION pin exactly)
 #
-# For cmake 3.28.x we use Kitware's apt repo, which carries the exact
-# upstream tarball at this version. Avoids vendoring binaries into the
-# image and keeps the version pinned without manual hash management.
+# For cmake we used to use Kitware's apt repo, but apt.kitware.com only
+# carries one (rolling) cmake version, so once they bumped past 3.28.x
+# our version-fence started failing. Switch to a direct tarball download
+# from github.com/Kitware/CMake/releases — those are versioned forever.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl gpg \
+        ca-certificates curl \
         ninja-build \
         bubblewrap \
     ; \
-    # Install pinned cmake from Kitware's apt repo — bookworm's stock
-    # cmake is 3.25.x. Kitware publishes for jammy/noble but the deb
-    # works on bookworm too (only depends on libc6 + libssl3).
-    install -d -m 0755 /etc/apt/keyrings; \
-    curl -fsSL https://apt.kitware.com/keys/kitware-archive-latest.asc \
-      | gpg --dearmor -o /etc/apt/keyrings/kitware.gpg; \
-    echo "deb [signed-by=/etc/apt/keyrings/kitware.gpg] https://apt.kitware.com/ubuntu/ jammy main" \
-      > /etc/apt/sources.list.d/kitware.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends "cmake"; \
-    apt-get purge -y --auto-remove curl gpg; \
+    arch="$(uname -m)"; \
+    curl -fsSL --retry 3 \
+      "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-${arch}.tar.gz" \
+      -o /tmp/cmake.tgz; \
+    tar -xzf /tmp/cmake.tgz -C /opt; \
+    mv "/opt/cmake-${CMAKE_VERSION}-linux-${arch}" /opt/cmake; \
+    rm /tmp/cmake.tgz; \
+    ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake; \
+    ln -s /opt/cmake/bin/ctest /usr/local/bin/ctest; \
+    ln -s /opt/cmake/bin/cpack /usr/local/bin/cpack; \
+    apt-get purge -y --auto-remove curl; \
     rm -rf /var/lib/apt/lists/*; \
     # Hard version-fence: if the installed versions drift from
     # defaultPlatform pins, the build fails here instead of silently
