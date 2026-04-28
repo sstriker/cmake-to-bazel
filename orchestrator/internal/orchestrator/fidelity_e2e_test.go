@@ -1,9 +1,9 @@
 //go:build e2e
 
-// fidelity_e2e_test is the M5b architectural keystone: build
-// hello-world two ways (cmake vs convert-element + bazel build)
-// and assert the resulting libraries' `nm --defined-only` symbol
-// sets are equivalent.
+// fidelity_e2e_test is the fidelity gate: build a cmake project two
+// ways (cmake reference vs convert-element + bazel build) and assert
+// the resulting libraries' `nm --defined-only` symbol sets are
+// equivalent.
 //
 // Why this test matters: TestE2E_BazelBuild_DownstreamConsumesConvertedRepos
 // proves the conversion plumbing works end-to-end (bazel build
@@ -14,8 +14,12 @@
 //
 // Symbol-tier is the load-bearing assertion: same set of defined
 // symbols means same translation units compiled with effectively-
-// equivalent flags. Behavioral-tier (hello-world is library-only,
-// no executable) is queued for a future fixture.
+// equivalent flags. Behavioral-tier (running the binaries and
+// comparing exit/stdout/stderr) extends to fixtures with executables.
+//
+// The harness is parameterized via fidelityCase. Hello-world is the
+// minimal smoke fixture; fmt is the real-world test where
+// converter bugs surface (see docs/fidelity-known-deltas.md).
 //
 // Gated behind the existing `e2e` build tag; depends on real
 // cmake + bazel/bazelisk + convert-element + nm.
@@ -23,6 +27,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,114 +37,243 @@ import (
 	"github.com/sstriker/cmake-to-bazel/internal/fidelity"
 )
 
+// fidelityCase configures one parameterized run of the fidelity harness.
+type fidelityCase struct {
+	// Name is shown in test output. Required.
+	Name string
+
+	// SourceRoot is the absolute path to the cmake project root used
+	// for both the reference (`cmake … && cmake --build`) and the
+	// converted (convert-element + bazel build) builds. Required.
+	SourceRoot string
+
+	// LibName is the symbol-diffed library's target name. The
+	// reference build's archive is sought as <BuildDir>/lib<LibName>.a
+	// or <BuildDir>/<subdir>/lib<LibName>.a (we walk for it). Bazel's
+	// archive comes from `bazel cquery --output=files //:<LibName>`.
+	LibName string
+
+	// ModuleBazel is the MODULE.bazel content staged at the Bazel
+	// workspace root. Defaults to a minimal rules_cc declaration
+	// keyed off Name when empty.
+	ModuleBazel string
+
+	// SkipFunc, when non-nil, is consulted before the test runs. A
+	// non-empty string skips with that reason. Used for fixtures
+	// gated on out-of-band downloads (e.g. fmt at /tmp/fmt).
+	SkipFunc func(t *testing.T) string
+}
+
 func TestE2E_Fidelity_HelloWorld_SymbolEquivalent(t *testing.T) {
+	helloSrc, err := filepath.Abs("../../../converter/testdata/sample-projects/hello-world")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runSymbolFidelityCase(t, fidelityCase{
+		Name:       "hello-world",
+		SourceRoot: helloSrc,
+		LibName:    "hello",
+		ModuleBazel: "module(name = \"hello\", version = \"0.0.0\")\n" +
+			"bazel_dep(name = \"rules_cc\", version = \"0.0.10\")\n",
+	})
+}
+
+// TestE2E_Fidelity_Fmt_SymbolEquivalent: same harness, fmt as the
+// fixture. Exercises the converter on a real-world cmake project with
+// many translation units. Likely to surface converter bugs the way
+// hello-world doesn't; see docs/fidelity-known-deltas.md for the
+// observed deltas and how each was triaged.
+func TestE2E_Fidelity_Fmt_SymbolEquivalent(t *testing.T) {
+	runSymbolFidelityCase(t, fidelityCase{
+		Name:       "fmt",
+		SourceRoot: "/tmp/fmt",
+		LibName:    "fmt",
+		ModuleBazel: "module(name = \"fmt_fidelity\", version = \"0.0.0\")\n" +
+			"bazel_dep(name = \"rules_cc\", version = \"0.0.10\")\n",
+		SkipFunc: func(t *testing.T) string {
+			if _, err := os.Stat("/tmp/fmt"); err != nil {
+				return "/tmp/fmt not present (run `make fetch-fmt` first)"
+			}
+			return ""
+		},
+	})
+}
+
+func runSymbolFidelityCase(t *testing.T, c fidelityCase) {
+	t.Helper()
+	if c.Name == "" || c.SourceRoot == "" || c.LibName == "" {
+		t.Fatalf("fidelityCase: Name, SourceRoot, LibName all required")
+	}
+	if c.SkipFunc != nil {
+		if reason := c.SkipFunc(t); reason != "" {
+			t.Skip(reason)
+		}
+	}
 	if _, err := exec.LookPath("nm"); err != nil {
 		t.Skipf("nm not on PATH: %v", err)
 	}
 	if _, err := exec.LookPath("cmake"); err != nil {
 		t.Skipf("cmake not on PATH: %v", err)
 	}
-	bazel := lookupBazel(t) // existing helper; skips if absent
+	bazel := lookupBazel(t)
 	conv := lookupConverter(t)
 
-	helloSrc, err := filepath.Abs("../../../converter/testdata/sample-projects/hello-world")
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(c.SourceRoot); err != nil {
+		t.Fatalf("%s: SourceRoot %s missing: %v", c.Name, c.SourceRoot, err)
 	}
 
-	// Path A: cmake build out-of-band. Same toolchain the
-	// converter would use; we don't pass --toolchain-cmake-file
-	// because we WANT cmake to do its native probe — that's the
-	// reference.
+	// Path A: cmake build out-of-band. Same toolchain the converter
+	// would use; we don't pass --toolchain-cmake-file because we WANT
+	// cmake to do its native probe — that's the reference.
 	cmakeBuild := t.TempDir()
 	mustRun(t, exec.CommandContext(context.Background(), "cmake",
-		"-S", helloSrc, "-B", cmakeBuild, "-G", "Ninja",
+		"-S", c.SourceRoot, "-B", cmakeBuild, "-G", "Ninja",
 		"-DCMAKE_BUILD_TYPE=Release",
 	))
 	mustRun(t, exec.CommandContext(context.Background(), "cmake",
-		"--build", cmakeBuild,
+		"--build", cmakeBuild, "--target", c.LibName,
 	))
-	cmakeLib := filepath.Join(cmakeBuild, "libhello.a")
-	if _, err := os.Stat(cmakeLib); err != nil {
-		t.Fatalf("cmake build produced no libhello.a: %v\n  contents: %v",
-			err, dirEntries(cmakeBuild))
+	cmakeLib := findStaticArchive(cmakeBuild, "lib"+c.LibName+".a")
+	if cmakeLib == "" {
+		t.Fatalf("%s: cmake build produced no lib%s.a in %s\n  contents: %v",
+			c.Name, c.LibName, cmakeBuild, dirEntries(cmakeBuild))
 	}
 
-	// Path B: convert-element + bazel build. We do a direct
-	// convert-element call (no orchestrator) so the test isolates
-	// the converter's translation logic from the orchestrator's
-	// plumbing — failures here fall on the converter alone.
+	// Path B: convert-element + bazel build. Direct convert-element
+	// call (no orchestrator) so failures isolate on the converter's
+	// translation logic.
 	convOut := t.TempDir()
 	mustRun(t, exec.CommandContext(context.Background(), conv,
-		"--source-root", helloSrc,
+		"--source-root", c.SourceRoot,
 		"--out-build", filepath.Join(convOut, "BUILD.bazel"),
 		"--out-bundle-dir", filepath.Join(convOut, "cmake-config"),
 	))
 
-	// Stage a Bazel workspace that consumes the emitted BUILD.bazel.
-	// Source files (hello.c + include/hello.h) are copied next to
-	// BUILD.bazel because the converter's emitter writes paths
-	// relative to the package.
+	// Stage a Bazel workspace: copy the source tree, drop the
+	// emitted BUILD.bazel at the root, write MODULE.bazel.
 	ws := t.TempDir()
-	mustCopyFile(t, filepath.Join(convOut, "BUILD.bazel"), filepath.Join(ws, "BUILD.bazel"))
-	mustCopyFile(t, filepath.Join(helloSrc, "hello.c"), filepath.Join(ws, "hello.c"))
-	if err := os.MkdirAll(filepath.Join(ws, "include"), 0o755); err != nil {
-		t.Fatal(err)
+	if err := copyTreeFiltered(c.SourceRoot, ws); err != nil {
+		t.Fatalf("%s: copy source tree: %v", c.Name, err)
 	}
-	mustCopyFile(t, filepath.Join(helloSrc, "include", "hello.h"), filepath.Join(ws, "include", "hello.h"))
-	mustWriteString(t, filepath.Join(ws, "MODULE.bazel"),
-		"module(name = \"hello\", version = \"0.0.0\")\n"+
-			"bazel_dep(name = \"rules_cc\", version = \"0.0.10\")\n",
-	)
+	mustCopyFile(t, filepath.Join(convOut, "BUILD.bazel"), filepath.Join(ws, "BUILD.bazel"))
+	module := c.ModuleBazel
+	if module == "" {
+		module = "module(name = \"" + sanitizeBazelName(c.Name) + "\", version = \"0.0.0\")\n" +
+			"bazel_dep(name = \"rules_cc\", version = \"0.0.10\")\n"
+	}
+	mustWriteString(t, filepath.Join(ws, "MODULE.bazel"), module)
 
-	// bazel build //:hello — the target name comes from
-	// cc_library(name = "hello", ...) which the converter emits.
-	cmd := exec.CommandContext(context.Background(), bazel, "build", "//:hello")
+	cmd := exec.CommandContext(context.Background(), bazel, "build", "//:"+c.LibName)
 	cmd.Dir = ws
 	cmd.Stdout = testLog{t}
 	cmd.Stderr = testLog{t}
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("bazel build //:hello: %v", err)
+		t.Fatalf("%s: bazel build //:%s: %v", c.Name, c.LibName, err)
 	}
 
-	// Locate the bazel-built libhello.a. Bazel's static-library
-	// output convention for cc_library(linkstatic=True) is
-	// bazel-bin/lib<name>.a; cquery confirms the precise path.
 	queryCmd := exec.CommandContext(context.Background(), bazel,
-		"cquery", "--output=files", "//:hello",
+		"cquery", "--output=files", "//:"+c.LibName,
 	)
 	queryCmd.Dir = ws
 	out, err := queryCmd.Output()
 	if err != nil {
-		t.Fatalf("bazel cquery: %v", err)
+		t.Fatalf("%s: bazel cquery: %v", c.Name, err)
 	}
 	bazelLib := pickStaticArchive(strings.TrimSpace(string(out)))
 	if bazelLib == "" {
-		t.Fatalf("bazel cquery returned no .a archive: %q", out)
+		t.Fatalf("%s: bazel cquery returned no .a archive: %q", c.Name, out)
 	}
 	if !filepath.IsAbs(bazelLib) {
 		bazelLib = filepath.Join(ws, bazelLib)
 	}
 	if _, err := os.Stat(bazelLib); err != nil {
-		t.Fatalf("bazel-built %s missing: %v", bazelLib, err)
+		t.Fatalf("%s: bazel-built %s missing: %v", c.Name, bazelLib, err)
 	}
 
 	cmakeSyms, err := fidelity.SymbolSet(cmakeLib)
 	if err != nil {
-		t.Fatalf("nm cmake: %v", err)
+		t.Fatalf("%s: nm cmake: %v", c.Name, err)
 	}
 	bazelSyms, err := fidelity.SymbolSet(bazelLib)
 	if err != nil {
-		t.Fatalf("nm bazel: %v", err)
+		t.Fatalf("%s: nm bazel: %v", c.Name, err)
 	}
 
-	t.Logf("cmake symbols (%d): %v", len(cmakeSyms), keysOf(cmakeSyms))
-	t.Logf("bazel symbols (%d): %v", len(bazelSyms), keysOf(bazelSyms))
+	t.Logf("%s: cmake symbols=%d bazel symbols=%d", c.Name, len(cmakeSyms), len(bazelSyms))
 
 	diff := fidelity.DiffSymbols(cmakeSyms, bazelSyms)
 	if !diff.Empty() {
-		t.Errorf("hello-world fidelity: symbol mismatch in libhello.a\n%s", diff.Format())
+		t.Errorf("%s: fidelity symbol mismatch in lib%s.a\n%s\n  see docs/fidelity-known-deltas.md",
+			c.Name, c.LibName, diff.Format())
 	}
+}
+
+// findStaticArchive walks root looking for a file named `name`.
+// Returns the absolute path or "".
+func findStaticArchive(root, name string) string {
+	var hit string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() && d.Name() == name {
+			hit = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return hit
+}
+
+// copyTreeFiltered mirrors src into dst, skipping cmake build dirs and
+// version-control artifacts that don't belong in a Bazel workspace.
+// Symlinks land as their resolved targets; out-of-tree symlinks are
+// skipped.
+func copyTreeFiltered(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		// Skip noise + things that conflict with bazel's own conventions.
+		base := filepath.Base(rel)
+		switch base {
+		case ".git", ".github", "build", "_build", "out", "bazel-out", "bazel-bin", "MODULE.bazel", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel":
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, body, 0o644)
+	})
+}
+
+func sanitizeBazelName(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_':
+			out = append(out, c)
+		default:
+			out = append(out, '_')
+		}
+	}
+	return string(out)
 }
 
 // pickStaticArchive picks the first whitespace-separated token in s
@@ -153,14 +287,6 @@ func pickStaticArchive(s string) string {
 		}
 	}
 	return ""
-}
-
-func keysOf(m map[string]fidelity.Symbol) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 func mustRun(t *testing.T, cmd *exec.Cmd) {
