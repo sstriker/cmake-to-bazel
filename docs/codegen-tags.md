@@ -7,7 +7,7 @@
 
 Every Bazel rule produced by recovering an `add_custom_command` from a
 `build.ninja` carries a stable `cmake-codegen` tag (and zero or more
-sub-tags) so the entire converted distro can be audited with `bazel
+sub-tags) so the entire converted project can be audited with `bazel
 query` without scanning rule bodies.
 
 ## Producer-side tags
@@ -35,7 +35,7 @@ includes a path that comes from a `cmake-codegen`-tagged genrule.
 ## Why two-sided tagging
 
 A single producer tag would force consumer-discovery queries to walk
-the dep graph (slow at distro scale, breaks across aliasing/renames).
+the dep graph (slow at project scale, breaks across aliasing/renames).
 A consumer-side `has-cmake-codegen` tag answers "which compile units
 consume codegen?" in one query, independent of how the genrule is
 labelled or aliased.
@@ -43,7 +43,7 @@ labelled or aliased.
 ## Common queries
 
 ```sh
-# Every recovered codegen rule in the distro.
+# Every recovered codegen rule in the project.
 bazel query 'attr("tags", "cmake-codegen", //...)'
 
 # Codegen rules driven by a specific tool.

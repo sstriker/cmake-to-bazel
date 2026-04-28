@@ -5,7 +5,7 @@
 M1 shipped a single-element converter (`convert-element`). M2 made it
 handle real-world CMake (codegen recovery, cross-element deps via
 imports manifest, fmt acceptance). M3 lifts the converter from
-"per-element CLI" to "distro-scale orchestration": one invocation
+"per-element CLI" to "project-scale orchestration": one invocation
 walks an FDSDK element graph and produces converted BUILD.bazel + a
 synthesized cmake-config bundle for every `kind: cmake` element, with
 per-element caching keyed by content-stable fingerprints.
