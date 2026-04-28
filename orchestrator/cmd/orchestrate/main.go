@@ -145,17 +145,17 @@ func main() {
 	}
 
 	res, err := orchestrator.Run(ctx, orchestrator.Options{
-		Project:           proj,
-		Graph:             g,
-		Out:               *out,
-		SourcesBase:       *sourcesBase,
-		ConverterBinary:   *converterBinary,
-		Store:             store,
-		Executor:          executor,
-		Concurrency:       *concurrency,
-		SourceAsset:       sourceAsset,
-		Platform:          platform,
-		PerElementTimeout: *elemTimeout,
+		Project:            proj,
+		Graph:              g,
+		Out:                *out,
+		SourcesBase:        *sourcesBase,
+		ConverterBinary:    *converterBinary,
+		Store:              store,
+		Executor:           executor,
+		Concurrency:        *concurrency,
+		SourceAsset:        sourceAsset,
+		Platform:           platform,
+		PerElementTimeout:  *elemTimeout,
 		ToolchainCMakeFile: *toolchainCMake,
 	})
 	if err != nil {
