@@ -1,5 +1,5 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
-        e2e-orchestrate e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-buildbarn e2e-buildbarn-execute \
+        e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-buildbarn e2e-buildbarn-execute \
         buildbarn-up buildbarn-down \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -80,6 +80,15 @@ e2e-fmt: check-tools converter fetch-fmt
 
 e2e-orchestrate: check-tools converter orchestrator
 	$(GO) test -tags=e2e -run TestE2E_Orchestrate ./orchestrator/...
+
+# Scale-fixture concurrency gate. Drives the orchestrator over a 50-element
+# synthetic graph (orchestrator/testdata/fdsdk-scale/) at concurrency=1/8/32
+# and asserts byte-identical per-element outputs across levels. Surfaces AC
+# eviction races, queue-depth imbalances, and goroutine-pool bugs that the
+# 3-element fdsdk-subset can't exercise. Uses the test binary's stub
+# converter — no cmake/bwrap/ninja needed.
+e2e-orchestrate-scale: orchestrator
+	$(GO) test -run TestRun_Scale_DeterministicAcrossLevels -timeout 300s ./orchestrator/internal/orchestrator/...
 
 # M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
 # in addition to the standard cmake/ninja/bwrap; if absent the test
