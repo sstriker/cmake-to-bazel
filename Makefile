@@ -133,15 +133,20 @@ e2e-fidelity-fmt: check-tools converter fetch-fmt
 BUILDBARN_COMPOSE := deploy/buildbarn/docker-compose.yml
 
 buildbarn-up:
-	docker compose -f $(BUILDBARN_COMPOSE) up -d
-	@echo "waiting for bb-storage healthcheck..."
+	@docker compose -f $(BUILDBARN_COMPOSE) up -d || ( \
+		echo "buildbarn: compose up failed; dumping container state + logs:"; \
+		docker compose -f $(BUILDBARN_COMPOSE) ps; \
+		docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=200; \
+		exit 1; \
+	)
+	@echo "waiting for bb-storage HTTP /-/healthy..."
 	@for i in $$(seq 1 180); do \
 		if curl -fsS http://127.0.0.1:9980/-/healthy >/dev/null 2>&1; then echo "ready in $${i}s"; exit 0; fi; \
 		sleep 1; \
 	done; \
 	echo "bb-storage did not become healthy within 180s; container logs:"; \
 	docker compose -f $(BUILDBARN_COMPOSE) ps; \
-	docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=200 bb-storage; \
+	docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=200; \
 	exit 1
 
 buildbarn-down:
