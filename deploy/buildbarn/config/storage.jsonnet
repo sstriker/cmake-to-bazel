@@ -53,10 +53,14 @@
           },
           spareBlocks: 3,
         },
-        persistent: {
-          stateDirectoryPath: '/storage/cas-state',
-          minimumEpochInterval: '300s',
-        },
+        // No `persistent` block: bb-storage requires the state
+        // directory to already exist on the mounted volume, but the
+        // volume is empty on first boot in CI. State persistence
+        // across restarts isn't a goal of the test substrate; drop
+        // the section entirely so the bring-up doesn't fail with
+        // "Failed to open persistent state directory: no such file
+        // or directory". Production deployments would mkdir the
+        // dirs in an init container.
       },
     },
     getAuthorizer: { allow: {} },
@@ -86,10 +90,6 @@
                 },
               },
               spareBlocks: 1,
-            },
-            persistent: {
-              stateDirectoryPath: '/storage/ac-state',
-              minimumEpochInterval: '300s',
             },
           },
         },
