@@ -19,6 +19,7 @@ package cmaketoolchain
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/toolchain"
@@ -55,12 +56,18 @@ func Emit(m *toolchain.Model) ([]byte, error) {
 	buf.WriteString("# via -DCMAKE_TOOLCHAIN_FILE=<path-to-this-file>.\n")
 	buf.WriteString("\n")
 
-	// Optimization: skip try_compile's link step. CMake's
-	// try_compile defaults to building an executable (and thus
-	// invokes the linker); STATIC_LIBRARY skips link, which is
-	// safe when CMAKE_*_COMPILER_WORKS is already set.
-	buf.WriteString("set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY CACHE STRING \"\" FORCE)\n")
-	buf.WriteString("\n")
+	// We deliberately do NOT set CMAKE_TRY_COMPILE_TARGET_TYPE
+	// STATIC_LIBRARY here. cmake's CMakeDetermineCompilerABI
+	// module uses try_compile internally to build a probe binary
+	// it then reads via file(READ_ELF) to derive
+	// CMAKE_EXECUTABLE_FORMAT (ELF/PE/Mach-O/...). Forcing the
+	// target type to STATIC_LIBRARY makes the probe emit an .a
+	// instead of an executable, READ_ELF returns "Unknown", and
+	// the Ninja generator then fails install(TARGETS …) with
+	// "requires changing an RPATH from the build tree, but this
+	// is not supported … unless on an ELF-based or XCOFF-based
+	// platform". Skipping linker time on user-code try_compile
+	// isn't worth breaking install rules.
 
 	// Platform identification. Some cmake modules check these
 	// before toolchain probing; setting them keeps platform-
@@ -76,6 +83,29 @@ func Emit(m *toolchain.Model) ([]byte, error) {
 	}
 	if m.TargetPlatform.CPU != "" {
 		fmt.Fprintf(&buf, "set(CMAKE_SYSTEM_PROCESSOR      %q CACHE STRING \"\" FORCE)\n", m.TargetPlatform.CPU)
+	}
+
+	// CMAKE_EXECUTABLE_FORMAT is normally set by
+	// CMakeDetermineCompilerId.cmake's CMAKE_DETERMINE_COMPILER_ID_CHECK
+	// — it reads the magic bytes of the compiler-ID-test output. But
+	// CHECK only runs when CMAKE_<LANG>_COMPILER_ID is unset, and we
+	// pre-cache that to skip vendor detection. The result: cmake
+	// caches CMAKE_EXECUTABLE_FORMAT="Unknown", which then makes the
+	// Ninja generator's install(TARGETS …) reject the target with
+	// "requires changing an RPATH from the build tree, but this is
+	// not supported … unless on an ELF-based or XCOFF-based platform".
+	// Pre-setting based on target OS sidesteps the gap.
+	targetOS := m.TargetPlatform.OS
+	if targetOS == "" {
+		// Probe didn't surface CMAKE_SYSTEM_NAME (it lives in
+		// CMakeSystem.cmake, not CMakeCache.txt, and the current
+		// extractor only reads the cache). Fall back to runtime.GOOS:
+		// derive-toolchain always probes the local host, so the
+		// runtime is the correct target absent explicit cross-compile.
+		targetOS = goosToCmakeSystem(runtime.GOOS)
+	}
+	if exeFmt := executableFormat(targetOS); exeFmt != "" {
+		fmt.Fprintf(&buf, "set(CMAKE_EXECUTABLE_FORMAT     %q CACHE INTERNAL \"Executable file format\")\n", exeFmt)
 	}
 	buf.WriteString("\n")
 
@@ -121,16 +151,32 @@ func emitLanguage(buf *bytes.Buffer, lang string, l toolchain.Language) {
 			lang, l.Target)
 	}
 
-	// "Compiler works" + "ABI compiled" sentinels: setting both
-	// makes cmake skip the try_compile probe that detects the
-	// compiler driver works at all and the ABI introspection
-	// (sizeof pointer / endianness / etc.). The ABI values that
-	// would normally be derived from the probe are reasonable
-	// defaults for any modern Unix-like target; downstream rules
-	// rarely depend on exact ABI bits.
+	// CMAKE_<LANG>_COMPILER_WORKS skips the try_compile probe that
+	// builds CMakeCCompilerId.c just to confirm the driver runs.
+	// That's the slowest part of compiler detection.
+	//
+	// We deliberately do NOT set CMAKE_<LANG>_ABI_COMPILED — that
+	// would skip CMakeDetermineCompilerABI.cmake, which derives
+	// CMAKE_EXECUTABLE_FORMAT (ELF/PE/XCOFF), CMAKE_<LANG>_COMPILER_ABI,
+	// byte order, sizeof(void*), and CMAKE_LIBRARY_ARCHITECTURE.
+	// Downstream cmake code (notably the Ninja generator's RPATH
+	// install logic) hard-fails when EXECUTABLE_FORMAT is unset.
+	// Letting the ABI probe run costs ~0.1s but keeps every
+	// install(TARGETS …) consumer working.
 	fmt.Fprintf(buf, "set(CMAKE_%s_COMPILER_WORKS TRUE CACHE INTERNAL \"\")\n", lang)
-	fmt.Fprintf(buf, "set(CMAKE_%s_ABI_COMPILED TRUE CACHE INTERNAL \"\")\n", lang)
 	fmt.Fprintf(buf, "set(CMAKE_%s_COMPILER_LOADED 1 CACHE INTERNAL \"\")\n", lang)
+
+	// Pre-set STANDARD/EXTENSIONS_COMPUTED_DEFAULT so cmake 3.31+'s
+	// __compiler_check_default_language_standard macro
+	// (Modules/Compiler/CMakeCommonCompilerMacros.cmake:42) doesn't
+	// abort with "CMAKE_<LANG>_STANDARD_COMPUTED_DEFAULT and
+	// CMAKE_<LANG>_EXTENSIONS_COMPUTED_DEFAULT should be set for
+	// <id> (<path>) version <ver>". Pre-cached compilers bypass the
+	// per-compiler module that would otherwise fill these in.
+	if std := defaultLanguageStandard(lang, l.CompilerID, l.Version); std != "" {
+		fmt.Fprintf(buf, "set(CMAKE_%s_STANDARD_COMPUTED_DEFAULT %q)\n", lang, std)
+		fmt.Fprintf(buf, "set(CMAKE_%s_EXTENSIONS_COMPUTED_DEFAULT ON)\n", lang)
+	}
 
 	// Builtin include / link directories — cmake uses these to
 	// filter out -I/-L flags consumers redundantly add.
@@ -157,6 +203,134 @@ func emitListIfSet(buf *bytes.Buffer, name string, items []string) {
 		return
 	}
 	fmt.Fprintf(buf, "set(%s %q CACHE INTERNAL \"\")\n", name, strings.Join(items, ";"))
+}
+
+// goosToCmakeSystem maps a Go runtime.GOOS string to the cmake
+// CMAKE_SYSTEM_NAME spelling. Used as a fallback when probe data
+// doesn't surface CMAKE_SYSTEM_NAME directly.
+func goosToCmakeSystem(goos string) string {
+	switch goos {
+	case "linux":
+		return "Linux"
+	case "darwin":
+		return "Darwin"
+	case "windows":
+		return "Windows"
+	case "freebsd":
+		return "FreeBSD"
+	case "openbsd":
+		return "OpenBSD"
+	case "netbsd":
+		return "NetBSD"
+	case "android":
+		return "Android"
+	case "solaris", "illumos":
+		return "SunOS"
+	case "aix":
+		return "AIX"
+	}
+	return ""
+}
+
+// executableFormat returns the binary container format cmake uses
+// for the given target OS. Mirrors what
+// CMakeDetermineCompilerId.cmake's magic-byte sniffer would
+// otherwise derive at probe time.
+func executableFormat(os string) string {
+	switch os {
+	case "Linux", "FreeBSD", "OpenBSD", "NetBSD", "DragonFly", "GNU", "Android", "SunOS", "Solaris":
+		return "ELF"
+	case "Darwin", "iOS", "tvOS", "watchOS":
+		return "MACHO"
+	case "AIX":
+		return "XCOFF"
+	}
+	return ""
+}
+
+// defaultLanguageStandard returns the value cmake's per-compiler
+// modules pre-set CMAKE_<lang>_STANDARD_COMPUTED_DEFAULT to for the
+// given compiler ID + version. Mirrors the version→standard tables
+// in Modules/Compiler/<ID>-<lang>.cmake so derive-toolchain's
+// emitted toolchain.cmake plays nicely with cmake 3.31+'s strict
+// __compiler_check_default_language_standard macro.
+//
+// Returns "" if we don't have a table for this (compiler, language)
+// pair; the caller skips emitting the COMPUTED_DEFAULT lines and
+// cmake's normal compiler-detection path runs (the COMPILER cache
+// var is still pre-populated, so it's just the per-language module
+// that re-runs — minor cost vs. the wholesale probe).
+func defaultLanguageStandard(lang, compilerID, version string) string {
+	major, minor := parseCompilerVersion(version)
+	switch compilerID {
+	case "GNU":
+		// Tables match v3.31's GNU-C.cmake / GNU-CXX.cmake invocations:
+		//   __compiler_check_default_language_standard(C   3.4 90 5.0 11 8.1 17)
+		//   __compiler_check_default_language_standard(CXX 3.4 98 6.0 14 11.1 17)
+		switch lang {
+		case "C":
+			switch {
+			case atLeast(major, minor, 8, 1):
+				return "17"
+			case atLeast(major, minor, 5, 0):
+				return "11"
+			case atLeast(major, minor, 3, 4):
+				return "90"
+			}
+		case "CXX":
+			switch {
+			case atLeast(major, minor, 11, 1):
+				return "17"
+			case atLeast(major, minor, 6, 0):
+				return "14"
+			case atLeast(major, minor, 3, 4):
+				return "98"
+			}
+		}
+	case "Clang", "AppleClang":
+		// Modules/Compiler/Clang-{C,CXX}.cmake use the same shape:
+		//   __compiler_check_default_language_standard(C   2.1 90 3.4 11 6.0 17)
+		//   __compiler_check_default_language_standard(CXX 2.1 98 3.6 14 6.0 17)
+		switch lang {
+		case "C":
+			switch {
+			case atLeast(major, minor, 6, 0):
+				return "17"
+			case atLeast(major, minor, 3, 4):
+				return "11"
+			case atLeast(major, minor, 2, 1):
+				return "90"
+			}
+		case "CXX":
+			switch {
+			case atLeast(major, minor, 6, 0):
+				return "17"
+			case atLeast(major, minor, 3, 6):
+				return "14"
+			case atLeast(major, minor, 2, 1):
+				return "98"
+			}
+		}
+	}
+	return ""
+}
+
+func parseCompilerVersion(v string) (major, minor int) {
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) >= 1 {
+		fmt.Sscanf(parts[0], "%d", &major)
+	}
+	if len(parts) >= 2 {
+		fmt.Sscanf(parts[1], "%d", &minor)
+	}
+	return
+}
+
+func atLeast(major, minor, wantMajor, wantMinor int) bool {
+	if major != wantMajor {
+		return major > wantMajor
+	}
+	return minor >= wantMinor
 }
 
 // orderedLanguages returns m.Languages keys in C-then-CXX-then-rest

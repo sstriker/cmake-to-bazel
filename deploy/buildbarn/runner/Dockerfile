@@ -62,9 +62,11 @@ RUN set -eux; \
     ninja --version | grep -F "${NINJA_VERSION}" || (echo "ninja version mismatch (want ${NINJA_VERSION})" >&2 ; exit 1); \
     bwrap --version | grep -F "${BWRAP_VERSION}" || (echo "bwrap version mismatch (want ${BWRAP_VERSION})" >&2 ; exit 1)
 
-# bb-runner-bare's binary + entrypoint config from the upstream layer.
-# Path inside the upstream image is the conventional Buildbarn install
-# location; if upstream changes layout, this COPY needs adjustment.
-COPY --from=upstream /bb-runner-bare /bb-runner-bare
+# bb-runner-bare's binary from the upstream layer. Buildbarn images are
+# built via @com_github_buildbarn_bb_storage//tools:container.bzl's
+# multiarch_go_image macro, which installs the binary at /app/<name>.
+# The upstream image's source target is `bb_runner` (re-tagged as
+# bb-runner-bare), hence /app/bb_runner here.
+COPY --from=upstream /app/bb_runner /app/bb_runner
 
-ENTRYPOINT ["/bb-runner-bare"]
+ENTRYPOINT ["/app/bb_runner"]
