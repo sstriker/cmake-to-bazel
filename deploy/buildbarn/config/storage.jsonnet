@@ -1,18 +1,24 @@
 // bb-storage configuration for the orchestrator's M5 cache-substrate
 // validation. Single-node, file-backed blobstore, no auth.
 //
-// This config is deliberately minimal — production deployments use
-// jsonnet imports to share patterns across the bb-* services and add
-// authentication, sharding, and replication. We don't need any of
-// that to validate the REAPI protocol round trip.
+// Top-level shape matches bb-storage's ApplicationConfiguration proto
+// (pkg/proto/configuration/bb_storage/bb_storage.proto):
 //
-// Schema drift: this config is shaped against the bb-storage image
-// version pinned in docker-compose.yml. Bumping the image requires
-// reconciling against
+//   - `content_addressable_storage` (field 17) and `action_cache`
+//     (field 18) are direct top-level fields, NOT nested under a
+//     `blobstore` field. Field 1 (the old `blobstore` wrapper) is
+//     reserved in the proto; bb-storage rejects configs that use it
+//     with "unknown field 'blobstore'".
+//   - Each carries a `backend` BlobAccessConfiguration plus required
+//     authorizer fields (`get_authorizer`, `put_authorizer`, and for
+//     CAS, `find_missing_authorizer`).
+//
+// This shape mirrors buildbarn/bb-deployments@main:
+//   docker-compose/config/storage.jsonnet
+//
+// Schema reference for upgrades:
+//   https://github.com/buildbarn/bb-storage/blob/master/pkg/proto/configuration/bb_storage/bb_storage.proto
 //   https://github.com/buildbarn/bb-storage/blob/master/pkg/proto/configuration/blobstore/blobstore.proto
-// for the blobstore section and
-//   https://github.com/buildbarn/bb-storage/blob/master/pkg/proto/configuration/global/global.proto
-// for `global`.
 
 {
   global: {
@@ -22,8 +28,8 @@
       enablePprof: true,
     },
   },
-  blobstore: {
-    contentAddressableStorage: {
+  contentAddressableStorage: {
+    backend: {
       'local': {
         keyLocationMapInMemory: { entries: 100000 },
         keyLocationMapMaximumGetAttempts: 16,
@@ -46,7 +52,12 @@
         },
       },
     },
-    actionCache: {
+    getAuthorizer: { allow: {} },
+    putAuthorizer: { allow: {} },
+    findMissingAuthorizer: { allow: {} },
+  },
+  actionCache: {
+    backend: {
       completenessChecking: {
         backend: {
           'local': {
@@ -73,6 +84,8 @@
         },
       },
     },
+    getAuthorizer: { allow: {} },
+    putAuthorizer: { allow: {} },
   },
   grpcServers: [{
     listenAddresses: [':8980'],

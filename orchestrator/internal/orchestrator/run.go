@@ -474,7 +474,47 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 		RawExports:         raw,
 		PrefixRelLinkPaths: relPaths,
 	}
+	// Stage source-file symlinks alongside BUILD.bazel so the M5
+	// converted_pkg_repo extension can hand them to Bazel as the
+	// repo's input files. Without this, `bazel build @<repo>//:foo`
+	// fails with "missing input file 'hello.c'" — BUILD.bazel
+	// references srcs/hdrs by relative path but elemOut only carries
+	// the generated BUILD.bazel + cmake-config bundle. Re-stage on
+	// every successful pass (cache-hit or miss) since the source/ tree
+	// isn't part of the cached Action output.
+	if err := stageSourceSymlinks(filepath.Join(r.opts.Out, "elements", name, "source"), realSrcRoot); err != nil {
+		return fmt.Errorf("element %s: stage source symlinks: %w", name, err)
+	}
 	r.res.Converted = append(r.res.Converted, name)
+	return nil
+}
+
+// stageSourceSymlinks (re)builds dst as a directory containing one
+// symlink per top-level entry in srcRoot. The links target absolute
+// paths so the bazel envelope can follow them at analysis time. The
+// staged tree is excluded from determinism.json on purpose since
+// per-host absolute paths would make the SHA-by-tree comparison
+// flap across machines.
+func stageSourceSymlinks(dst, srcRoot string) error {
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(srcRoot)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		target, err := filepath.Abs(filepath.Join(srcRoot, e.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.Symlink(target, filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -37,20 +37,32 @@ def _repo_name_for(element_name):
 
 def _converted_pkg_impl(rctx):
     """One repo per converted element. The element's output directory
-    already contains a complete BUILD.bazel and a cmake-config/
-    bundle directory; we symlink them in so downstream consumers see
-    @<repo>//:<target> for Bazel deps and external/<repo>/cmake-config/
-    for find_package consumers.
+    contains BUILD.bazel + a cmake-config/ bundle directory + a
+    source/ subdirectory of symlinks the orchestrator stages from
+    the original source root. We surface BUILD.bazel and cmake-config
+    at the repo root, and lift each top-level entry of source/ to the
+    repo root too, so the converter-emitted BUILD.bazel's
+    `srcs = ["hello.c"]` (and friends) resolve.
     """
     src = rctx.attr.path
 
-    # The orchestrator's per-element output dir IS the repo root.
+    # The orchestrator's per-element output dir IS the repo root for
+    # the generated artifacts. Symlink them at the repo root.
     rctx.symlink(src + "/BUILD.bazel", "BUILD.bazel")
 
     # cmake-config/ is optional — failure cases produce no bundle.
     bundle = src + "/cmake-config"
     if rctx.path(bundle).exists:
         rctx.symlink(bundle, "cmake-config")
+
+    # source/ contains one symlink per top-level entry of the original
+    # source root, staged by the orchestrator after each successful
+    # conversion. Surface them at the repo root so BUILD.bazel's
+    # srcs/hdrs (relative to source-root) resolve.
+    source_dir = rctx.path(src + "/source")
+    if source_dir.exists:
+        for entry in source_dir.readdir():
+            rctx.symlink(str(entry), entry.basename)
 
     # MODULE.bazel + WORKSPACE.bazel mark this directory as a valid
     # Bazel repo root. The orchestrator output doesn't ship these
