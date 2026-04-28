@@ -22,8 +22,8 @@ type AssetServer struct {
 	raa.UnimplementedFetchServer
 	raa.UnimplementedPushServer
 
-	mu         sync.Mutex
-	directory  map[string]*repb.Digest
+	mu          sync.Mutex
+	directory   map[string]*repb.Digest
 	directories map[string]*assetEntry // for retrieving qualifiers on Fetch
 }
 

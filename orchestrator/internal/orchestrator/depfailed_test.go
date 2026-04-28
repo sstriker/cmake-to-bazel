@@ -15,7 +15,9 @@ import (
 // unaffected.
 //
 // Driven by the stub's per-element mode-override env var:
-//   ORCHESTRATOR_STUB_MODE_<sanitized-element-name>=tier1
+//
+//	ORCHESTRATOR_STUB_MODE_<sanitized-element-name>=tier1
+//
 // where sanitized-name uppercases and replaces non-[A-Z0-9_] with _.
 func TestRun_DepFailed_OnlyHelloFails(t *testing.T) {
 	stub := os.Args[0]

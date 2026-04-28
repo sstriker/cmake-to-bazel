@@ -422,7 +422,9 @@ var _ = runtime.GOOS
 // sanitizeStubKey turns a path into the alphanumeric-uppercase form
 // used by ORCHESTRATOR_STUB_MODE_<...> env vars. The element name lives
 // in --source-root's last segments; for a path like
-//   /tmp/.../shadow/components/hello
+//
+//	/tmp/.../shadow/components/hello
+//
 // we use "components/hello" (the trailing two segments) and emit
 // "COMPONENTS_HELLO".
 //

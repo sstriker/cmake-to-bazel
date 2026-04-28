@@ -207,18 +207,18 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	r := &runner{
-		opts:         opts,
-		conv:         conv,
-		convAbs:      convAbs,
-		store:        store,
-		platform:     platform,
-		resolver:     newResolver(opts, store),
-		importsRoot:  importsRoot,
-		prefixRoot:   prefixRoot,
-		shadowRoot:   shadowRoot,
-		registry:     registry,
-		depRecords:   map[string]*depRecord{},
-		res:          &Result{},
+		opts:        opts,
+		conv:        conv,
+		convAbs:     convAbs,
+		store:       store,
+		platform:    platform,
+		resolver:    newResolver(opts, store),
+		importsRoot: importsRoot,
+		prefixRoot:  prefixRoot,
+		shadowRoot:  shadowRoot,
+		registry:    registry,
+		depRecords:  map[string]*depRecord{},
+		res:         &Result{},
 	}
 
 	if err := r.driveElements(ctx, cmakeOrder); err != nil {
