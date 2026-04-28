@@ -2,9 +2,9 @@
 
 ## Context
 
-We're migrating a 50K-package distro (long-term) and the FreeDesktop SDK
-(near-term PoC) from CMake to Bazel + Buildbarn remote execution. The strategic
-decision is **not to translate CMake source to Starlark**: CMake's runtime model
+We're migrating the FreeDesktop SDK BuildStream project from CMake to Bazel
++ Buildbarn remote execution. The strategic decision is **not to translate
+CMake source to Starlark**: CMake's runtime model
 (function-blocker stack reconstructing control flow, textual macro substitution,
 late-binding through string-valued variable references) makes static translation
 intractable. Instead, run real CMake in a hermetic bwrap sandbox and translate
@@ -14,7 +14,7 @@ its **structured output** — File API JSON (`.cmake/api/v1/reply/`) plus parsed
 that drives this decision.
 
 This plan covers **M1 only**: a standalone `convert-element` binary that
-converts a single CMake element end-to-end. M2–M6 extend this into a
+converts a single CMake element end-to-end. M2–M5b extend this into a
 Buildbarn-orchestrated multi-element converter; sketched at the bottom.
 
 > **Note (post-M5):** The original draft named libdrm as the M1
@@ -161,14 +161,13 @@ Status legend: ✅ done, 🔧 partial / validation pending, ⏳ queued.
 
 | M | Status | Goal | Wks | Acceptance |
 |---|---|---|---|---|
-| M2 | ✅ | build.ninja parser; recovered codegen tagged for distro-wide audit; multi-element graph | 2 | Codegen-using element converts; every recovered genrule carries a `cmake-codegen` tag (with driver and recovery-mode sub-tags), every consuming target carries `has-cmake-codegen`; documented in `docs/codegen-tags.md` with stability promise; Bazel-vs-BuildStream parity check on a real package |
+| M2 | ✅ | build.ninja parser; recovered codegen tagged for project-wide audit; multi-element graph | 2 | Codegen-using element converts; every recovered genrule carries a `cmake-codegen` tag (with driver and recovery-mode sub-tags), every consuming target carries `has-cmake-codegen`; documented in `docs/codegen-tags.md` with stability promise; Bazel-vs-BuildStream parity check on a real package |
 | M3a | ✅ | Local orchestrator: BuildStream YAML reader, per-element subprocess loop, shadow + imports + synth-prefix + allowlist registry + action-key cache | 1.5 | Every FDSDK kind:cmake element converts via `os/exec`; determinism test passes on three fresh tmpdirs |
 | M3b | 🔧 | REAPI Execute submission against the same Action proto M5 builds | 0.5 | `--execute=grpc://...` routes per-element conversions through Buildbarn workers; client never forks the converter. M5's CAS+AC layer carries inputs and outputs. Validation against a real Buildbarn (vs the in-process fake) still pending. |
 | M3c | ✅ | Orchestrator-driven source provisioning for `kind: local` and `kind: git`. Other kinds error out and document the `--sources-base` workaround. | 0.5 | `make e2e-orchestrate` runs without `--sources-base` against a fixture using kind:git; cache hits on repeated runs. |
 | M3d | 🔧 | BuildStream source CAS integration. FreeDesktop SDK is already a BuildStream project; `bst source push/pull` content-addresses each element's source tree in the project's existing CAS. The orchestrator looks up source by uri+qualifiers via Remote Asset Fetch and materializes the resulting Directory from CAS — no git/tar/curl. M3d step 1 ships the `kind: remote-asset` source resolver + Fetch/Push client; step 2 (queued) adds a small tool that translates BuildStream `Source.unique_key()` to the canonical `bst:source:<element>@<key>` URI so existing FDSDK YAML doesn't need to be rewritten by hand. | 1 | An FDSDK subset converts with `--source-cas=grpc://...` against a CAS pre-populated via fakecas (in tests) or `bst source push` (production, queued). Orchestrator never invokes git/tar/curl. |
 | M4 | ✅ | Tiered failures + regression detection + fingerprint registry — see `docs/m4-plan.md` | 1.5 | Deliberate breakage produces structured regression report |
 | M5 | ✅ | Bazel envelope + `converted_pkg_repo` + real REAPI Action/ActionCache substrate (shared cache across converter instances) — see `docs/m5-plan.md` | 2 | Two independent orchestrators share cache hits via REAPI ActionCache; downstream `bazel build @libdrm//:libdrm` succeeds against the converted FDSDK subset |
-| M6+ | ⏳ | Debian-scale bulk pass | open | Same binaries; only front-end (BuildStream YAML → Debian metadata) changes |
 
 ## Verification
 

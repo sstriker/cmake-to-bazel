@@ -190,7 +190,7 @@ Each prefix is searched at `<prefix>/`, `<prefix>/(cmake|CMake)/`, `<prefix>/(li
 
 **`find_library`/`find_program`/`find_path`/`find_file`** — all cache. Once cached, **subsequent calls do not re-search**; force with `unset(VAR CACHE)` first. `NAMES`, `PATHS`, `HINTS`, `PATH_SUFFIXES`, `NO_DEFAULT_PATH`, per-class `NO_*_PATH`, `REQUIRED` (3.18+).
 
-→ **Conversion.** `find_package` is the canonical hermeticity violation: env reads, registry reads, filesystem walk, persistent caching. Three options: (a) replace each `find_package` with a `bazel_dep` + `MODULE.bazel` extension that vendors specific versions; (b) precompute a per-distro package registry in a repo rule into a `.bzl` table; (c) for sources only built via foreign tools, use `rules_foreign_cc`. Default behavior of the transpiler: emit a stub that fails loudly with a TODO referencing the package.
+→ **Conversion.** `find_package` is the canonical hermeticity violation: env reads, registry reads, filesystem walk, persistent caching. Three options: (a) replace each `find_package` with a `bazel_dep` + `MODULE.bazel` extension that vendors specific versions; (b) precompute a per-project package registry in a repo rule into a `.bzl` table; (c) for sources only built via foreign tools, use `rules_foreign_cc`. Default behavior of the transpiler: emit a stub that fails loudly with a TODO referencing the package.
 
 ---
 
@@ -359,7 +359,7 @@ Each policy: `NEW`, `OLD`, or **unset** (warns and behaves like OLD). Policy dec
 
 **`DESTDIR`** env var consulted only at install time — every destination prefixed by `$DESTDIR`. For staged packaging. Not used on Windows.
 
-**`GNUInstallDirs`** — `CMAKE_INSTALL_BINDIR/SBINDIR/LIBEXECDIR/SYSCONFDIR/LIBDIR/INCLUDEDIR/DATAROOTDIR/DATADIR/MANDIR/DOCDIR` etc., with multiarch-aware LIBDIR (e.g. `lib/x86_64-linux-gnu` on Debian).
+**`GNUInstallDirs`** — `CMAKE_INSTALL_BINDIR/SBINDIR/LIBEXECDIR/SYSCONFDIR/LIBDIR/INCLUDEDIR/DATAROOTDIR/DATADIR/MANDIR/DOCDIR` etc., with multiarch-aware LIBDIR (e.g. `lib/x86_64-linux-gnu`).
 
 **Crucial pitfall: `*Config.cmake` files are programs.** They may set arbitrary variables, branch on `CMAKE_HOST_SYSTEM_NAME`, define imported targets with genexes in interface props, call `find_dependency` (recursively `find_package`), and check policies. Consuming a CMake-installed package therefore **requires executing CMake-language code at consumer configure time**.
 

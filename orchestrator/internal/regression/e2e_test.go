@@ -1,6 +1,6 @@
 //go:build e2e
 
-// e2e_test exercises the M4 acceptance gate at distro scale: the
+// e2e_test exercises the M4 acceptance gate at project scale: the
 // orchestrator runs twice against the fdsdk-subset fixture, with a
 // deliberate breakage introduced between runs. orchestrate-diff must
 // report the expected newly_failed entry, the right Tier-1 code, the

@@ -11,7 +11,7 @@ the failure-code distribution level.
 The plan's stated acceptance gate is "deliberate breakage produces
 structured regression report". M4 ships the diff tool, the fingerprint
 registry, and the failure-code analytics that satisfy that gate, and
-positions M5 (Bazel envelope) to reason about distro stability with
+positions M5 (Bazel envelope) to reason about project stability with
 queries instead of file diffs.
 
 Two-phase split kept simple: M4a is the diff layer (read both runs,
@@ -133,10 +133,6 @@ the JSON.
   registry version field guards readability; cross-version comparisons
   are explicitly unsupported until the registry knows how to project
   one schema onto another. Document the constraint.
-- **Determinism.json size at distro scale.** 50K elements × ~4 output
-  files × ~64-byte JSON entry per file ≈ 12MB per run. Fine for
-  reasonable storage, slow for diffing in memory. M4 ships an O(n)
-  diff; M5+ may switch to a content-addressed sidecar.
 - **Synthetic-fixture brittleness.** The deliberate-breakage test
   edits a fixture file mid-run; CI must not see leaked state across
   jobs. Use t.Cleanup + per-test tmpdirs (already the M3a pattern).
