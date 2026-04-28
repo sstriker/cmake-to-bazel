@@ -46,10 +46,22 @@ runs:
           const TAIL = 150;
           const tail = lines.slice(-TAIL).join('\n');
           const truncated = lines.length > TAIL ? `(showing last ${TAIL} of ${lines.length} lines)\n\n` : '';
-          const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-            ...context.repo, commit_sha: context.sha,
-          });
-          if (!prs.data.length) {
+
+          // Determine which PRs to comment on. In pull_request-triggered
+          // runs, context.sha is the merge ref and the
+          // listPullRequestsAssociatedWithCommit endpoint returns empty,
+          // so prefer the trigger payload's PR number when present. Fall
+          // back to commit-association lookup for push-triggered runs.
+          let prNumbers = [];
+          if (context.payload.pull_request) {
+            prNumbers.push(context.payload.pull_request.number);
+          } else {
+            const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              ...context.repo, commit_sha: context.sha,
+            });
+            prNumbers = prs.data.map(pr => pr.number);
+          }
+          if (prNumbers.length === 0) {
             core.notice(`post-failure-tail: no PR for commit ${context.sha}; skipping comment`);
             return;
           }
@@ -67,9 +79,13 @@ runs:
             ``,
             '</details>',
           ].join('\n');
-          for (const pr of prs.data) {
-            await github.rest.issues.createComment({
-              ...context.repo, issue_number: pr.number, body,
-            });
-            core.notice(`post-failure-tail: posted to PR #${pr.number}`);
+          for (const num of prNumbers) {
+            try {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: num, body,
+              });
+              core.notice(`post-failure-tail: posted to PR #${num}`);
+            } catch (err) {
+              core.warning(`post-failure-tail: comment-create failed for PR #${num}: ${err}`);
+            }
           }

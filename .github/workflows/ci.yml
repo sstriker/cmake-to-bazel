@@ -6,6 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+# Scope the auto-injected GITHUB_TOKEN. Default permissions on this
+# repo are read-only for most resources; the post-failure-tail action
+# needs to create PR comments and read the running workflow's job logs,
+# so explicitly grant those scopes here. `contents: read` is enough for
+# checkout; nothing in this workflow writes to the repo content.
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
 jobs:
   unit:
     name: Build + unit tests
