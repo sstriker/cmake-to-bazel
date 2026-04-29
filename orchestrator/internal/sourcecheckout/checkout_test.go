@@ -38,8 +38,8 @@ func TestResolve_LocalRelative(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	want, _ := filepath.Abs(filepath.Join(root, "files", "x"))
-	if got != want {
-		t.Errorf("Resolve = %q, want %q", got, want)
+	if got.Path != want {
+		t.Errorf("Resolve.Path = %q, want %q", got.Path, want)
 	}
 }
 
@@ -56,8 +56,8 @@ func TestResolve_SourcesBaseTakesPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got != elemDir {
-		t.Errorf("Resolve = %q, want %q", got, elemDir)
+	if got.Path != elemDir {
+		t.Errorf("Resolve.Path = %q, want %q", got.Path, elemDir)
 	}
 }
 
@@ -113,7 +113,7 @@ func TestResolve_GitFromLocalRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(first, "CMakeLists.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(first.Path, "CMakeLists.txt")); err != nil {
 		t.Errorf("checkout missing CMakeLists.txt: %v", err)
 	}
 
@@ -122,8 +122,8 @@ func TestResolve_GitFromLocalRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
-	if first != second {
-		t.Errorf("cache miss on second call: %q vs %q", first, second)
+	if first.Path != second.Path {
+		t.Errorf("cache miss on second call: %q vs %q", first.Path, second.Path)
 	}
 }
 
