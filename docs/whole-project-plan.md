@@ -316,14 +316,23 @@ exercises:
 
 This is the gate for committing to delete the old orchestrator
 machinery; with the meta-project shape proven on hello-world,
-Phases 3-5 expand the kind set and graph shape.
+later phases expand the kind set and graph shape.
 
-**Phase 2 — install-tree-manipulation kinds.** stack, filter,
-import, compose, flatpak_image, snap_image, flatpak_repo,
-collect_manifest, collect_initial_scripts, collect_integration,
-check_forbidden. All are pure starlark filegroup composition; no
-action runs, no new translator binaries. ~13 % of FDSDK in this
-bucket.
+**Phase 2 — install-tree-manipulation kinds.** *(in progress)*
+stack, filter, import, compose, flatpak_image, snap_image,
+flatpak_repo, collect_manifest, collect_initial_scripts,
+collect_integration, check_forbidden. All are pure starlark
+filegroup composition; no action runs, no new translator
+binaries. ~13 % of FDSDK in this bucket.
+
+The first cut delivers the framework — multi-element graph
+parsing, the `kindHandler` per-kind dispatch interface, and
+`kind: stack` — gated by `make e2e-meta-stack` against
+`testdata/meta-project/two-libs/` (2 cmake elements + 1 stack
+bundling them; smoke `cc_binary` linking against both via the
+stack's filegroup). Remaining kinds in this bucket land in
+follow-up PRs once their cross-element semantics need real
+install-tree producers (see Phase 3).
 
 **Phase 3 — buildsystem-variant kinds.** meson, autotools, make,
 manual, pyproject, makemaker, modulebuild, script. The fine-

@@ -1,8 +1,16 @@
-# Meta-project hello-world testdata
+# Meta-project test fixtures
 
-Smallest viable end-to-end fixture for the Bazel-as-orchestrator
-shape described in `docs/whole-project-plan.md`. Drives Phase 1's
-acceptance gate (`make e2e-meta-hello`).
+End-to-end fixtures for the Bazel-as-orchestrator shape described
+in `docs/whole-project-plan.md`. Two fixtures so far:
+
+- **`hello-world.bst`** + **`sources/hello-world/`** — single cmake
+  element. Phase 1 acceptance gate (`make e2e-meta-hello`).
+- **`two-libs/`** — multi-element graph: two `kind: cmake`
+  elements (`lib-a.bst`, `lib-b.bst`) plus one `kind: stack`
+  (`runtime.bst`) bundling them. Phase 2 acceptance gate
+  (`make e2e-meta-stack`).
+
+## hello-world fixture
 
 ## Layout
 
@@ -54,10 +62,46 @@ through both projects:
   before the codemodel); project B's smoke binary sha is unchanged
   (no rebuild).
 
-## Why this fixture
+### Why this fixture
 
 The element source tree is a verbatim copy of
 `converter/testdata/sample-projects/hello-world/` — the smallest
 cmake project that exercises the full convert-element pipeline
 (cc_library + install + cmake-config export). Reusing it keeps
 the gate's correctness anchored to existing fixture coverage.
+
+## two-libs fixture (Phase 2)
+
+```
+testdata/meta-project/two-libs/
+  lib-a.bst                # kind:cmake, kind:local source under sources/lib-a/
+  lib-b.bst                # kind:cmake, kind:local source under sources/lib-b/
+  runtime.bst              # kind:stack, depends on [lib-a, lib-b]
+  sources/
+    lib-a/{CMakeLists.txt, lib-a.c, include/lib-a.h}
+    lib-b/{CMakeLists.txt, lib-b.c, include/lib-b.h}
+```
+
+Each lib defines `lib_<x>_message()` returning `"lib-<x> says hi"`
+and declares `add_library(lib-<x>)` so the converter emits
+`cc_library(name="lib-<x>")` in project A — matching the Phase 2
+convention where `kind: stack` references its deps as
+`//elements/<dep>:<dep>`.
+
+`scripts/meta-stack.sh` drives the pipeline:
+
+1. `cmd/write-a` parses all three .bst files, builds the dep DAG
+   (lib-a → mid, lib-b → mid, runtime → both), renders project A
+   (per-element genrules for the two cmake elements + a no-target
+   marker package for `runtime`) and project B (cc_library
+   placeholders + the runtime filegroup composing dep labels).
+2. `bazel build` in project A runs convert-element on each cmake
+   element.
+3. The driver stages each cmake element's `BUILD.bazel.out` into
+   project B's `elements/<name>/BUILD.bazel`.
+4. `bazel build //elements/runtime:runtime` in project B validates
+   the stack's filegroup resolves all dep labels (the multi-element
+   graph composes correctly).
+5. The driver writes a smoke target (`cc_binary` depending on both
+   `lib-a` and `lib-b`) and `bazel run`s it; output must contain
+   both libs' messages.
