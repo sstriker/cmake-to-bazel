@@ -233,6 +233,76 @@ func TestWriter_RejectsMissingDep(t *testing.T) {
 	}
 }
 
+func TestWriter_StackElementShape(t *testing.T) {
+	tmp := t.TempDir()
+	libA := makeCmakeBst(t, tmp, "lib-a")
+	libB := makeCmakeBst(t, tmp, "lib-b")
+	stack := filepath.Join(tmp, "runtime.bst")
+	if err := os.WriteFile(stack,
+		[]byte("kind: stack\ndepends:\n- lib-a\n- lib-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{libA, libB, stack})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	// Topo order: lib-a, lib-b, runtime.
+	got := []string{}
+	for _, e := range g.Elements {
+		got = append(got, e.Name)
+	}
+	if strings.Join(got, ",") != "lib-a,lib-b,runtime" {
+		t.Errorf("topo order = %v, want [lib-a,lib-b,runtime]", got)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	// Project A: cmake elements get the genrule shape; stack gets a
+	// no-op marker BUILD (no targets).
+	for _, name := range []string{"lib-a", "lib-b", "runtime"} {
+		if _, err := os.Stat(filepath.Join(outA, "elements", name, "BUILD.bazel")); err != nil {
+			t.Errorf("project A: missing BUILD for %q: %v", name, err)
+		}
+	}
+	stackBuild, err := os.ReadFile(filepath.Join(outA, "elements/runtime/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stack's project-A package declares no actionable targets — only
+	// comments. Anchor the check with `(` so the prose doesn't false-
+	// positive ("filegroup that …" comment is fine; "filegroup(" call
+	// is not).
+	for _, banned := range []string{"genrule(", "filegroup(", "cc_library("} {
+		if strings.Contains(string(stackBuild), banned) {
+			t.Errorf("project A stack BUILD should declare no targets, got %q in:\n%s", banned, stackBuild)
+		}
+	}
+
+	// Project B: the stack's filegroup references each dep's primary target.
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	stackBBuild, err := os.ReadFile(filepath.Join(outB, "elements/runtime/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`name = "runtime"`,
+		`"//elements/lib-a:lib-a"`,
+		`"//elements/lib-b:lib-b"`,
+	} {
+		if !strings.Contains(string(stackBBuild), marker) {
+			t.Errorf("project B runtime BUILD missing %q\n--body--\n%s", marker, stackBBuild)
+		}
+	}
+}
+
 // appendDepends adds a depends: list to an existing .bst file.
 func appendDepends(bstPath string, deps []string) error {
 	body, err := os.ReadFile(bstPath)
