@@ -288,11 +288,17 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		timeout = defaultPerElementTimeout
 	}
 
+	executor := opts.Executor
+	if executor == nil {
+		executor = reapi.NewLocalExecutor()
+	}
+
 	r := &runner{
 		opts:        opts,
 		conv:        conv,
 		convAbs:     convAbs,
 		store:       store,
+		executor:    executor,
 		platform:    platform,
 		resolver:    newResolver(opts, store),
 		timeout:     timeout,
@@ -414,6 +420,7 @@ type runner struct {
 	conv     string
 	convAbs  string
 	store    cas.Store
+	executor reapi.Executor
 	platform []reapi.PlatformProperty
 	resolver *sourcecheckout.Resolver
 	timeout  time.Duration // per-element cap; zero = none
@@ -582,6 +589,9 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 		ConverterBin:       r.convAbs,
 		Platform:           r.platform,
 		Timeout:            r.timeout,
+		EnvVars: map[string]string{
+			"ORCHESTRATOR_ELEMENT_NAME": name,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("element %s: build action: %w", name, err)
@@ -599,16 +609,7 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 		if err := os.RemoveAll(elemOut); err != nil {
 			return fmt.Errorf("element %s: clear elemOut: %w", name, err)
 		}
-		if r.opts.Executor != nil {
-			fr, err = remoteExecute(ctx, r.store, r.opts.Executor, built, elemOut, name, logOf(r.opts))
-		} else {
-			fr, err = convertOne(ctx, r.conv, name, shadowSrc, importsPath, prefixPath, r.opts)
-			if err == nil && fr == nil {
-				if err = publishActionResult(ctx, r.store, built, elemOut); err != nil {
-					err = fmt.Errorf("element %s: publish action result: %w", name, err)
-				}
-			}
-		}
+		fr, err = remoteExecute(ctx, r.store, r.executor, built, elemOut, name, logOf(r.opts))
 		if err != nil {
 			return err
 		}
@@ -753,54 +754,6 @@ func (r *runner) firstFailedDep(name string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// convertOne runs the converter against one element. Returns (nil, nil) on
-// success, (FailureRecord, nil) on Tier-1, (nil, err) on Tier-2/3.
-func convertOne(ctx context.Context, conv, name, srcRoot, importsPath, prefixPath string, opts Options) (*FailureRecord, error) {
-	elemOut := filepath.Join(opts.Out, "elements", name)
-	if err := os.MkdirAll(elemOut, 0o755); err != nil {
-		return nil, err
-	}
-
-	args := []string{
-		"--source-root", srcRoot,
-		"--out-build", filepath.Join(elemOut, "BUILD.bazel"),
-		"--out-bundle-dir", filepath.Join(elemOut, "cmake-config"),
-		"--out-failure", filepath.Join(elemOut, "failure.json"),
-		"--out-read-paths", filepath.Join(elemOut, "read_paths.json"),
-		"--out-timings", filepath.Join(elemOut, "timings.json"),
-	}
-	if importsPath != "" {
-		args = append(args, "--imports-manifest", importsPath)
-	}
-	if prefixPath != "" {
-		args = append(args, "--prefix-dir", prefixPath)
-	}
-	if opts.ToolchainCMakeFile != "" {
-		args = append(args, "--toolchain-cmake-file", opts.ToolchainCMakeFile)
-	}
-
-	cmd := exec.CommandContext(ctx, conv, args...)
-	cmd.Stdout = logOf(opts)
-	cmd.Stderr = logOf(opts)
-
-	err := cmd.Run()
-	if err == nil {
-		return nil, nil
-	}
-
-	// Tier-1: convert-element exited 1 with a written failure.json.
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 1 {
-		fr, ferr := loadFailure(name, filepath.Join(elemOut, "failure.json"))
-		if ferr != nil {
-			return nil, fmt.Errorf("element %s: convert-element exit 1 but failure.json unreadable: %w", name, ferr)
-		}
-		return fr, nil
-	}
-	// Tier-2/3 or other unexpected exit. Bubble up.
-	return nil, fmt.Errorf("element %s: convert-element: %w", name, err)
 }
 
 // newResolver builds a sourcecheckout.Resolver wired to the
@@ -1138,25 +1091,13 @@ func tryActionCacheHit(ctx context.Context, store cas.Store, built *reapi.BuiltA
 	return true, nil, nil
 }
 
-// publishActionResult uploads every output produced by a successful
-// local conversion to CAS, then writes the ActionResult to AC so future
-// runs (on this or any other machine) hit cache.
-func publishActionResult(ctx context.Context, store cas.Store, built *reapi.BuiltAction, elemOut string) error {
-	ar, err := reapi.SynthesizeResult(ctx, store, elemOut, built.OutputPaths, 0, nil, nil)
-	if err != nil {
-		return err
-	}
-	return store.UpdateActionResult(ctx, built.ActionDigest, ar)
-}
-
-// remoteExecute submits the Action to the configured Executor (M3b's
-// REAPI Execution path), then materializes the returned ActionResult
-// into elemOut. The worker is responsible for publishing the
-// ActionResult to AC; the orchestrator only consumes it.
+// remoteExecute submits the Action to the configured Executor and
+// materializes the returned ActionResult into elemOut. Both the local
+// in-process LocalExecutor and remote GRPCExecutor publish the
+// ActionResult to AC themselves; the orchestrator only consumes it.
 //
 // Tier-1 failure detection: the converter writes failure.json on
-// exit-1, which the worker collects as an OutputFile. Same behavior
-// shape as convertOne returning a *FailureRecord.
+// exit-1, which the executor collects as an OutputFile.
 func remoteExecute(ctx context.Context, store cas.Store, exec reapi.Executor, built *reapi.BuiltAction, elemOut, name string, log io.Writer) (*FailureRecord, error) {
 	ar, err := exec.Execute(ctx, store, built)
 	if err != nil {

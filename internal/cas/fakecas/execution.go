@@ -404,17 +404,30 @@ func (e *ExecutionServer) sendDoneError(stream repb.Execution_ExecuteServer, run
 }
 
 // envFromCommand projects Command.environment_variables to an os/exec
-// Env slice ("KEY=VAL"). When the Command declares no env at all we
-// inherit the host's, which is what tests want (the orchestrator's
-// stub-converter looks at ORCHESTRATOR_STUB_* env vars). A production
-// REAPI worker would NOT inherit; that's a fake-only ergonomic.
+// Env slice ("KEY=VAL"), merged with the host's env so stubs still see
+// ORCHESTRATOR_STUB_* and other test-driven env vars even when the
+// Command declares its own variables. Command-declared values win on
+// any name collision. A production REAPI worker would NOT inherit;
+// that's a fake-only ergonomic.
 func envFromCommand(cmd *repb.Command) []string {
-	if len(cmd.EnvironmentVariables) == 0 {
-		return os.Environ()
-	}
-	out := make([]string, 0, len(cmd.EnvironmentVariables))
+	override := make(map[string]string, len(cmd.EnvironmentVariables))
 	for _, ev := range cmd.EnvironmentVariables {
-		out = append(out, ev.Name+"="+ev.Value)
+		override[ev.Name] = ev.Value
+	}
+	host := os.Environ()
+	out := make([]string, 0, len(host)+len(override))
+	for _, e := range host {
+		key := e
+		if i := strings.IndexByte(e, '='); i >= 0 {
+			key = e[:i]
+		}
+		if _, ok := override[key]; ok {
+			continue
+		}
+		out = append(out, e)
+	}
+	for k, v := range override {
+		out = append(out, k+"="+v)
 	}
 	return out
 }

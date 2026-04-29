@@ -85,6 +85,14 @@ type Inputs struct {
 	// remote workers enforce a hard cap on this conversion. Zero
 	// leaves Action.timeout unset (worker-default applies).
 	Timeout time.Duration
+
+	// EnvVars are encoded into Command.EnvironmentVariables. They
+	// land in the worker's environment when the Action runs. Used
+	// by the orchestrator to plumb per-element identity (e.g.
+	// ORCHESTRATOR_ELEMENT_NAME) into the converter without
+	// changing argv. Names are sorted into the proto for stable
+	// digests across hosts.
+	EnvVars map[string]string
 }
 
 // BuiltAction is the result of Build: a complete REAPI Action plus
@@ -211,8 +219,22 @@ func buildCommand(in Inputs) *repb.Command {
 		})
 	}
 
+	envKeys := make([]string, 0, len(in.EnvVars))
+	for k := range in.EnvVars {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	envVars := make([]*repb.Command_EnvironmentVariable, 0, len(envKeys))
+	for _, k := range envKeys {
+		envVars = append(envVars, &repb.Command_EnvironmentVariable{
+			Name:  k,
+			Value: in.EnvVars[k],
+		})
+	}
+
 	return &repb.Command{
-		Arguments: args,
+		Arguments:            args,
+		EnvironmentVariables: envVars,
 		OutputPaths: []string{
 			pathOutBuild,
 			pathOutBundle,
