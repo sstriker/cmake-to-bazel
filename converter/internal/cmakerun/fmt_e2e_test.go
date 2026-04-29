@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cmakerun"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/ctest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/bazel"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/cmakecfg"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
@@ -62,7 +63,14 @@ func TestE2E_Fmt_Converts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ninja.ParseFile: %v", err)
 	}
-	pkg, err := lower.ToIR(r, g, lower.Options{HostSourceRoot: fmtSourceRoot})
+	registry, err := ctest.Parse(buildDir)
+	if err != nil {
+		t.Fatalf("ctest.Parse: %v", err)
+	}
+	pkg, err := lower.ToIR(r, g, lower.Options{
+		HostSourceRoot: fmtSourceRoot,
+		CTest:          registry,
+	})
 	if err != nil {
 		t.Fatalf("ToIR: %v", err)
 	}
@@ -85,16 +93,19 @@ func TestE2E_Fmt_Converts(t *testing.T) {
 		}
 	}
 
-	// >= 15 *_test cc_binary rules is a reasonable lower bound; fmt 11.0.2
+	// >= 15 *_test cc_test rules is a reasonable lower bound; fmt 11.0.2
 	// emits 21. Bumping versions can shift the count; we don't pin exactly.
-	var testBins int
+	// Pre-CTest support these were cc_binary; the conversion now lifts
+	// add_test() registrations into cc_test rules so `bazel test //...`
+	// exercises the same artifacts CTest would.
+	var testRules int
 	for _, t := range pkg.Targets {
-		if strings.HasSuffix(t.Name, "-test") && t.Kind.String() == "cc_binary" {
-			testBins++
+		if strings.HasSuffix(t.Name, "-test") && t.Kind.String() == "cc_test" {
+			testRules++
 		}
 	}
-	if testBins < 15 {
-		t.Errorf("only %d *_test cc_binary rules emitted; expected >= 15", testBins)
+	if testRules < 15 {
+		t.Errorf("only %d *-test cc_test rules emitted; expected >= 15", testRules)
 	}
 
 	out, err := bazel.Emit(pkg)

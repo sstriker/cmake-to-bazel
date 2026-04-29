@@ -8,6 +8,8 @@
 // Kind = KindGenrule.
 package ir
 
+import "time"
+
 // Kind is the Bazel rule kind a Target lowers to.
 type Kind int
 
@@ -18,6 +20,7 @@ const (
 	KindCCImport
 	KindCCInterface
 	KindGenrule
+	KindCCTest
 )
 
 func (k Kind) String() string {
@@ -32,6 +35,8 @@ func (k Kind) String() string {
 		return "cc_library" // header-only: cc_library with hdrs only
 	case KindGenrule:
 		return "genrule"
+	case KindCCTest:
+		return "cc_test"
 	}
 	return "unknown"
 }
@@ -117,4 +122,24 @@ type Target struct {
 
 	// GenruleOuts are package-relative output paths the genrule produces.
 	GenruleOuts []string
+
+	// cc_test-specific fields. Populated only when Kind == KindCCTest;
+	// recovered from set_tests_properties() in CTestTestfile.cmake.
+
+	// TestArgs are the arguments cmake's add_test(... COMMAND <bin> <args>)
+	// recorded; map directly onto cc_test's args attribute.
+	TestArgs []string
+
+	// TestTimeout maps to set_tests_properties TIMEOUT. Zero leaves the
+	// cc_test timeout attribute unset (default Bazel timeout applies).
+	TestTimeout time.Duration
+
+	// TestEnv are "K=V" entries from set_tests_properties ENVIRONMENT.
+	// Rendered as cc_test's env dict.
+	TestEnv []string
+
+	// TestData are package-relative file paths from
+	// set_tests_properties REQUIRED_FILES; map onto cc_test's data
+	// attribute.
+	TestData []string
 }

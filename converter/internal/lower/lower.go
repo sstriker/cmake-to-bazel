@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sstriker/cmake-to-bazel/converter/internal/ctest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/fileapi"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ir"
@@ -43,6 +44,13 @@ type Options struct {
 	// Optional; nil disables manifest lookup, in which case unresolved
 	// link deps trigger unresolved-link-dep.
 	Imports *manifest.Resolver
+
+	// CTest, when non-nil, lets ToIR classify EXECUTABLE targets that
+	// were registered via add_test() as cc_test rules. The registry is
+	// produced by parsing CTestTestfile.cmake out of the cmake build
+	// dir; nil means no test classification (every EXECUTABLE stays
+	// cc_binary, matching pre-CTest-support behavior).
+	CTest *ctest.Registry
 }
 
 // manifestPrefixAnchor is the canonical token the orchestrator's imports
@@ -110,23 +118,25 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 			return nil, failure.New(failure.FileAPIMalformed,
 				"target id %q in codemodel but not loaded", tref.Id)
 		}
-		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, opts.HostPrefixDir, g, cc, idToName, utilityIDs, opts.Imports)
+		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, opts.HostPrefixDir, g, cc, idToName, utilityIDs, opts.Imports, opts.CTest)
 		if err != nil {
 			return nil, err
 		}
 		if irt == nil {
 			// lowerTarget returned (nil, nil) to skip — UTILITY targets
 			// (add_custom_target nodes) and similar that have no Bazel
-			// equivalent.
+			// equivalent. Also fires when an EXECUTABLE was rewritten
+			// into one or more cc_test entries on cc.Tests.
 			continue
 		}
 		pkg.Targets = append(pkg.Targets, *irt)
 	}
 
-	// Append recovered genrules in deterministic order (build-statement
-	// declaration order is stable since cc.Genrules is appended on first
-	// encounter while walking targets in cfg order).
+	// Append recovered genrules then cc_test rules in deterministic
+	// order; cc.Genrules and cc.Tests are appended in target-walk
+	// order during lowerTarget, which is itself stable.
 	pkg.Targets = append(pkg.Targets, cc.Genrules...)
+	pkg.Targets = append(pkg.Targets, cc.Tests...)
 	return pkg, nil
 }
 
@@ -137,7 +147,7 @@ func projectName(r *fileapi.Reply) string {
 	return ""
 }
 
-func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix string, g *ninja.Graph, cc *codegenContext, idToName map[string]string, utilityIDs map[string]bool, imports *manifest.Resolver) (*ir.Target, error) {
+func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix string, g *ninja.Graph, cc *codegenContext, idToName map[string]string, utilityIDs map[string]bool, imports *manifest.Resolver, tests *ctest.Registry) (*ir.Target, error) {
 	irt := &ir.Target{Name: t.Name}
 
 	switch t.Type {
@@ -304,6 +314,43 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 		irt.LinkLanguage = t.Link.Language
 	case len(t.CompileGroups) > 0:
 		irt.LinkLanguage = t.CompileGroups[0].Language
+	}
+
+	// CTest classification. An EXECUTABLE registered via add_test() is
+	// rewritten as one or more cc_test rules — one per registration —
+	// each sharing the cc_binary's srcs/hdrs/copts/deps. The cc_binary
+	// itself is dropped (return nil) since the test executable is
+	// addressable as a cc_test label after rewriting.
+	if irt.Kind == ir.KindCCBinary && tests != nil {
+		regs := tests.Lookup(t.Name)
+		if len(regs) > 0 {
+			for _, reg := range regs {
+				cct := *irt
+				cct.Name = reg.Name
+				cct.Kind = ir.KindCCTest
+				cct.TestArgs = append([]string(nil), reg.Args...)
+				cct.TestEnv = append([]string(nil), reg.Env...)
+				cct.TestData = append([]string(nil), reg.Data...)
+				cct.TestTimeout = reg.Timeout
+				if len(reg.Tags) > 0 {
+					seen := make(map[string]bool, len(cct.Tags)+len(reg.Tags))
+					merged := append([]string(nil), cct.Tags...)
+					for _, x := range cct.Tags {
+						seen[x] = true
+					}
+					for _, x := range reg.Tags {
+						if seen[x] {
+							continue
+						}
+						seen[x] = true
+						merged = append(merged, x)
+					}
+					cct.Tags = merged
+				}
+				cc.Tests = append(cc.Tests, cct)
+			}
+			return nil, nil
+		}
 	}
 
 	return irt, nil
