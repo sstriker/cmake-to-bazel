@@ -1,394 +1,358 @@
-# Whole-project plan: per-kind BuildStream-element translators
+# Whole-project plan: Bazel-as-orchestrator (two-pass meta-project)
 
-Replaces `docs/fdsdk-whole-project-plan.md` and the previous coarse-
-fallback-via-bst draft of this file. The earlier drafts both leaned
-on BuildStream itself doing the work for non-cmake elements
-(`bst build` from a Bazel genrule, or pre-staged BuildStream
-artifacts wrapped as Bazel imports). Both kept BuildStream in the
-build path. The right shape is **per-bst-kind translators that emit
-native Bazel rules**, with no `bst` invocation anywhere downstream.
-Coarse-grained where the kind doesn't surface enough structure;
-fine-grained where it does.
+Supersedes the earlier "per-kind translators inside a Go orchestrator"
+shape this document carried, which itself superseded a coarse-via-bst
+draft. The directional shift this revision encodes: **keep the
+orchestrator small and dumb; defer cross-element scheduling, action
+caching, and dataflow to Bazel as a proven graph system**. Per-kind
+translators are still the unit of work, but their host moves from a
+Go dispatch loop in the orchestrator to tools that per-element
+genrules invoke inside a meta Bazel workspace.
 
 ## Goal
 
 `bazel build //...` over a converted BuildStream project succeeds and
 produces the same artifacts BuildStream would have. Every element
-kind has a translator that lowers it to BUILD.bazel rules. No
-runtime dependency on `bst` for the Bazel build.
+kind has a translator that emits BUILD.bazel rules. No runtime
+dependency on `bst` for the Bazel build, and no orchestrator-side
+scheduling or action cache — Bazel owns the cross-element graph.
 
-## Why per-kind translators
+## Why two-pass
 
 BuildStream itself is a thin orchestrator over per-kind plugins
 (`cmake`, `autotools`, `meson`, `manual`, `filter`, `stack`, …).
-Each plugin knows how to interpret its element's `config:` block and
-turn it into a build invocation. We already wrote one such
-translator — for `kind: cmake`. The plan is to write the rest, in
-the same pluggable shape.
+Each plugin interprets its element's `config:` block and produces
+build outputs. The previous draft of this plan rebuilt a per-kind
+dispatch table inside a Go orchestrator that also owned an action
+cache, REAPI executor abstraction, regression-diff machinery, and
+cross-element scheduling. Most of that machinery duplicates what
+Bazel already provides.
+
+The two-pass shape replaces it. Project A is a meta Bazel workspace
+whose only purpose is converting elements: one `genrule` per element
+that invokes the per-kind translator binary (`convert-element` for
+`kind: cmake`, similar for the others) and produces BUILD.bazel +
+typed export filegroups for that element. Project B is the
+materialized union of project A's outputs plus the original sources;
+it's a normal Bazel workspace consumers see and build against.
+Bazel's action cache decides what to re-run in A; Bazel's normal
+build machinery handles project B.
 
 ## Phase 0: survey FDSDK
 
-Before committing to per-kind shapes, count what's actually in the
-project. Spot-checks against `gitlab.com/freedesktop-sdk/freedesktop-sdk@master`
-already show `kind: stack`, `kind: filter`, `kind: autotools`, and
-`kind: cmake` are common; `kind: meson` shows up in the GNOME stack;
-`kind: manual` is the long tail. Concrete numbers and per-kind
-config-shape diversity drive the prioritization in Phase 2.
+Done — see `docs/fdsdk-element-survey.md`. Key takeaways shaping the
+phasing below:
 
-Output of Phase 0: a checked-in survey under
-`docs/fdsdk-element-survey.md` containing:
+- 1 092 elements across 21 kinds. The original 7-kind enumeration
+  (cmake, meson, autotools, manual, stack, filter, junction)
+  covered 67 % of FDSDK; the other 33 % falls into 14 unlisted
+  kinds that group cleanly into "buildsystem variants" (fold into
+  the manual-shaped translator), "install-tree manipulation"
+  (trivial filegroup emitters), and "FDSDK manifest glue" (small,
+  plumb in last).
+- `git_repo` (530 / 870 top-level sources) is the dominant source
+  kind, not `git`. The sourcecheckout layer needs a small
+  alias-resolving adapter for FDSDK's `include/_private/aliases.yml`.
+- Per-kind config surface is small: `<kind>-local` (`cmake-local`,
+  `meson-local`, `conf-local`, `autogen`) is the dominant per-element
+  customization point and maps directly to flags appended to the
+  plugin's default invocation. `command-subdir` recurs across
+  kinds; translators must honor it.
 
-1. Total element count and per-kind breakdown.
-2. Per-kind sample of 5–10 elements (small/medium/large) with the
-   `config:` keys actually used. Used to decide what shape the
-   translator's input has.
-3. Per-kind list of features used in the wild that the BuildStream
-   plugin supports but our translator may want to defer
-   (e.g. `command-subdir`, `prefix`, custom phases).
-4. Source-kind breakdown (`tar` / `git` / `local` / `patch` /
-   `remote`) — drives what `sourcecheckout` needs to handle.
+The survey is a tool, not a deliverable; re-run it against newer
+FDSDK snapshots when the percentages or kind set shifts.
 
-The survey is a tool, not a deliverable in itself; once Phase 2
-starts we revisit it as new translators land.
+## Architecture
+
+### Project A and project B
+
+Project A is the meta workspace:
+
+```
+project-A/
+  MODULE.bazel             ← uses the writer-of-A module extension
+  BUILD.bazel              ← (top-level, mostly empty)
+  # Generated repos, one per .bst element:
+  external/+_writer+fmt/
+    BUILD.bazel            ← genrule(name="fmt", cmd="convert-element ...")
+                              filegroup(name="cmake_config", ...)
+                              filegroup(name="headers", ...)
+                              filegroup(name="libs", ...)
+  external/+_writer+glibc/
+    BUILD.bazel            ← genrule(name="glibc", cmd="<manual install>")
+                              filegroup(name="cmake_config", ...)
+                              ...
+```
+
+Project B is materialized from project A's outputs plus the original
+source tree:
+
+```
+project-B/
+  MODULE.bazel             ← bazel_dep on each generated element
+  elements/components/fmt/
+    BUILD.bazel            ← (symlink/copy from project A's output)
+    cmake-config/          ← (likewise)
+    src/, include/, ...    ← (symlinks into the original source tree)
+```
+
+A user-facing wrapper script does `bazel build //... --output_base=A`
+followed by `bazel build //... --output_base=B`, or a repo rule in B
+chains them automatically. Two passes is more visible than today's
+single orchestrator invocation; it's the trade for collapsing the
+orchestrator's bespoke machinery.
+
+### Per-element generated BUILD: `srcs = glob() + zero_files`
+
+Each element's generated BUILD declares the element's convert-element
+genrule with `srcs` composed of two parts: a `glob()` over the real
+source paths the translator actually reads, and a `zero_files`
+generated stub set for the rest of the universe cmake's
+`file(GLOB)` walks would naturally see.
+
+```starlark
+load("//rules:zero_files.bzl", "zero_files")
+
+zero_files(name = "fmt_stubs", paths = STUB_PATHS)
+
+genrule(
+    name = "fmt_converted",
+    srcs = REAL_PATHS + [":fmt_stubs", "@deps//cmake-config:bundle"],
+    outs = ["BUILD.bazel", "cmake-config/", "read_paths.json"],
+    cmd  = "$(location //tools:convert-element) --kind=cmake ...",
+    tools = ["//tools:convert-element"],
+)
+```
+
+The `zero_files` rule is ~10 lines of starlark using
+`ctx.actions.write(output, content="")`. Both motivations land:
+cmake's `file(GLOB)` walks see the directory shape unchanged
+(content is irrelevant for files cmake doesn't open), and the action
+input merkle is content-stable across edits to non-read files.
+
+### Read-set narrowing via `read_paths.json` feedback
+
+The set `REAL_PATHS` for each element is determined by the
+converter's `read_paths.json` output from the previous successful
+conversion. First-run is uncached (full source set is real, nothing
+zeroed); subsequent runs use the committed `read_paths.json` to
+narrow.
+
+```
+universe   = glob(["**/*"])
+read_set   = json.decode(rctx.read("read_paths.json"))
+real_paths = [p for p in universe if p in read_set]
+stub_paths = [p for p in universe if p not in read_set]
+```
+
+`read_paths.json` lives alongside each .bst element and is committed
+when the user accepts the new read set. Bazel's action cache keys on
+the merkle of (real reads + zero stubs), so semantically-irrelevant
+edits to non-read files don't invalidate the action.
+
+### Cross-element inputs: typed filegroups + per-consumer narrowing
+
+Each element exports typed filegroups consumers reference:
+
+```starlark
+filegroup(name = "cmake_config", srcs = glob(["install/lib/cmake/**"]))
+filegroup(name = "pkg_config",   srcs = glob(["install/lib/pkgconfig/*.pc"]))
+filegroup(name = "headers",      srcs = glob(["install/include/**"]))
+filegroup(name = "libs",         srcs = glob(["install/lib/lib*.{so*,a}"]))
+filegroup(name = "binaries",     srcs = glob(["install/bin/*"]))
+```
+
+Consumers reference deps' typed slices: a downstream cmake element
+has `srcs = ["@dep//cmake-config:bundle", "@dep//headers:public"]`.
+For deep deps where the consumer reads only some headers (typical
+for glibc, openssl, ...), per-consumer narrowing applies the same
+zero-stub trick: `@dep//headers:reads_for_<consumer>` exposes only
+the consumer's read subset, with stubs covering the rest. Today's
+`synthprefix.Build()` does element-level staging without this
+narrowing; the meta-project shape gives strictly stronger
+cross-element cache stability.
+
+The path-anchor wrinkle: today the converter sees the prefix at
+`/opt/prefix/...` (`manifestPrefixAnchor`), but Bazel stages dep
+bundles at label paths. Each element genrule's `cmd` does an
+in-action symlink-merge of N dep bundles into `$SYNTH_PREFIX`
+before invoking the translator — five lines of bash. The
+translator binaries stay unchanged.
+
+### Output shape for non-cmake kinds
+
+Coarse-grained kinds (autotools, manual, make, pyproject, …)
+produce an install tree as a tree artifact (`ctx.actions.declare_directory`).
+A wrapping rule exposes typed slices via providers
+(`HeadersInfo`, `LibsInfo`, `PkgConfigInfo`, …); consumers depend
+on the typed slices, not the raw tree. Internally one
+content-addressed install tree per element; externally normal
+Bazel rules. Caching comes from the tree's merkle; consumer
+narrowing comes from filegroup/provider plumbing on top.
+
+For elements that already declare their output shape in the .bst
+(`flatpak_image`'s `directory:` and `metadata:`, `compose`'s
+`exclude:`), the writer-of-A renders explicit `outs = [...]`
+patterns directly. Tree artifacts are only needed where the .bst
+doesn't pre-declare shape.
+
+### Toolchain bootstrap
+
+The toolchain element (gcc + glibc + binutils, currently
+`kind: manual` in FDSDK) produces an install tree via its
+genrule. A starlark macro — invoked from the writer-of-A when the
+.bst is tagged as a toolchain provider — synthesizes a
+`cc_toolchain_config.bzl` from the install tree's binary list and
+sysroot layout. Downstream cmake-element genrules pick it up via
+Bazel's normal `cc_toolchain` resolution.
+
+The bootstrap chain (host-toolchain builds toolchain-stage1 builds
+toolchain-stage2 builds …) becomes an honest Bazel dependency
+graph: each stage's tree depends on the previous one. Today's
+`derive-toolchain` binary collapses into one starlark macro the
+writer-of-A invokes at .bst-parse time.
+
+### Writer-of-A: the minimum viable orchestrator
+
+Small Go binary (target ~500 LOC) plus a starlark module extension
+that calls it. Inputs: the .bst graph + project.conf. Outputs:
+project A's `MODULE.bazel`, a generated repo per element with the
+right BUILD.bazel, and the inputs to project B (a `MODULE.bazel`
+declaring the per-element `bazel_dep`s).
+
+It does NOT: run actions, manage caches, schedule cross-element
+work, or talk to REAPI. All of that lives in Bazel.
+
+It DOES: parse .bst (YAML + BST directives), resolve sources via
+the existing `sourcecheckout` package, render starlark templates
+for each element kind, render the imports manifest as JSON
+alongside each element, and chain through Bazel's module-extension
+caching so re-runs are cheap.
 
 ## Per-kind translation strategies
 
-Strategies below are the planning-time best guess. Phase 0's survey
-will refine numbers; the strategies themselves should hold.
+Strategies organized by how the kind lowers in project A's BUILD:
 
 ### `kind: cmake`
 
-**Status**: done (existing converter pipeline). Fine-grained
-`cc_library` / `cc_binary` rules from cmake's File API.
+**Pattern**: per-element genrule invoking `convert-element --kind=cmake`.
+Outputs: `BUILD.bazel`, `cmake-config/` bundle, `read_paths.json`.
+Reuses the existing `convert-element` binary unchanged. The starlark
+template renders the genrule's `cmd` with the element's
+`cmake-local` flags inline.
 
 ### `kind: meson`
 
-**Granularity**: fine-grained.
+**Pattern**: per-element genrule invoking `convert-element --kind=meson`
+(new translator binary, similar shape — runs `meson setup` +
+`meson introspect`, lowers to the same IR / emit pipeline as cmake).
 
-Meson supports `meson introspect --targets --installed --buildoptions`,
-which emits JSON close enough in shape to cmake's File API to drive
-the same lowering pattern. The translator runs:
+### `kind: autotools` / `make` / `manual` / `pyproject` / `script` / `makemaker` / `modulebuild`
 
-1. `meson setup build/` against the resolved source tree (in a
-   bwrap sandbox, same as the cmake path).
-2. `meson introspect build/ --all` for targets / sources / link deps.
-3. Lower the introspection JSON to the existing
-   `converter/internal/ir` types (Package, Target, Source, …).
-4. Reuse `converter/internal/emit/bazel/emit.go` to emit BUILD.bazel.
+**Pattern**: coarse-grained install pipeline. Per-element genrule
+runs `configure` (where applicable) + `make` + `make install`
+inside Bazel's action sandbox, producing a tree artifact install
+dir. A wrapping rule exposes typed filegroups. The .bst's
+`config: <phase>-commands` and `variables:` get rendered into the
+genrule's `cmd` by the writer-of-A.
 
-Most of the converter's lowering code (`converter/internal/lower/`)
-is File-API-shaped today; the work is "introduce a meson-shaped
-input parser, fold to the same IR, reuse the rest." Probably 30–40%
-new code, 60–70% reuse.
+The buildsystem variants (`make`, `pyproject`, `makemaker`,
+`modulebuild`) all share the manual-shape pattern with different
+defaults. One shared starlark macro plus a per-kind defaults dict.
 
-### `kind: autotools`
+### `kind: stack` / `filter` / `import` / `compose` / `flatpak_image` / `snap_image` / `flatpak_repo` / `collect_*` / `check_forbidden`
 
-**Granularity**: coarse-grained for v1, with a fine-grained path
-identified for later.
-
-Autotools doesn't expose introspection. The build invocation is the
-classic `configure → make → make install` pipeline; `make`'s
-internal target graph isn't easily extracted (Makefile parsing is
-much harder than ninja parsing).
-
-For v1, emit a single `genrule` per element wrapping the
-plugin's standard pipeline, with element-specific overrides folded
-in from the .bst's `config:` block:
-
-```bzl
-genrule(
-    name = "_install_tree",
-    srcs = glob(["src/**"]),
-    outs = ["install.tar"],
-    cmd = """
-        cd $$(dirname $(execpath src/configure))
-        ./configure --prefix=/usr <element-specific flags>
-        make -j$$(nproc)
-        make DESTDIR=$$PWD/_install install
-        tar -cf $@ -C _install .
-    """,
-    tools = ["@cc_toolchain//:all"],
-)
-```
-
-`install.tar` is the coarse output. `cc_import` / `filegroup` rules
-sit on top to expose individual libs/headers in the same shape the
-fine-grained cmake translator emits, so consumers don't see the
-granularity difference.
-
-Fine-grained path (deferred to a later phase): autotools generates
-a Makefile we *could* parse for source/object dependencies, but the
-ROI is unclear. Many autotools elements are small enough that the
-coarse genrule rebuilds in seconds. Revisit when a specific
-autotools element becomes a build-time bottleneck.
-
-### `kind: manual`
-
-**Granularity**: coarse-grained, no realistic fine path.
-
-The element's `config:` block has freeform `commands:` lists for
-each phase (`configure`, `build`, `install`, `strip`). Translation
-is mechanical: emit a single `genrule` whose `cmd` is the
-concatenation of those command lists, joined with `&&` and with
-BuildStream's variable substitution (`%{prefix}`, `%{install-root}`)
-mapped to Bazel-side equivalents.
-
-Where this gets hard: BuildStream's variable substitution is
-recursive and project-defined, and `manual` elements lean on it
-heavily. The translator carries a small substitution engine that
-mirrors the BuildStream-defined-variables semantics enough to
-resolve everything an element-config-time substitution can produce.
-
-### `kind: stack`
-
-**Granularity**: trivial.
-
-Stack elements have no build, just dependencies. Translation:
-
-```bzl
-filegroup(
-    name = "<element>",
-    srcs = [],
-    data = ["@<dep1>//:all", "@<dep2>//:all", ...],
-)
-```
-
-Bzlmod extension generates the per-stack repo containing this one
-filegroup. Done.
-
-### `kind: filter`
-
-**Granularity**: structural (not really a build).
-
-Filter elements take a parent element's output and split it by
-glob patterns. Translation: emit one `filegroup` per filter slice
-(e.g. `runtime`, `devel`, `static`) selecting from the parent's
-`@<parent>//:all` filegroup via include/exclude globs. The
-`split-rules:` block in the .bst maps directly to glob patterns.
+**Pattern**: pure starlark filegroup composition. No action runs;
+the writer-of-A emits `filegroup`s with `srcs` referencing parent
+elements' typed slices. Trivial.
 
 ### `kind: junction`
 
-**Granularity**: handled at orchestration time, not rule-emission.
-
-Junctions reference another BuildStream project. The orchestrator
-treats a junctioned project as a separate workspace: its elements
-get translated under a separate Bazel module, bridged into the
-parent module via `bazel_dep` against a `local_path_override`
-pointing at the junction's converted output dir. No special rule
-shape per junctioned element — they get translated by the same
-per-kind translators as anything else, just rooted in a different
-module.
+**Pattern**: handled at writer-of-A time, not rule-emission. A
+junction's target project gets parsed by a separate writer-of-A
+invocation rooted at the junction's source dir; its generated
+elements live under a different bazel_dep chain in project A's
+MODULE.bazel.
 
 ### Source kinds
 
 Independent of element kind. Already partially handled by
-`orchestrator/internal/sourcecheckout`. The translator framework
-calls into `sourcecheckout` for every element it processes. Per
-source kind:
+`orchestrator/internal/sourcecheckout`. Per source kind:
 
-- `tar`, `remote`: Already handled.
-- `git`: Already handled (with `kind: remote-asset` rewriting via
-  `bsttranslate`).
-- `local`: Already handled.
-- `patch`: Apply patch after parent sources resolve. Existing.
-- `workspace`: defer until needed.
-
-## Architecture
-
-### Translator interface
-
-A new package `orchestrator/internal/translate/` defines a
-`Translator` interface plus per-kind implementations. Shape:
-
-```go
-type Translator interface {
-    // Kind returns the bst element kind this translator handles.
-    Kind() string
-
-    // Translate emits BUILD.bazel + cmake-config bundle into outDir.
-    // The dep graph is provided so cross-element references resolve.
-    Translate(ctx context.Context, elem *element.Element, srcRoot string, deps []ResolvedDep, outDir string) (*manifest.Entry, error)
-}
-```
-
-Per-kind packages — `internal/translate/cmake`, `internal/translate/meson`,
-`internal/translate/autotools`, `internal/translate/manual`,
-`internal/translate/stack`, `internal/translate/filter` — each
-implement this interface. The cmake translator wraps the existing
-`converter/cmd/convert-element` pipeline; the others are new code.
-
-### Dispatcher
-
-`orchestrator/internal/orchestrator/run.go:processElement` looks up
-the translator by kind from a registry built at startup, calls
-`Translate`, ingests the output directory into CAS exactly the
-same way the current cmake path does. Element-kind-specific code
-lives entirely behind the interface.
-
-### Cross-kind interop
-
-The same imports-manifest plumbing the cmake-only path uses today:
-
-- Every translator emits a `cmake-config/` bundle alongside its
-  BUILD.bazel. The bundle is a synthesized `<Pkg>Config.cmake` +
-  `<Pkg>Targets.cmake` matching the install layout. cmake-element
-  consumers' `find_package()` resolves through this bundle without
-  caring what kind produced it.
-- Bazel-side: every translator's BUILD.bazel exposes a
-  `<element>` filegroup, a `headers` filegroup, and per-library
-  `cc_import` targets. cc_library consumers reference these by
-  label.
-
-The `cmake-config/` synthesis is heuristic for non-cmake kinds —
-walk the install delta, every `lib*.so`/`lib*.a` becomes an
-`add_library(... IMPORTED)` entry, every `include/<pkg>/`
-becomes the include dir. Where the heuristic fails, a Tier-1
-`coarse-export-incomplete` failure with a hint to add a
-hand-written override under `non_cmake_stubs/` (the existing
-M1 escape hatch).
-
-### Toolchain bootstrap
-
-A `kind: manual` toolchain element (gcc, glibc, …) is a coarse-
-grained genrule that produces an install tree. cmake elements
-downstream of it consume it via `cc_toolchain` declarations
-generated from the install tree, the same way `derive-toolchain`
-already works against a real install today. The interesting
-addition: `derive-toolchain` runs against the toolchain element's
-output, not against the host system, so the produced
-`cc_toolchain_config.bzl` describes the converted compiler, not
-the operator's `/usr/bin/gcc`.
+- `git_repo` (530, dominant): URL-alias-resolving variant of `git`.
+  Needs a small adapter for FDSDK's `include/_private/aliases.yml`
+  (parse aliases, rewrite URLs at fetch time).
+- `git`, `tar`, `local`, `remote`, `patch`: handled.
+- `go_module`, `cargo2`, `cpan`, `pypi`, `zip`: language-package
+  source kinds with vendored ref lists. Handled by the language-
+  element translators that need them; orthogonal to the
+  source-checkout core.
 
 ## Phasing
 
-Eight phases, each its own PR. Phases 2–6 can interleave once Phase
-1's interface is stable.
+Five phases, each its own PR. Phases 3 and 4 can interleave once
+Phase 2 confirms the shape works.
 
-**Phase 0 — FDSDK survey.** New `docs/fdsdk-element-survey.md`.
-Counts, per-kind config samples, source-kind breakdown.
+**Phase 1 — writer-of-A + cmake elements only.** New `cmd/write-a/`
+Go binary. New `rules/zero_files.bzl`. The existing
+`orchestrator/cmd/orchestrate` continues to work alongside as the
+fallback path during transition. Acceptance: a cmake-only fixture
+(hello-world.bst) round-trips through writer-of-A → project A
+build → project B build. Today's `make e2e-orchestrate` style
+gate on the meta-project shape.
 
-**Phase 1 — Translator framework.** New `internal/translate/`
-package with the interface + registry + dispatcher integration in
-the orchestrator. Refactor existing cmake pipeline behind the
-interface (no behavior change). Acceptance: existing cmake e2e
-tests still pass, but the orchestrator now goes through the
-translator interface.
+**Phase 2 — hello-world end-to-end through both projects.** Smallest
+viable demonstration. Validates cache-stability scenarios A
+(`.c` edit cache-hits convert-element) and A' (CMakeLists.txt
+comment edit cache-misses but produces byte-identical output).
+This is the gate for committing to delete the old orchestrator
+machinery.
 
-**Phase 2 — Stack + filter translators.** Trivial. Acceptance: a
-fixture with one stack element pulling in two cmake elements
-converts; `bazel build //...` resolves the stack as a label
-referring to both.
+**Phase 3 — install-tree-manipulation kinds.** stack, filter,
+import, compose, flatpak_image, snap_image, flatpak_repo,
+collect_manifest, collect_initial_scripts, collect_integration,
+check_forbidden. All are pure starlark filegroup composition; no
+action runs, no new translator binaries. ~13 % of FDSDK in this
+bucket.
 
-**Phase 3 — Autotools translator (coarse).** The biggest single
-chunk of FDSDK by element count. Acceptance: a fixture with one
-autotools element (openssl-flavored) converts; `bazel build //...`
-produces the install tree; a downstream cmake element
-`find_package`'s its synthesized config bundle and links
-successfully.
+**Phase 4 — buildsystem-variant kinds.** meson, autotools, make,
+manual, pyproject, makemaker, modulebuild, script. The fine-
+grained meson translator is its own genrule shape; the coarse
+ones share the install-pipeline pattern. Together with cmake
+this covers ~70 % of FDSDK by element count.
 
-**Phase 4 — Meson translator (fine).** Surface area similar to the
-cmake translator. Acceptance: a fixture with one meson element
-(libfoo-flavored), fine-grained `cc_library` rules emitted, fmt-
-style fidelity gate (symbol equivalence vs `meson setup && ninja`
-reference).
-
-**Phase 5 — Manual translator (coarse).** Long-tail support. Most
-of the work is the variable-substitution engine. Acceptance: a
-fixture with one manual element converts and builds.
-
-**Phase 6 — Toolchain bootstrap.** Wire `derive-toolchain` against
-a converted toolchain element instead of the host. Acceptance:
-the FDSDK subset converts and builds with the converted toolchain
-on the cc_toolchain rule path, not the host's.
-
-**Phase 7 — Junction handling.** Cross-project plumbing. Acceptance:
-a fixture with two BuildStream projects junctioned together
-converts; both projects' elements are reachable from the parent
-Bazel module.
-
-**Phase 8 — FDSDK acceptance.** Run the full pipeline over an
-FDSDK subset that exercises every translator (1 stack + 1 filter +
-1 autotools + 1 meson + 1 manual + 1 cmake). `bazel build //...`
-succeeds. Document any FDSDK-specific deltas in
+**Phase 5 — FDSDK acceptance.** Run the full pipeline over the
+FDSDK kind set the survey covers. `bazel build //...` against
+project B succeeds. Document remaining deltas in
 `docs/fidelity-known-deltas.md`. After this, the gate moves to
-the full FDSDK graph.
-
-## Future direction (parked, not v1)
-
-**Bazel-as-orchestrator (two-pass meta-project).** Once the per-kind
-translators are stable, an architectural simplification worth
-revisiting: replace the orchestrator's bespoke action cache + REAPI
-executor + cross-element scheduling with a thin "meta" Bazel
-workspace whose BUILD files are themselves generated from the .bst
-graph. Each element becomes one `genrule` whose action invokes
-`convert-element`; the genrule's `srcs` declare the cross-element
-inputs (each dep's `cmake-config/` bundle) so Bazel's action graph
-threads the same dataflow today's orchestrator threads explicitly.
-The fine-grained BUILD files the meta workspace produces are
-materialized into an adjacent "real" Bazel workspace consumers
-build against.
-
-What it would let us delete: the orchestrator-internal action cache
-(M3a), parts of the regression diff (M4 — Bazel's action graph is
-the source of truth), the REAPI Executor abstraction (M3b/M5 —
-Bazel's `--remote_executor` is the same Buildbarn). What stays:
-`convert-element` itself, the per-kind translator interface (just
-hosted as a tool that genrules invoke instead of a Go dispatch
-table), the fmt fidelity gate (it's the precondition for the
-meta-workspace's action cache to deliver value — convert-element
-must be bit-stable on identical inputs).
-
-Why it's parked: too big a jump for v1; the current orchestrator
-shape is well-trodden and the per-kind translators land
-incrementally against it. The shift is recoverable later because
-the translators don't care which host invokes them. Revisit after
-Phase 6 (toolchain bootstrap) lands and the orchestrator's action
-cache becomes the dominant complexity weight.
+the full FDSDK graph; the old orchestrator code can be deleted.
 
 ## Out of scope (explicitly)
 
 - **Replacing every element kind's plugin with a fine-grained
   translator on day one.** Coarse-grained is acceptable as a
-  default for kinds where introspection isn't natively available;
-  finer comes later if performance demands.
+  default for kinds where introspection isn't natively available.
 - **Reimplementing BuildStream's plugin model in Go.** The
   translators borrow the *interface idea* but each one is a small
   focused emitter, not a faithful re-implementation of the BST
   plugin.
-- **Cross-distro generalization.** Same as the previous draft:
-  FDSDK is the validator; Debian / Fedora / Alpine / etc. are not
-  in scope until FDSDK ships.
 - **Workspace-aware translation** (handing converted BUILD.bazel
-  files back into a `bst workspace`-driven dev loop). Possibly a
-  future ask, but not a v1 concern.
+  files back into a `bst workspace`-driven dev loop). Not a v1
+  concern.
 
-## Open questions for review
+## Open questions
 
-1. **Granularity defaults**: is "coarse autotools, fine meson" the
-   right starting split? An argument for going coarse on meson
-   too is that fine-grained cmake is the gate that has to ship
-   first; meson-fine could be a Phase 9 addition rather than
-   Phase 4.
-
-2. **Variable substitution in `kind: manual`**: BuildStream's
-   substitution is project-defined and recursive. Phase 5's
-   substitution engine could either (a) re-implement BST's
-   resolver in Go, or (b) outsource substitution to BST itself
-   at translation time (`bst show --format ...`). The user's
-   "no bst at runtime" constraint allows option (b) at
-   translation time since the orchestrator already shells out;
-   "no bst at build time" is the firmer rule.
-
-3. **Toolchain bootstrap ordering**: the converted toolchain has
-   to exist before any cmake-element conversion runs (because
-   cmake's File API probe needs a working compiler). Phase 6
-   handles this, but Phases 2–5 land before it. During those
-   phases, do we use the host toolchain (operator's gcc) for
-   cmake-element conversion, knowing it'll be wrong for FDSDK
-   acceptance? Or do we gate Phase 8 on Phase 6 completion?
-
-4. **Phase 2 ordering risk**: the survey (Phase 0) might surface
-   a kind we haven't planned for. If FDSDK uses a kind not in
-   the table above (e.g. `kind: x86_64-image` or a project-
-   specific custom plugin), Phase 0's output reshapes Phase 2's
-   plan. That's fine — we plan after we know.
+1. **Project A → project B materialization.** Two options: a
+   wrapper script (`make convert && bazel build //...`) or a
+   repo rule in B that triggers project A as a sub-build. The
+   former is simpler; the latter composes better with downstream
+   `bazel_dep`. Phase 2's spike is the place to decide.
+2. **Where `read_paths.json` lives.** Committed alongside each
+   .bst (the orchestrator's allowlistreg-on-disk pattern today),
+   or generated as a project-A action output and consumed by a
+   subsequent module-extension regeneration. Committed-alongside
+   is simpler; revisit if churn is annoying in practice.
+3. **`derive-toolchain` migration timing.** Phase 1 uses the
+   host's `cc_toolchain` to keep the writer-of-A small. The
+   toolchain-bootstrap macro lands in Phase 4 alongside
+   `kind: manual`. Phase 5's FDSDK gate forces the migration.
