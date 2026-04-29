@@ -1,26 +1,24 @@
 // Command write-a is the production writer-of-A for the meta-project
 // (Bazel-as-orchestrator) shape described in docs/whole-project-plan.md.
-// It parses .bst element files, resolves their sources, and renders a
-// project-A workspace tree where each element gets a per-element
-// generated BUILD.bazel containing one genrule that invokes the
-// per-kind translator binary (convert-element for kind:cmake) under
-// Bazel's action graph.
+// It parses .bst element files, resolves their sources and dependencies,
+// and renders project A (the meta workspace whose genrules invoke
+// per-kind translator binaries) and project B (the consumer workspace
+// built against project A's outputs).
 //
-// Phase 1 scope (cmake-only acceptance per the plan):
-//   - kind:cmake elements only.
-//   - kind:local sources only.
-//   - no cross-element deps.
-//   - no toolchain handling (uses the host's cc_toolchain).
+// Phase 1 — kind:cmake only, single-element fixtures (hello-world.bst).
+// Phase 2 (this file) — multi-element graphs + per-kind dispatch +
+// kind:stack. Subsequent phases extend the kind set (kind:manual
+// coarse-grained pipeline, then meson, autotools, ...) and the
+// source-kind set (git, tar, remote-asset).
 //
-// Subsequent phases extend this to multi-element graphs (Phase 3+),
-// non-cmake kinds (Phase 3 / 4), additional source kinds (via the
-// existing orchestrator/internal/sourcecheckout package), and a real
-// bzlmod module extension shape that lazily generates per-element
-// repos. This binary's interface (--bst, --out, --convert-element,
-// --read-paths-feedback) is stable across those extensions; what
-// grows is the writer's per-kind dispatch and graph handling.
+// Per-kind dispatch is mediated by the kindHandler interface (see
+// kindHandler below); each kind's renderer takes the graph + a single
+// element and contributes a per-element package to project A and/or
+// project B as appropriate. Kinds that don't need an action-graph step
+// (stack, filter, import, …) only contribute project-B starlark; the
+// driver script's stage step is a no-op for them.
 //
-// Shadow-tree narrowing:
+// Shadow-tree narrowing (kind:cmake):
 //   - With --read-paths-feedback unset: every source file is staged
 //     real. First-run / no-feedback shape.
 //   - With --read-paths-feedback pointing at a prior run's
@@ -59,9 +57,15 @@ import (
 //go:embed assets/zero_files.bzl
 var zeroFilesBzl string
 
+// bstFile is the YAML shape we parse out of a .bst element file.
+// We only read the fields write-a's per-kind dispatch and source
+// resolution need; other fields BuildStream understands (e.g.
+// `variables:`) are ignored for now and will get plumbed in by the
+// per-kind handlers that need them.
 type bstFile struct {
 	Kind    string      `yaml:"kind"`
 	Sources []bstSource `yaml:"sources"`
+	Depends []string    `yaml:"depends"`
 }
 
 type bstSource struct {
@@ -74,41 +78,62 @@ type element struct {
 	Bst  *bstFile
 	// AbsSourceDir is the absolute path on the host to the resolved
 	// element source tree (for kind:local, this is bstDir/<source.path>).
+	// Empty for kinds that don't resolve a source tree (kind:stack).
 	AbsSourceDir string
+	// Deps are the resolved depends-on edges of this element. Populated
+	// during loadGraph; parents reference children.
+	Deps []*element
 	// ReadSet is the source-relative paths a prior run's
 	// read_paths.json reported. Populated when
 	// --read-paths-feedback is set; empty (and HasFeedback false)
-	// otherwise.
+	// otherwise. Only consumed by kind:cmake's handler.
 	ReadSet     []string
 	HasFeedback bool
 
-	// Derived during writeProjectA: the partitioned source-tree
-	// paths. RealPaths get staged into project A as files;
-	// ZeroPaths become entries in the zero_files starlark rule.
+	// RealPaths / ZeroPaths are derived during the cmake handler's
+	// per-element rendering: real files staged on disk, zero paths
+	// handed to the zero_files starlark rule.
 	RealPaths []string
 	ZeroPaths []string
 }
 
+// graph is the loaded set of elements with cross-references resolved.
+// Elements is topologically sorted (dependencies before dependents).
+type graph struct {
+	Elements []*element
+	ByName   map[string]*element
+}
+
+// stringList is a flag.Value for repeated flags (--bst foo.bst --bst bar.bst).
+type stringList []string
+
+func (s *stringList) String() string     { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
+
 func main() {
 	log.SetFlags(0)
-	bstPath := flag.String("bst", "", "path to the .bst file")
+	var bstPaths stringList
+	flag.Var(&bstPaths, "bst", "path to a .bst file. Repeatable; pass once per element.")
 	outA := flag.String("out", "", "output directory for project A (the meta workspace whose genrules run convert-element)")
 	outB := flag.String("out-b", "", "optional: output directory for project B (the consumer workspace built against project A's outputs). When unset, only project A is rendered.")
 	convertBin := flag.String("convert-element", "", "path to the convert-element binary (will be referenced from project-A's tools/)")
-	readPathsFeedback := flag.String("read-paths-feedback", "", "optional: path to a prior run's read_paths.json. When set, narrows the source-tree staging to that set + CMakeLists.txt files; everything else becomes a zero_files stub.")
+	readPathsFeedback := flag.String("read-paths-feedback", "", "optional: path to a prior run's read_paths.json. When set, narrows kind:cmake elements' source-tree staging to that set + CMakeLists.txt files; everything else becomes a zero_files stub. Currently single-element only — multi-element feedback gets a per-element flag in a follow-up.")
 	flag.Parse()
 
-	if *bstPath == "" || *outA == "" || *convertBin == "" {
+	if len(bstPaths) == 0 || *outA == "" || *convertBin == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
 
-	elem, err := loadElement(*bstPath)
+	g, err := loadGraph(bstPaths)
 	if err != nil {
-		log.Fatalf("load element: %v", err)
+		log.Fatalf("load graph: %v", err)
 	}
-	if elem.Bst.Kind != "cmake" {
-		log.Fatalf("write-a (Phase 1) supports only kind:cmake; got %q", elem.Bst.Kind)
+	for _, elem := range g.Elements {
+		if _, ok := handlers[elem.Bst.Kind]; !ok {
+			log.Fatalf("element %q: write-a (Phase 2) supports kinds %s; got %q",
+				elem.Name, supportedKinds(), elem.Bst.Kind)
+		}
 	}
 
 	convertAbs, err := filepath.Abs(*convertBin)
@@ -124,22 +149,115 @@ func main() {
 		if err != nil {
 			log.Fatalf("load --read-paths-feedback: %v", err)
 		}
-		elem.ReadSet = feedback
-		elem.HasFeedback = true
+		// Phase 2 still applies feedback to all kind:cmake elements
+		// uniformly. Multi-element feedback (one read_paths.json per
+		// element) lands when the FDSDK fixture forces the issue; for
+		// now, single-element fixtures are the only consumers.
+		for _, elem := range g.Elements {
+			if elem.Bst.Kind == "cmake" {
+				elem.ReadSet = feedback
+				elem.HasFeedback = true
+			}
+		}
 	}
 
-	if err := writeProjectA(elem, *outA, convertAbs); err != nil {
+	if err := writeProjectA(g, *outA, convertAbs); err != nil {
 		log.Fatalf("write project A: %v", err)
 	}
-	fmt.Printf("wrote project A for element %q at %s (real=%d, zero=%d)\n",
-		elem.Name, *outA, len(elem.RealPaths), len(elem.ZeroPaths))
+	fmt.Printf("wrote project A at %s (%d elements: %s)\n",
+		*outA, len(g.Elements), summarizeKinds(g))
 
 	if *outB != "" {
-		if err := writeProjectB(elem, *outB); err != nil {
+		if err := writeProjectB(g, *outB); err != nil {
 			log.Fatalf("write project B: %v", err)
 		}
-		fmt.Printf("wrote project B for element %q at %s\n", elem.Name, *outB)
+		fmt.Printf("wrote project B at %s\n", *outB)
 	}
+}
+
+// loadGraph parses every .bst path in input order, then resolves
+// `depends:` references to produce a topologically-sorted element
+// list. Dep resolution matches by element name (filename basename
+// without .bst); unresolved deps are an error so typos surface early.
+func loadGraph(bstPaths []string) (*graph, error) {
+	g := &graph{ByName: map[string]*element{}}
+	for _, p := range bstPaths {
+		elem, err := loadElement(p)
+		if err != nil {
+			return nil, err
+		}
+		if existing, ok := g.ByName[elem.Name]; ok {
+			return nil, fmt.Errorf("element %q declared twice (%s and %s)",
+				elem.Name, existing.Name, p)
+		}
+		g.ByName[elem.Name] = elem
+		g.Elements = append(g.Elements, elem)
+	}
+	// Resolve depends:.
+	for _, elem := range g.Elements {
+		for _, depName := range elem.Bst.Depends {
+			// Tolerate `depends: [- foo.bst]` style by stripping the
+			// .bst suffix; also accept bare element names.
+			depName = strings.TrimSuffix(depName, ".bst")
+			dep, ok := g.ByName[depName]
+			if !ok {
+				return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
+			}
+			elem.Deps = append(elem.Deps, dep)
+		}
+	}
+	// Topological sort (Kahn's algorithm). Stable secondary order on
+	// element name so the rendered output is deterministic across
+	// invocations regardless of input order.
+	sorted, err := topoSort(g.Elements)
+	if err != nil {
+		return nil, err
+	}
+	g.Elements = sorted
+	return g, nil
+}
+
+func topoSort(elems []*element) ([]*element, error) {
+	indeg := map[*element]int{}
+	for _, e := range elems {
+		indeg[e] = 0
+	}
+	for _, e := range elems {
+		for _, d := range e.Deps {
+			indeg[e]++
+			_ = d // edges are dep -> e; e's in-degree counts incoming edges.
+		}
+	}
+	var ready []*element
+	for _, e := range elems {
+		if indeg[e] == 0 {
+			ready = append(ready, e)
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool { return ready[i].Name < ready[j].Name })
+
+	var out []*element
+	for len(ready) > 0 {
+		e := ready[0]
+		ready = ready[1:]
+		out = append(out, e)
+		// Decrement in-degree of any element that depends on e.
+		for _, other := range elems {
+			for _, d := range other.Deps {
+				if d == e {
+					indeg[other]--
+					if indeg[other] == 0 {
+						ready = append(ready, other)
+					}
+				}
+			}
+		}
+		sort.Slice(ready, func(i, j int) bool { return ready[i].Name < ready[j].Name })
+	}
+	if len(out) != len(elems) {
+		return nil, fmt.Errorf("dependency cycle among %d elements", len(elems))
+	}
+	return out, nil
 }
 
 // loadReadPaths parses a convert-element-emitted read_paths.json
@@ -167,28 +285,41 @@ func loadElement(bstPath string) (*element, error) {
 	}
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")
 
-	bstDir := filepath.Dir(bstPath)
-	if len(f.Sources) != 1 {
-		return nil, fmt.Errorf("write-a (Phase 1) requires exactly one source per element; got %d", len(f.Sources))
+	elem := &element{Name: name, Bst: &f}
+
+	// Source resolution is per-kind. cmake / manual / autotools /
+	// import / … pull a kind:local source tree from disk; stack /
+	// filter / compose don't have their own sources. Phase 2's
+	// supported kinds use kind:local where present.
+	if h, ok := handlers[f.Kind]; ok && h.NeedsSources() {
+		bstDir := filepath.Dir(bstPath)
+		if len(f.Sources) != 1 {
+			return nil, fmt.Errorf("%s: write-a (Phase 2) requires exactly one source per element of kind %q; got %d", bstPath, f.Kind, len(f.Sources))
+		}
+		src := f.Sources[0]
+		if src.Kind != "local" {
+			return nil, fmt.Errorf("%s: write-a (Phase 2) supports only kind:local sources; got %q", bstPath, src.Kind)
+		}
+		// kind:local path is interpreted relative to the .bst dir if it
+		// isn't already absolute (matches BuildStream semantics).
+		resolved := src.Path
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(bstDir, resolved)
+		}
+		abs, err := filepath.Abs(resolved)
+		if err != nil {
+			return nil, err
+		}
+		elem.AbsSourceDir = abs
 	}
-	src := f.Sources[0]
-	if src.Kind != "local" {
-		return nil, fmt.Errorf("write-a (Phase 1) supports only kind:local sources; got %q", src.Kind)
-	}
-	// kind:local path is interpreted relative to the .bst dir if it
-	// isn't already absolute (matches BuildStream semantics).
-	resolved := src.Path
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(bstDir, resolved)
-	}
-	abs, err := filepath.Abs(resolved)
-	if err != nil {
-		return nil, err
-	}
-	return &element{Name: name, Bst: &f, AbsSourceDir: abs}, nil
+	return elem, nil
 }
 
-func writeProjectA(elem *element, outDir, convertBin string) error {
+// writeProjectA renders the meta workspace project A: top-level files
+// (MODULE.bazel, BUILD.bazel, rules/, tools/) shared across every
+// element, then a per-element package under elements/<name>/ rendered
+// by the element's kind handler.
+func writeProjectA(g *graph, outDir, convertBin string) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
@@ -200,7 +331,7 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 	// here is just `module(...)` and bazel resolves nothing from
 	// the registry beyond its built-in implicit deps (platforms,
 	// rules_license, rules_java, etc., for toolchain bookkeeping).
-	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazel(elem)); err != nil {
+	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelA()); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"), "# project A root; per-element packages live under elements/<name>/.\n"); err != nil {
@@ -237,68 +368,28 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 		return err
 	}
 
-	// Per-element package: elements/<name>/{BUILD.bazel, sources/...}.
-	elemPkg := filepath.Join(outDir, "elements", elem.Name)
-	if err := os.MkdirAll(elemPkg, 0o755); err != nil {
-		return err
-	}
-
-	// Partition source paths into RealPaths (staged as files) and
-	// ZeroPaths (handed to the zero_files starlark rule).
-	if err := partitionSources(elem); err != nil {
-		return fmt.Errorf("partition sources: %w", err)
-	}
-
-	// Real sources are staged as files in project A's source tree;
-	// the glob in the per-element BUILD picks them up. Zero stubs are
-	// NOT staged on disk — they're produced at action time by the
-	// zero_files starlark rule and merged into $SRC_ROOT inside the
-	// genrule's cmd. That way, the rendered project-A tree only
-	// contains the files the user can actually inspect; the empty
-	// stubs are an action-graph detail Bazel handles.
-	srcStage := filepath.Join(elemPkg, "sources")
-	if err := os.RemoveAll(srcStage); err != nil {
-		return err
-	}
-	for _, rel := range elem.RealPaths {
-		if err := copyFile(filepath.Join(elem.AbsSourceDir, rel), filepath.Join(srcStage, rel)); err != nil {
-			return fmt.Errorf("stage real source %s: %w", rel, err)
+	for _, elem := range g.Elements {
+		h := handlers[elem.Bst.Kind]
+		elemPkg := filepath.Join(outDir, "elements", elem.Name)
+		if err := os.MkdirAll(elemPkg, 0o755); err != nil {
+			return err
 		}
-	}
-	if err := writeFile(filepath.Join(elemPkg, "BUILD.bazel"), elementBuild(elem)); err != nil {
-		return err
+		if err := h.RenderA(elem, elemPkg); err != nil {
+			return fmt.Errorf("render project-A package for %q (kind %q): %w", elem.Name, elem.Bst.Kind, err)
+		}
 	}
 
 	return nil
 }
 
 // writeProjectB renders the consumer workspace project B reads against
-// project A's outputs. Layout:
-//
-//	<outDir>/
-//	  MODULE.bazel             ← bazel_dep(rules_cc)
-//	  BUILD.bazel              ← top-level placeholder
-//	  elements/<name>/
-//	    BUILD.bazel            ← placeholder; the driver script
-//	                             overwrites this with project A's
-//	                             bazel-bin/elements/<name>/BUILD.bazel.out
-//	                             after the bazel-A pass.
-//	    <element source tree>  ← full set of the user's sources (no
-//	                             narrowing — project B compiles the
-//	                             converted cc_library, so it needs the
-//	                             real files.)
-//
-// Project B doesn't run convert-element; it consumes A's converted
-// BUILD.bazel.out, which references rules_cc (load("@rules_cc//cc:defs.bzl",
-// "cc_library")). The MODULE.bazel here pulls rules_cc from the
-// registry — first-time bzlmod runs need network access to bcr (or a
-// mirror via META_BAZEL_*_ARGS, see scripts/meta-hello.sh comment).
-func writeProjectB(elem *element, outDir string) error {
+// project A's outputs.
+func writeProjectB(g *graph, outDir string) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
 
-	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelB(elem)); err != nil {
+	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelB()); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"),
@@ -307,226 +398,73 @@ func writeProjectB(elem *element, outDir string) error {
 		return err
 	}
 
-	elemPkg := filepath.Join(outDir, "elements", elem.Name)
-	if err := os.MkdirAll(elemPkg, 0o755); err != nil {
-		return err
-	}
-
-	// Stage the FULL source tree (no narrowing). Project B's
-	// cc_library needs the real source bytes to compile, so this is
-	// the user's tree verbatim. Idempotent: blow away any prior
-	// staging first so re-runs reflect the current source state.
-	if err := os.RemoveAll(elemPkg); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(elemPkg, 0o755); err != nil {
-		return err
-	}
-	if err := copyTree(elem.AbsSourceDir, elemPkg); err != nil {
-		return fmt.Errorf("stage element sources for project B: %w", err)
-	}
-
-	// Placeholder BUILD; the driver script overwrites this after the
-	// bazel-A pass produces the converter's BUILD.bazel.out. Without
-	// the placeholder, Bazel would try to load() rules_cc against an
-	// empty package and fail with a confusing error before the stage
-	// step ran; the placeholder makes the staging-not-yet-run state
-	// explicit.
-	placeholder := fmt.Sprintf(`# Placeholder for cmd/write-a-rendered project B.
-# The driver script overwrites this file with project A's
-# bazel-bin/elements/%s/BUILD.bazel.out (the converter's output)
-# after the project-A bazel build succeeds. If this file is still
-# the placeholder when project B's bazel build runs, the staging
-# step was skipped.
-filegroup(name = "BUILD_NOT_YET_STAGED", srcs = [])
-`, elem.Name)
-	if err := writeFile(filepath.Join(elemPkg, "BUILD.bazel"), placeholder); err != nil {
-		return err
-	}
-	return nil
-}
-
-// moduleBazelB is project B's MODULE.bazel. Declares rules_cc so
-// project A's converted BUILD.bazel.out (which loads cc_library from
-// @rules_cc//cc:defs.bzl) resolves cleanly.
-func moduleBazelB(elem *element) string {
-	return fmt.Sprintf(`module(name = "meta_project_b_%s", version = "0.0.0")
-
-# rules_cc is what the cmake-converter emits load() lines against
-# (load("@rules_cc//cc:defs.bzl", "cc_library")). Pin a recent stable
-# release; this is downloaded from bcr.bazel.build the first time
-# project B's bazel build runs.
-bazel_dep(name = "rules_cc", version = "0.0.17")
-`, sanitizeModuleName(elem.Name))
-}
-
-// partitionSources walks the element's source tree and decides which
-// paths flow as real files vs zero stubs into project A.
-//
-//   - With no read-set feedback (HasFeedback==false), every file is
-//     real. First-run / no-narrowing shape.
-//   - With feedback, the real set = the feedback set, plus all
-//     CMakeLists.txt files in the source tree (cmake parses the entry
-//     CMakeLists before any trace event fires; auto-including them
-//     keeps cmake configure correct after narrowing).
-func partitionSources(elem *element) error {
-	universe := []string{}
-	err := filepath.Walk(elem.AbsSourceDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
+	for _, elem := range g.Elements {
+		h := handlers[elem.Bst.Kind]
+		elemPkg := filepath.Join(outDir, "elements", elem.Name)
+		if err := os.RemoveAll(elemPkg); err != nil {
 			return err
 		}
-		if info.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(elem.AbsSourceDir, p)
-		if err != nil {
+		if err := os.MkdirAll(elemPkg, 0o755); err != nil {
 			return err
 		}
-		universe = append(universe, filepath.ToSlash(rel))
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	sort.Strings(universe)
-
-	if !elem.HasFeedback {
-		elem.RealPaths = universe
-		elem.ZeroPaths = nil
-		return nil
-	}
-
-	real := map[string]struct{}{}
-	for _, p := range elem.ReadSet {
-		real[p] = struct{}{}
-	}
-	for _, p := range universe {
-		if filepath.Base(p) == "CMakeLists.txt" {
-			real[p] = struct{}{}
-		}
-	}
-
-	for _, p := range universe {
-		if _, ok := real[p]; ok {
-			elem.RealPaths = append(elem.RealPaths, p)
-		} else {
-			elem.ZeroPaths = append(elem.ZeroPaths, p)
+		if err := h.RenderB(elem, elemPkg); err != nil {
+			return fmt.Errorf("render project-B package for %q (kind %q): %w", elem.Name, elem.Bst.Kind, err)
 		}
 	}
 	return nil
 }
 
-func moduleBazel(elem *element) string {
-	return fmt.Sprintf(`module(name = "meta_project_a_%s", version = "0.0.0")
+func moduleBazelA() string {
+	return `module(name = "meta_project_a", version = "0.0.0")
 
 # Project A only runs genrules (one per element invoking the
 # per-kind translator). It declares no bazel_dep — bazel pulls in
 # its standard implicit modules (platforms / rules_license /
 # rules_java / etc.) for toolchain bookkeeping; nothing else is
 # needed.
-`, sanitizeModuleName(elem.Name))
+`
 }
 
-// sanitizeModuleName returns a bzlmod-module-name-safe string. Bzlmod
-// permits [A-Za-z0-9._-] but the sanitizer collapses to underscores
-// to keep the name's shape obvious in error messages.
-func sanitizeModuleName(s string) string {
-	return strings.NewReplacer("-", "_", ".", "_", "/", "_").Replace(s)
+// moduleBazelB declares rules_cc so project A's converted
+// BUILD.bazel.out (which loads cc_library from @rules_cc//cc:defs.bzl)
+// resolves cleanly in project B.
+func moduleBazelB() string {
+	return `module(name = "meta_project_b", version = "0.0.0")
+
+# rules_cc is what the cmake-converter emits load() lines against
+# (load("@rules_cc//cc:defs.bzl", "cc_library")). Pin a recent stable
+# release; this is downloaded from bcr.bazel.build the first time
+# project B's bazel build runs.
+bazel_dep(name = "rules_cc", version = "0.0.17")
+`
 }
 
-func elementBuild(elem *element) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, `# Generated by cmd/write-a. Do not edit by hand.
-
-package(default_visibility = ["//visibility:public"])
-`)
-
-	// Render the zero_files load + target only when feedback narrowed
-	// the source set. First-run / no-feedback elements have an empty
-	// ZeroPaths and don't need the rule at all — keeps the BUILD
-	// minimal in that common case.
-	if len(elem.ZeroPaths) > 0 {
-		fmt.Fprintf(&b, `
-load("//rules:zero_files.bzl", "zero_files")
-
-# Files cmake's directory walks see but don't read. Materialized
-# at action time as zero-length stubs whose merkle is the empty
-# SHA — the action input remains content-stable across edits to
-# any of these paths in the user's source tree.
-zero_files(
-    name = "%[1]s_zero_stubs",
-    paths = [
-`, elem.Name)
-		for _, p := range elem.ZeroPaths {
-			fmt.Fprintf(&b, "        %q,\n", "sources/"+p)
-		}
-		fmt.Fprintf(&b, `    ],
-)
-`)
+// summarizeKinds is for the startup log line: "kind:cmake×2, kind:stack×1".
+func summarizeKinds(g *graph) string {
+	counts := map[string]int{}
+	for _, e := range g.Elements {
+		counts[e.Bst.Kind]++
 	}
-
-	// Real sources flow through a glob; CMakeLists.txt is included
-	// like any other entry — the cmd's shadow merge handles every
-	// source uniformly via $(SRCS).
-	fmt.Fprintf(&b, `
-filegroup(
-    name = "%[1]s_real",
-    srcs = glob(["sources/**"]),
-)
-`, elem.Name)
-
-	// Compose the genrule's srcs: real-files filegroup + (when
-	// narrowed) the zero_stubs target. The shadow-merge cmd handles
-	// both sets uniformly: each entry contains "sources/" in its
-	// path; ${path##*sources/} strips down to the source-relative
-	// suffix used inside cmake's source root.
-	srcsList := fmt.Sprintf(`":%s_real"`, elem.Name)
-	if len(elem.ZeroPaths) > 0 {
-		srcsList += fmt.Sprintf(`, ":%s_zero_stubs"`, elem.Name)
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("kind:%s×%d", k, counts[k]))
+	}
+	return strings.Join(parts, ", ")
+}
 
-	fmt.Fprintf(&b, `
-genrule(
-    name = "%[1]s_converted",
-    srcs = [%[2]s],
-    outs = [
-        "BUILD.bazel.out",
-        "read_paths.json",
-        "cmake-config-bundle.tar",
-    ],
-    cmd = """
-        # Build a unified source-root by merging real srcs (workspace
-        # paths under elements/<name>/sources/) and zero stubs (under
-        # bazel-bin/.../sources/) into a fresh shadow dir. Both share
-        # a "sources/" segment in their path; strip up to the last one
-        # to recover the source-relative suffix.
-        SHADOW="$$(mktemp -d)"
-        for src in $(SRCS); do
-            rel="$${src##*sources/}"
-            mkdir -p "$$SHADOW/$$(dirname "$$rel")"
-            cp -L "$$src" "$$SHADOW/$$rel"
-        done
-        BUNDLE_DIR="$$(mktemp -d)"
-        $(location //tools:convert-element) \\
-            --source-root="$$SHADOW" \\
-            --out-build="$(location BUILD.bazel.out)" \\
-            --out-bundle-dir="$$BUNDLE_DIR" \\
-            --out-read-paths="$(location read_paths.json)"
-        tar -cf "$(location cmake-config-bundle.tar)" -C "$$BUNDLE_DIR" .
-    """,
-    tools = ["//tools:convert-element"],
-)
-
-# Typed exports project B consumes. Phase 1 emits the converter's
-# raw outputs; later phases expand cmake-config-bundle.tar into
-# the typed slices (cmake_config / pkg_config / headers / libs).
-filegroup(
-    name = "build_bazel",
-    srcs = [":%[1]s_converted"],
-    output_group = "BUILD.bazel.out",
-)
-`, elem.Name, srcsList)
-	return b.String()
+// supportedKinds is for the unknown-kind error message.
+func supportedKinds() string {
+	keys := make([]string, 0, len(handlers))
+	for k := range handlers {
+		keys = append(keys, "kind:"+k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
 
 // writeFile writes content to path, creating parent dirs.

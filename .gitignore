@@ -22,4 +22,7 @@ tmp/
 
 # Local checkouts of fetched sample projects (libdrm etc.)
 converter/testdata/sample-projects/libdrm/
-write-a
+
+# write-a binary built at the repo root by `go build ./cmd/write-a`.
+# Anchored so cmd/write-a/ directory contents aren't swept up.
+/write-a
