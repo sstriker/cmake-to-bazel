@@ -1,7 +1,7 @@
 #!/bin/sh
 # spike-hello.sh — end-to-end smoke for the meta-project hello-world spike.
 #
-# Renders project A via cmd/write-a-spike, then drives bazel against
+# Renders project A via cmd/write-a, then drives bazel against
 # it to invoke convert-element through the per-element genrule. If
 # bazel isn't on PATH, the bazel-build phase self-skips and the
 # script exits 0 — the rendering phase alone is still a useful
@@ -10,7 +10,7 @@
 # This is the spike validation, not a permanent test surface. It
 # replaces itself with a Go-based e2e test under
 # orchestrator/internal/... once Phase 1's production writer-of-A
-# lands and the cmd/write-a-spike/ scaffolding gets retired.
+# lands and the cmd/write-a/ scaffolding gets retired.
 
 set -eu
 
@@ -23,12 +23,12 @@ mkdir -p "$bin_dir"
 # Build prerequisites with the Makefile's pinned flags so cache lookups
 # match `make converter` runs.
 make converter >/dev/null
-CGO_ENABLED=0 go build -o "$bin_dir/write-a-spike" ./cmd/write-a-spike
+CGO_ENABLED=0 go build -o "$bin_dir/write-a" ./cmd/write-a
 
 spike_dir="$(mktemp -d)"
 trap "rm -rf '$spike_dir'" EXIT
 
-"$bin_dir/write-a-spike" \
+"$bin_dir/write-a" \
     --bst testdata/meta-project/hello-world.bst \
     --out "$spike_dir" \
     --convert-element "$bin_dir/convert-element"
@@ -117,7 +117,7 @@ sha_run1=$(sha_of "$build_out")
 echo "spike-hello: render OK; first build sha=$sha_run1"
 
 # === Cache-stability scenarios A and A' ===
-# Re-run write-a-spike with the previous build's read_paths.json as
+# Re-run write-a with the previous build's read_paths.json as
 # feedback so the source tree gets narrowed to its real read set
 # plus auto-included CMakeLists.txt's. Then exercise:
 #   - Scenario A:  edit hello.c (NOT in the read set) — convert-element
@@ -143,7 +143,7 @@ EOF
 # Re-render project A in narrowed mode (feedback set).
 rm -rf "$spike_dir"/elements "$spike_dir"/MODULE.bazel \
        "$spike_dir"/BUILD.bazel "$spike_dir"/rules "$spike_dir"/tools
-"$bin_dir/write-a-spike" \
+"$bin_dir/write-a" \
     --bst "$edit_bst" \
     --out "$spike_dir" \
     --convert-element "$bin_dir/convert-element" \
@@ -161,7 +161,7 @@ echo "spike-hello: narrowed-mode build sha matches first run"
 
 # Scenario A: edit a zero-stubbed file.
 echo "// scenario-A test edit" >> "$edit_src/hello.c"
-"$bin_dir/write-a-spike" \
+"$bin_dir/write-a" \
     --bst "$edit_bst" --out "$spike_dir" \
     --convert-element "$bin_dir/convert-element" \
     --read-paths-feedback "$feedback" >/dev/null
@@ -182,7 +182,7 @@ fi
 
 # Scenario A': edit CMakeLists.txt (in the read set).
 echo "# scenario-A' comment $(date +%s)" >> "$edit_src/CMakeLists.txt"
-"$bin_dir/write-a-spike" \
+"$bin_dir/write-a" \
     --bst "$edit_bst" --out "$spike_dir" \
     --convert-element "$bin_dir/convert-element" \
     --read-paths-feedback "$feedback" >/dev/null

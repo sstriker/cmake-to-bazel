@@ -1,7 +1,8 @@
-// Smoke tests for the write-a-spike binary. These don't run Bazel —
+// Smoke tests for the cmd/write-a binary. These don't run Bazel —
 // they verify the rendered project-A tree has the expected structure
-// and key content. End-to-end Bazel-build validation lives in the
-// `make spike-hello` target (gated on Bazel availability).
+// and key content. End-to-end Bazel-build validation through both
+// project A and project B lives in the `make e2e-meta-hello` target
+// (gated on Bazel availability).
 
 package main
 
@@ -19,7 +20,7 @@ sources:
   path: src
 `
 
-func TestSpikeWriter_HelloWorldShape(t *testing.T) {
+func TestWriter_HelloWorldShape(t *testing.T) {
 	tmp := t.TempDir()
 
 	// Stage a minimal cmake source tree.
@@ -96,7 +97,7 @@ func TestSpikeWriter_HelloWorldShape(t *testing.T) {
 	}
 }
 
-func TestSpikeWriter_RejectsNonCmakeKind(t *testing.T) {
+func TestWriter_RejectsNonCmakeKind(t *testing.T) {
 	tmp := t.TempDir()
 	bstPath := filepath.Join(tmp, "x.bst")
 	if err := os.WriteFile(bstPath, []byte("kind: meson\nsources:\n- kind: local\n  path: .\n"), 0o644); err != nil {
@@ -115,7 +116,7 @@ func TestSpikeWriter_RejectsNonCmakeKind(t *testing.T) {
 	// useful error message when a future caller adds a new kind.
 }
 
-func TestSpikeWriter_RejectsNonLocalSource(t *testing.T) {
+func TestWriter_RejectsNonLocalSource(t *testing.T) {
 	tmp := t.TempDir()
 	bstPath := filepath.Join(tmp, "x.bst")
 	if err := os.WriteFile(bstPath, []byte("kind: cmake\nsources:\n- kind: tar\n  url: foo\n"), 0o644); err != nil {
