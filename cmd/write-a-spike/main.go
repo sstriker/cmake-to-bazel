@@ -181,14 +181,14 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 		return err
 	}
 
-	// Top-level files. The spike uses WORKSPACE.bazel rather than
-	// bzlmod's MODULE.bazel because the meta workspace has no
-	// external deps (only genrules) and WORKSPACE keeps the spike
-	// compatible with older bazel versions in dev environments.
-	// Production wiring switches to MODULE.bazel + a real module
-	// extension that pulls per-kind translator binaries from a
-	// proper module.
-	if err := writeFile(filepath.Join(outDir, "WORKSPACE.bazel"), workspaceBazel(elem)); err != nil {
+	// Top-level files. Project A targets bazel >= 7 (bzlmod).
+	// WORKSPACE.bazel was removed in bazel 8; MODULE.bazel is the
+	// only module-declaration shape going forward. The meta workspace
+	// has no external deps — only genrules — so the MODULE.bazel
+	// here is just `module(...)` and bazel resolves nothing from
+	// the registry beyond its built-in implicit deps (platforms,
+	// rules_license, rules_java, etc., for toolchain bookkeeping).
+	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazel(elem)); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"), "# project A root; per-element packages live under elements/<name>/.\n"); err != nil {
@@ -274,12 +274,12 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 // partitionSources walks the element's source tree and decides which
 // paths flow as real files vs zero stubs into project A.
 //
-// - With no read-set feedback (HasFeedback==false), every file is
-//   real. First-run / no-narrowing shape.
-// - With feedback, the real set = the feedback set, plus all
-//   CMakeLists.txt files in the source tree (cmake parses the entry
-//   CMakeLists before any trace event fires; auto-including them
-//   keeps cmake configure correct after narrowing).
+//   - With no read-set feedback (HasFeedback==false), every file is
+//     real. First-run / no-narrowing shape.
+//   - With feedback, the real set = the feedback set, plus all
+//     CMakeLists.txt files in the source tree (cmake parses the entry
+//     CMakeLists before any trace event fires; auto-including them
+//     keeps cmake configure correct after narrowing).
 func partitionSources(elem *element) error {
 	universe := []string{}
 	err := filepath.Walk(elem.AbsSourceDir, func(p string, info os.FileInfo, err error) error {
@@ -327,19 +327,21 @@ func partitionSources(elem *element) error {
 	return nil
 }
 
-func workspaceBazel(elem *element) string {
-	return fmt.Sprintf(`workspace(name = "meta_project_spike_%s")
+func moduleBazel(elem *element) string {
+	return fmt.Sprintf(`module(name = "meta_project_spike_%s", version = "0.0.0")
 
 # Project A only runs genrules (one per element invoking the
-# per-kind translator). It needs no rules_cc — that lives in
-# project B, which builds the converted output.
-`, sanitizeForWorkspace(elem.Name))
+# per-kind translator). It declares no bazel_dep — bazel pulls in
+# its standard implicit modules (platforms / rules_license /
+# rules_java / etc.) for toolchain bookkeeping; nothing else is
+# needed.
+`, sanitizeModuleName(elem.Name))
 }
 
-// sanitizeForWorkspace returns a bazel-workspace-name-safe string:
-// only [A-Za-z0-9_], with hyphens replaced by underscores. Bazel
-// rejects workspace names containing '-'.
-func sanitizeForWorkspace(s string) string {
+// sanitizeModuleName returns a bzlmod-module-name-safe string. Bzlmod
+// permits [A-Za-z0-9._-] but the sanitizer collapses to underscores
+// to keep the name's shape obvious in error messages.
+func sanitizeModuleName(s string) string {
 	return strings.NewReplacer("-", "_", ".", "_", "/", "_").Replace(s)
 }
 

@@ -34,7 +34,7 @@ trap "rm -rf '$spike_dir'" EXIT
     --convert-element "$bin_dir/convert-element"
 
 # Render-phase checks. Always run; don't gate on bazel.
-for f in WORKSPACE.bazel BUILD.bazel \
+for f in MODULE.bazel BUILD.bazel \
         rules/zero_files.bzl rules/BUILD.bazel \
         tools/convert-element tools/BUILD.bazel \
         elements/hello-world/BUILD.bazel \
@@ -45,7 +45,10 @@ for f in WORKSPACE.bazel BUILD.bazel \
     fi
 done
 
-# Bazel phase. Skip cleanly when bazel isn't installed.
+# Bazel phase. The spike requires bazel >= 7 (bzlmod). Older bazel
+# versions don't support MODULE.bazel; if all that's installed is
+# bazel-bootstrap-4 or similar the bazel phase self-skips and the
+# rendering check is the only assertion.
 if command -v bazel >/dev/null; then
     BZL=bazel
 elif command -v bazelisk >/dev/null; then
@@ -54,18 +57,51 @@ else
     echo "spike-hello: render OK; bazel not on PATH, skipping build phase"
     exit 0
 fi
+bazel_major=$("$BZL" --version 2>&1 | head -1 | awk '{print $2}' | cut -d. -f1)
+case "$bazel_major" in
+    [0-9]*) ;;
+    *) bazel_major=0 ;;
+esac
+if [ "$bazel_major" -lt 7 ]; then
+    echo "spike-hello: render OK; bazel $($BZL --version | head -1) is < 7 (no bzlmod), skipping build phase"
+    exit 0
+fi
+
+# SPIKE_BAZEL_STARTUP_ARGS / SPIKE_BAZEL_BUILD_ARGS let sandboxed dev
+# environments inject overrides for bcr.bazel.build access (proxy
+# whitelists, JVM truststore paths, alternative registries). Empty
+# by default; on a normal dev machine bazel reaches bcr fine and
+# needs nothing extra.
+#
+# Bazel splits flags into startup (between `bazel` and the
+# subcommand) and command-time (after the subcommand) — they're
+# rejected in the wrong position, so the spike accepts both
+# separately. Example for dev containers without bcr egress but
+# with github:
+#
+#   export SPIKE_BAZEL_STARTUP_ARGS="\
+#     --host_jvm_args=-Djavax.net.ssl.trustStore=/etc/ssl/certs/java/cacerts \
+#     --host_jvm_args=-Djavax.net.ssl.trustStorePassword=changeit"
+#   export SPIKE_BAZEL_BUILD_ARGS="\
+#     --registry=https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main"
+SPIKE_BAZEL_STARTUP_ARGS=${SPIKE_BAZEL_STARTUP_ARGS:-}
+SPIKE_BAZEL_BUILD_ARGS=${SPIKE_BAZEL_BUILD_ARGS:-}
 
 bzl_cache="$spike_dir/.bazel"
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
 
-# WORKSPACE.bazel keeps the spike compatible with bazel < 6 (no
-# bzlmod). Newer bazel versions read it directly without the
-# --enable_bzlmod flag (which bazel 4 doesn't recognize).
-run_bazel() {
-    (cd "$spike_dir" && "$BZL" --output_user_root="$bzl_cache" "$@")
+# Run a bazel build subcommand. Startup args (SPIKE_BAZEL_STARTUP_ARGS)
+# go between `bazel` and the subcommand; build args
+# (SPIKE_BAZEL_BUILD_ARGS) go after, where bazel accepts --registry
+# and similar.
+run_bazel_build() {
+    # shellcheck disable=SC2086 # SPIKE_BAZEL_*_ARGS is intentionally word-split.
+    (cd "$spike_dir" && "$BZL" --output_user_root="$bzl_cache" \
+        $SPIKE_BAZEL_STARTUP_ARGS \
+        build "$@" $SPIKE_BAZEL_BUILD_ARGS)
 }
 
-run_bazel build //elements/hello-world:hello-world_converted 2>&1 | tail -20
+run_bazel_build //elements/hello-world:hello-world_converted 2>&1 | tail -20
 
 build_out="$spike_dir/bazel-bin/elements/hello-world/BUILD.bazel.out"
 if [ ! -f "$build_out" ]; then
@@ -105,14 +141,14 @@ sources:
 EOF
 
 # Re-render project A in narrowed mode (feedback set).
-rm -rf "$spike_dir"/elements "$spike_dir"/MODULE.bazel "$spike_dir"/WORKSPACE.bazel \
+rm -rf "$spike_dir"/elements "$spike_dir"/MODULE.bazel \
        "$spike_dir"/BUILD.bazel "$spike_dir"/rules "$spike_dir"/tools
 "$bin_dir/write-a-spike" \
     --bst "$edit_bst" \
     --out "$spike_dir" \
     --convert-element "$bin_dir/convert-element" \
     --read-paths-feedback "$feedback"
-run_bazel build //elements/hello:hello_converted 2>&1 | tail -3
+run_bazel_build //elements/hello:hello_converted 2>&1 | tail -3
 narrow_out="$spike_dir/bazel-bin/elements/hello/BUILD.bazel.out"
 sha_run2=$(sha_of "$narrow_out")
 if [ "$sha_run1" != "$sha_run2" ]; then
@@ -129,7 +165,7 @@ echo "// scenario-A test edit" >> "$edit_src/hello.c"
     --bst "$edit_bst" --out "$spike_dir" \
     --convert-element "$bin_dir/convert-element" \
     --read-paths-feedback "$feedback" >/dev/null
-scen_a_log=$(run_bazel build //elements/hello:hello_converted 2>&1 | tail -3)
+scen_a_log=$(run_bazel_build //elements/hello:hello_converted 2>&1 | tail -3)
 sha_scen_a=$(sha_of "$narrow_out")
 if [ "$sha_scen_a" != "$sha_run2" ]; then
     echo "spike-hello: Scenario A FAILED — BUILD.bazel.out sha shifted after hello.c edit" >&2
@@ -150,7 +186,7 @@ echo "# scenario-A' comment $(date +%s)" >> "$edit_src/CMakeLists.txt"
     --bst "$edit_bst" --out "$spike_dir" \
     --convert-element "$bin_dir/convert-element" \
     --read-paths-feedback "$feedback" >/dev/null
-run_bazel build //elements/hello:hello_converted 2>&1 | tail -3
+run_bazel_build //elements/hello:hello_converted 2>&1 | tail -3
 sha_scen_aprime=$(sha_of "$narrow_out")
 if [ "$sha_scen_aprime" != "$sha_run2" ]; then
     echo "spike-hello: Scenario A' FAILED — BUILD.bazel.out sha shifted after comment edit" >&2
