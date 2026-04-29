@@ -1,19 +1,46 @@
-// Package translate wraps per-element-kind conversion behind a single
-// interface so the orchestrator can dispatch by kind instead of
-// hard-coding the cmake path. Each kind ships a Translator
-// implementation in a sibling package (e.g. `translate/cmake`) and
-// registers it with a Registry the orchestrator builds at startup.
+// Package translate defines the contract per-kind translators implement
+// when converting one bst element of a particular kind to BUILD.bazel +
+// cmake-config bundle.
 //
-// Phase 1 (this package's introduction) refactors the existing cmake
-// pipeline behind the interface with no behavior change. Subsequent
-// phases add per-kind translators (stack/filter, autotools, meson,
-// manual, …) per the whole-project plan.
+// The host of these translators changed: the original draft plan ran
+// them inside a Go orchestrator's processElement loop, dispatching by
+// kind via a Registry built at startup. The current plan
+// (docs/whole-project-plan.md, Bazel-as-orchestrator / two-pass
+// meta-project) moves the host to **Bazel itself**: project A's
+// per-element genrule invokes the per-kind translator as a binary
+// (typically `cmd/convert-element` for kind:cmake, sibling binaries
+// for kind:meson and friends), with Bazel's action graph + cache
+// taking over what the in-process orchestrator's executor + cache used
+// to do. The Translate signature in this package is what each
+// translator binary's main() does internally for its single element.
 //
-// The interface is REAPI-shaped because the cmake translator dispatches
-// to a real `convert-element` binary via the orchestrator's executor.
-// Trivial kinds (stack, filter, import) that don't need a separate
-// process do their work in-process — same Translate signature, no
-// executor calls inside.
+// What this package still provides:
+//
+//   - Inputs / Outputs / Failure / Result: the per-element struct
+//     types every translator binary's main() reads from flags + writes
+//     to disk. Stable shape across kinds keeps the writer-of-A's
+//     starlark templates uniform.
+//   - Translator interface: `Translate(ctx, Inputs) (*Result, error)`.
+//     Each translator binary wires its main() onto a concrete
+//     implementation; in-process unit tests use the same interface
+//     against fakes.
+//   - Registry: kind -> Translator dispatch. Now used by (a) tests
+//     that drive multiple kinds in one process, and (b) a possible
+//     multi-kind `convert-element` binary that flag-dispatches via
+//     `--kind=<X>` to keep CI's tool-image footprint small. The
+//     production project-A genrule references a specific binary; the
+//     Registry is not its primary user.
+//
+// What this package no longer does: gate orchestrator-side scheduling,
+// action-cache lookup, REAPI executor abstraction, regression diff,
+// or cross-element fan-out. Those responsibilities belong to Bazel in
+// the meta-project shape.
+//
+// Trivial kinds (stack, filter, import, compose, flatpak_image, …)
+// don't need a translator binary at all — the writer-of-A renders
+// them as pure starlark filegroup composition. They never reach this
+// interface; only kinds that produce a per-element BUILD.bazel from
+// a build action do.
 package translate
 
 import (
