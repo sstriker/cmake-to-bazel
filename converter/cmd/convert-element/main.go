@@ -20,6 +20,7 @@ import (
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cli"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cmakerun"
+	"github.com/sstriker/cmake-to-bazel/converter/internal/ctest"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/bazel"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/emit/cmakecfg"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/failure"
@@ -144,10 +145,24 @@ func run(a cli.Args) error {
 			return err
 		}
 	}
+
+	// CTest classification: parse CTestTestfile.cmake out of the
+	// build dir cmake just configured. The --reply-dir offline path
+	// has no live build dir, so we skip — fixture-based runs stay
+	// pre-CTest behavior (every EXECUTABLE → cc_binary).
+	var testRegistry *ctest.Registry
+	if hostBuildDir != "" {
+		testRegistry, err = ctest.Parse(hostBuildDir)
+		if err != nil {
+			return failure.New(failure.CTestParseFailed, "%v", err)
+		}
+	}
+
 	pkg, err := lower.ToIR(r, g, lower.Options{
 		HostSourceRoot: a.SourceRoot,
 		HostPrefixDir:  prefixAbs,
 		Imports:        imports,
+		CTest:          testRegistry,
 	})
 	if err != nil {
 		return err

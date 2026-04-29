@@ -11,7 +11,9 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strings"
 	"text/template"
+	"time"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ir"
 )
@@ -34,6 +36,7 @@ var ccRuleLoads = map[ir.Kind]string{
 	ir.KindCCBinary:    "cc_binary",
 	ir.KindCCImport:    "cc_import",
 	ir.KindCCInterface: "cc_library",
+	ir.KindCCTest:      "cc_test",
 }
 
 // emitLoad writes a single `load("@rules_cc//cc:defs.bzl", ...)` line
@@ -86,6 +89,7 @@ func Emit(pkg *ir.Package) ([]byte, error) {
 
 var ccRuleTmpl = template.Must(template.New("rule").Funcs(template.FuncMap{
 	"strList": strList,
+	"strDict": strDict,
 }).Parse(`{{.RuleKind}}(
     name = "{{.Name}}",
 {{- if .Srcs}}
@@ -108,6 +112,18 @@ var ccRuleTmpl = template.Must(template.New("rule").Funcs(template.FuncMap{
 {{- end}}
 {{- if .Deps}}
     deps = {{strList .Deps}},
+{{- end}}
+{{- if .Data}}
+    data = {{strList .Data}},
+{{- end}}
+{{- if .Args}}
+    args = {{strList .Args}},
+{{- end}}
+{{- if .Env}}
+    env = {{strDict .Env}},
+{{- end}}
+{{- if .Timeout}}
+    timeout = "{{.Timeout}}",
 {{- end}}
 {{- if .Linkstatic}}
     linkstatic = True,
@@ -143,7 +159,8 @@ var genruleTmpl = template.Must(template.New("genrule").Funcs(template.FuncMap{
 `))
 
 // ccView projects ir.Target into the cc-rule template. List attributes are
-// pre-sorted; the emitter doesn't make policy decisions.
+// pre-sorted; the emitter doesn't make policy decisions. Test-only fields
+// (Args, Env, Timeout, Data) stay zero except when RuleKind == "cc_test".
 type ccView struct {
 	RuleKind   string
 	Name       string
@@ -158,6 +175,12 @@ type ccView struct {
 	Alwayslink bool
 	Tags       []string
 	Visibility []string
+
+	// cc_test-only.
+	Args    []string
+	Env     map[string]string
+	Timeout string // pre-formatted Bazel duration ("30s", "5m"), empty = unset
+	Data    []string
 }
 
 type genruleView struct {
@@ -188,13 +211,43 @@ func emitCCTarget(w *bytes.Buffer, t ir.Target) error {
 	// cc_binary doesn't accept `hdrs` (Bazel 9 errors out where older
 	// versions silently ignored). Fold any header into srcs so the
 	// translation unit still sees them, even though that's the
-	// rules_cc convention for binaries.
-	if t.Kind == ir.KindCCBinary && len(v.Hdrs) > 0 {
+	// rules_cc convention for binaries. cc_test inherits cc_binary's
+	// stricture, so apply the same fold there.
+	if (t.Kind == ir.KindCCBinary || t.Kind == ir.KindCCTest) && len(v.Hdrs) > 0 {
 		v.Srcs = append(append([]string{}, v.Srcs...), v.Hdrs...)
 		sort.Strings(v.Srcs)
 		v.Hdrs = nil
 	}
+	if t.Kind == ir.KindCCTest {
+		v.Args = append([]string(nil), t.TestArgs...) // preserve order; arg order matters
+		v.Data = sortedCopy(t.TestData)
+		if t.TestTimeout > 0 {
+			v.Timeout = formatBazelDuration(t.TestTimeout)
+		}
+		if len(t.TestEnv) > 0 {
+			v.Env = make(map[string]string, len(t.TestEnv))
+			for _, kv := range t.TestEnv {
+				if i := strings.IndexByte(kv, '='); i >= 0 {
+					v.Env[kv[:i]] = kv[i+1:]
+				}
+			}
+		}
+	}
 	return ccRuleTmpl.Execute(w, v)
+}
+
+// formatBazelDuration renders a Go time.Duration as a Bazel-accepted
+// timeout string. Bazel accepts "Ns", "Nm", "Nh"; we round to the
+// largest unit that doesn't lose precision.
+func formatBazelDuration(d time.Duration) string {
+	switch {
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	default:
+		return fmt.Sprintf("%ds", d/time.Second)
+	}
 }
 
 func emitGenrule(w *bytes.Buffer, t ir.Target) error {
@@ -216,6 +269,38 @@ func sortedCopy(in []string) []string {
 	out := append([]string(nil), in...)
 	sort.Strings(out)
 	return out
+}
+
+// strDict renders a Go map[string]string as a Starlark dict literal,
+// keys sorted for byte-stable output. Empty maps render as "{}".
+func strDict(m map[string]string) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var single bytes.Buffer
+	single.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			single.WriteString(", ")
+		}
+		fmt.Fprintf(&single, "%q: %q", k, m[k])
+	}
+	single.WriteByte('}')
+	if single.Len() <= 60 {
+		return single.String()
+	}
+	var multi bytes.Buffer
+	multi.WriteString("{\n")
+	for _, k := range keys {
+		fmt.Fprintf(&multi, "        %q: %q,\n", k, m[k])
+	}
+	multi.WriteString("    }")
+	return multi.String()
 }
 
 // strList renders a Go []string as a Starlark list literal:

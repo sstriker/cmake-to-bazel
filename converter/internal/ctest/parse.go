@@ -1,0 +1,290 @@
+// Package ctest parses CTestTestfile.cmake (the file `cmake configure`
+// writes into the build directory next to build.ninja) and surfaces
+// each `add_test()` registration plus its `set_tests_properties()`
+// metadata. The parsed Registry is what the lower stage consults to
+// classify EXECUTABLE targets as cc_test instead of cc_binary.
+//
+// The CMake File API does NOT expose test data — codemodel-v2 lists
+// targets without the add_test() side. CTestTestfile.cmake is the
+// only place we can recover it from, and only after `cmake configure`
+// has run.
+package ctest
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Test is one add_test() registration after set_tests_properties()
+// merges. Multiple Test entries may share the same Target when a single
+// executable is registered for several test cases (one per add_test).
+type Test struct {
+	// Name is the add_test NAME — globally unique within the project.
+	Name string
+	// Target is the executable target name (basename of the resolved
+	// COMMAND path, with any platform suffix like ".exe" stripped).
+	Target string
+	// Args are the positional arguments after COMMAND. Empty for
+	// gtest_discover_tests placeholders since the binary itself runs
+	// gtest's case loop at test time.
+	Args []string
+	// Timeout is set_tests_properties TIMEOUT, or 0 if unset.
+	Timeout time.Duration
+	// Env is set_tests_properties ENVIRONMENT, split on `;`.
+	Env []string
+	// Tags carries LABELS, plus "manual" if DISABLED is truthy and
+	// "exclusive" if RUN_SERIAL is truthy. gtest_discover_tests
+	// placeholders also get a "gtest_discover_tests" tag for
+	// operator visibility.
+	Tags []string
+	// Data carries REQUIRED_FILES (split on `;`).
+	Data []string
+}
+
+// Registry indexes parsed Tests by executable target name, preserving
+// registration order both within and across CTestTestfile.cmake files.
+type Registry struct {
+	tests    []Test
+	byTarget map[string][]int
+	byName   map[string]int // for set_tests_properties enrichment during parse
+}
+
+// Lookup returns every test registered against the given executable
+// target name. Returns nil when the target has no test registrations.
+func (r *Registry) Lookup(target string) []Test {
+	if r == nil {
+		return nil
+	}
+	idx := r.byTarget[target]
+	if len(idx) == 0 {
+		return nil
+	}
+	out := make([]Test, len(idx))
+	for i, n := range idx {
+		out[i] = r.tests[n]
+	}
+	return out
+}
+
+// All returns every parsed Test in registration order. Used by the
+// lower stage to surface non-binary tests as warnings (registered but
+// no matching EXECUTABLE).
+func (r *Registry) All() []Test {
+	if r == nil {
+		return nil
+	}
+	out := make([]Test, len(r.tests))
+	copy(out, r.tests)
+	return out
+}
+
+// Parse walks <buildDir>/CTestTestfile.cmake and recursively follows
+// subdirs(...) entries. A missing top-level file is not an error —
+// projects that don't enable_testing() simply have no Registry —
+// it returns an empty Registry.
+func Parse(buildDir string) (*Registry, error) {
+	r := &Registry{
+		byTarget: map[string][]int{},
+		byName:   map[string]int{},
+	}
+	top := filepath.Join(buildDir, "CTestTestfile.cmake")
+	if _, err := os.Stat(top); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return r, nil
+		}
+		return nil, err
+	}
+	if err := r.parseFile(top); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (r *Registry) parseFile(path string) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("ctest: read %s: %w", path, err)
+	}
+	calls, err := scanCalls(body)
+	if err != nil {
+		return fmt.Errorf("ctest: parse %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	for _, c := range calls {
+		switch c.name {
+		case "add_test":
+			r.handleAddTest(c.args)
+		case "set_tests_properties":
+			r.handleSetProperties(c.args)
+		case "subdirs":
+			if err := r.handleSubdirs(dir, c.args); err != nil {
+				return err
+			}
+		case "include":
+			r.handleInclude(c.args)
+		}
+	}
+	return nil
+}
+
+func (r *Registry) handleAddTest(args []string) {
+	if len(args) < 2 {
+		return
+	}
+	name := args[0]
+	cmd := args[1]
+	target := strings.TrimSuffix(filepath.Base(cmd), ".exe")
+	t := Test{
+		Name:   name,
+		Target: target,
+		Args:   append([]string(nil), args[2:]...),
+	}
+	r.byName[name] = len(r.tests)
+	r.byTarget[target] = append(r.byTarget[target], len(r.tests))
+	r.tests = append(r.tests, t)
+}
+
+func (r *Registry) handleSetProperties(args []string) {
+	// set_tests_properties(<name> [<name> ...] PROPERTIES <key> <value> ...)
+	// In CTestTestfile.cmake there's always exactly one name; spec
+	// allows multiple but ctest never emits that shape.
+	if len(args) < 4 {
+		return
+	}
+	// Find PROPERTIES sentinel.
+	pi := -1
+	for i, a := range args {
+		if a == "PROPERTIES" {
+			pi = i
+			break
+		}
+	}
+	if pi < 0 {
+		return
+	}
+	names := args[:pi]
+	kvs := args[pi+1:]
+	if len(kvs)%2 != 0 {
+		return
+	}
+	for _, name := range names {
+		idx, ok := r.byName[name]
+		if !ok {
+			continue
+		}
+		t := &r.tests[idx]
+		for i := 0; i < len(kvs); i += 2 {
+			applyProperty(t, kvs[i], kvs[i+1])
+		}
+		// Re-index by-target since handleAddTest captured the post-
+		// strip name; properties don't change Target. The byTarget
+		// slice already points at this index.
+	}
+}
+
+func applyProperty(t *Test, key, value string) {
+	switch key {
+	case "TIMEOUT":
+		secs, err := strconv.ParseFloat(value, 64)
+		if err == nil && secs > 0 {
+			t.Timeout = time.Duration(secs * float64(time.Second))
+		}
+	case "ENVIRONMENT":
+		t.Env = appendSplitNonEmpty(t.Env, value, ';')
+	case "LABELS":
+		t.Tags = appendSplitNonEmpty(t.Tags, value, ';')
+	case "REQUIRED_FILES":
+		t.Data = appendSplitNonEmpty(t.Data, value, ';')
+	case "DISABLED":
+		if isCMakeTruthy(value) {
+			t.Tags = appendUniq(t.Tags, "manual")
+		}
+	case "RUN_SERIAL":
+		if isCMakeTruthy(value) {
+			t.Tags = appendUniq(t.Tags, "exclusive")
+		}
+	}
+}
+
+func (r *Registry) handleSubdirs(dir string, args []string) error {
+	for _, sub := range args {
+		next := filepath.Join(dir, sub, "CTestTestfile.cmake")
+		if _, err := os.Stat(next); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if err := r.parseFile(next); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Registry) handleInclude(args []string) {
+	// gtest_discover_tests writes
+	//   include("<binary>_tests-NotInstalled.cmake" OPTIONAL)
+	// into CTestTestfile.cmake at configure time. The included file
+	// only exists post-build, so we don't read it; we synthesize one
+	// Test for the binary so cc_test gets emitted.
+	if len(args) == 0 {
+		return
+	}
+	const suffix = "_tests-NotInstalled.cmake"
+	first := args[0]
+	base := filepath.Base(first)
+	if !strings.HasSuffix(base, suffix) {
+		return
+	}
+	binary := strings.TrimSuffix(base, suffix)
+	if binary == "" {
+		return
+	}
+	if _, dup := r.byName[binary]; dup {
+		return
+	}
+	t := Test{
+		Name:   binary,
+		Target: binary,
+		Tags:   []string{"gtest_discover_tests"},
+	}
+	r.byName[binary] = len(r.tests)
+	r.byTarget[binary] = append(r.byTarget[binary], len(r.tests))
+	r.tests = append(r.tests, t)
+}
+
+// isCMakeTruthy mirrors CMake's quirky truthy set: ON, TRUE, Y, YES,
+// non-zero numbers. Case-insensitive.
+func isCMakeTruthy(s string) bool {
+	switch strings.ToUpper(s) {
+	case "1", "ON", "TRUE", "Y", "YES":
+		return true
+	}
+	return false
+}
+
+func appendSplitNonEmpty(dst []string, s string, sep byte) []string {
+	for _, p := range strings.Split(s, string(sep)) {
+		if p == "" {
+			continue
+		}
+		dst = append(dst, p)
+	}
+	return dst
+}
+
+func appendUniq(dst []string, s string) []string {
+	for _, e := range dst {
+		if e == s {
+			return dst
+		}
+	}
+	return append(dst, s)
+}

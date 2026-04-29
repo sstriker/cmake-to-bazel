@@ -22,6 +22,7 @@ const (
 	FileAPIMissing                 Code = "fileapi-missing"
 	FileAPIMalformed               Code = "fileapi-malformed"
 	NinjaParseFailed               Code = "ninja-parse-failed"
+	CTestParseFailed               Code = "ctest-parse-failed"
 	UnsupportedTargetType          Code = "unsupported-target-type"
 	UnsupportedCustomCommand       Code = "unsupported-custom-command"
 	UnsupportedCustomCommandScript Code = "unsupported-custom-command-script"

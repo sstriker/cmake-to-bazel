@@ -11,13 +11,18 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 )
 
-// codegenContext carries state from genrule recovery back into the consuming
-// target's lowering: the recovered genrule rules to emit, plus the set of
-// generated paths that map to which target's inputs.
+// codegenContext carries state from genrule recovery and CTest
+// classification back into the consuming target's lowering.
 type codegenContext struct {
 	// Genrules is the list of synthesized ir.Target{Kind: KindGenrule}
 	// entries to append to the package.
 	Genrules []ir.Target
+
+	// Tests is the list of synthesized ir.Target{Kind: KindCCTest}
+	// entries; one per add_test() registration whose COMMAND target
+	// matched an EXECUTABLE in this codemodel. Appended to the package
+	// after the main target loop alongside Genrules.
+	Tests []ir.Target
 
 	// OutToGenrule maps a package-relative output path to the genrule
 	// name that produces it. Used by the consumer side to add
