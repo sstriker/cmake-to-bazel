@@ -120,7 +120,7 @@ func TestRun_Concurrency_TopologicalOrderingHolds(t *testing.T) {
 		t.Fatal("uses-hello did not receive --imports-manifest under concurrent run")
 	}
 	importsBody := mustReadFile(t, string(usesRec))
-	if !strings.Contains(string(importsBody), `"name": "elem_components_hello"`) {
+	if !strings.Contains(string(importsBody), `"name": "components/hello"`) {
 		t.Errorf("uses-hello's imports manifest missing hello entry — topology likely violated:\n%s", importsBody)
 	}
 }

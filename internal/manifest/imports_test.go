@@ -16,21 +16,21 @@ func TestLoad_HandwrittenManifest(t *testing.T) {
   "version": 1,
   "elements": [
     {
-      "name": "elem_glibc",
+      "name": "components/glibc",
       "exports": [
         {
           "cmake_target": "Glibc::c",
-          "bazel_label": "@elem_glibc//:c",
+          "bazel_label": "//elements/components/glibc:c",
           "interface_includes": ["include"]
         }
       ]
     },
     {
-      "name": "elem_zlib",
+      "name": "components/zlib",
       "exports": [
         {
           "cmake_target": "ZLIB::ZLIB",
-          "bazel_label": "@elem_zlib//:zlib",
+          "bazel_label": "//elements/components/zlib:zlib",
           "link_libraries": ["-lm"]
         }
       ]
@@ -51,7 +51,7 @@ func TestLoad_HandwrittenManifest(t *testing.T) {
 	if e := r.LookupCMakeTarget("Glibc::c"); e == nil {
 		t.Fatal("Glibc::c not found")
 	} else {
-		if e.BazelLabel != "@elem_glibc//:c" {
+		if e.BazelLabel != "//elements/components/glibc:c" {
 			t.Errorf("BazelLabel = %q", e.BazelLabel)
 		}
 		if len(e.InterfaceIncludes) != 1 || e.InterfaceIncludes[0] != "include" {
@@ -66,7 +66,7 @@ func TestLoad_HandwrittenManifest(t *testing.T) {
 	if r.LookupCMakeTarget("Nonexistent::X") != nil {
 		t.Errorf("missing target returned non-nil")
 	}
-	if el := r.LookupElement("elem_glibc"); el == nil || el.Name != "elem_glibc" {
+	if el := r.LookupElement("components/glibc"); el == nil || el.Name != "components/glibc" {
 		t.Errorf("LookupElement = %v", el)
 	}
 }

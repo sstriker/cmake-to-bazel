@@ -77,13 +77,13 @@ func TestE2E_Orchestrate_StubSubset(t *testing.T) {
 
 	// Architectural acceptance: uses_hello_bin's deps must include both
 	// the in-element dep (:uses_hello) and the cross-element label
-	// (@elem_components_hello//:hello). The latter only ends up in the
+	// (//elements/components/hello:hello). The latter only ends up in the
 	// codemodel's link.commandFragments as an absolute /opt/prefix path,
 	// resolved via the imports manifest's link_paths field.
 	usesBuild := mustReadFile(t, filepath.Join(out, "elements", "components", "uses-hello", "BUILD.bazel"))
 	for _, want := range []string{
 		`":uses_hello"`,
-		`"@elem_components_hello//:hello"`,
+		`"//elements/components/hello:hello"`,
 	} {
 		if !strings.Contains(string(usesBuild), want) {
 			t.Errorf("uses-hello BUILD.bazel missing %s\n%s", want, usesBuild)
