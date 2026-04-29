@@ -187,4 +187,146 @@ if ! echo "$smoke_out" | grep -q "Hello, World!"; then
     echo "$smoke_out" >&2
     exit 1
 fi
-echo "meta-hello: ok (project A built; staged into B; smoke binary linked + ran)"
+echo "meta-hello: round-trip ok (project A built; staged into B; smoke binary linked + ran)"
+sha_smoke_initial=$(sha_of "$B/bazel-bin/smoke/hello_smoke")
+
+# === Cache-stability scenarios through both projects ===
+#
+# The meta-project shape's two cache-stability claims:
+#
+#   Scenario A  (edit hello.c — NOT in cmake's read set):
+#     - Project A: convert-element cache-hits (zero_files makes the
+#       genrule's input merkle stable across hello.c content changes).
+#     - Project B: cc_library recompiles, since hello.c is in its
+#       srcs. Smoke binary recompiles. This is expected; the win is
+#       that A's conversion didn't re-run, so any sibling elements
+#       that depend on hello-world's exports also wouldn't rebuild
+#       (no sibling here, so the check is just A's stability).
+#
+#   Scenario A' (edit CMakeLists.txt comment — IS in the read set):
+#     - Project A: convert-element re-runs (CMakeLists is real),
+#       but produces byte-identical output (cmake's parser strips
+#       comments before the codemodel).
+#     - Project B: cc_library + smoke do NOT recompile. CMakeLists
+#       isn't in any cc_* rule's srcs, and the staged BUILD.bazel
+#       (from A) is byte-identical, so the action keys downstream
+#       are unchanged. Strictly stronger than today's orchestrator
+#       semantics where any source-tree edit re-ran convert-element
+#       AND triggered downstream rebuilds.
+echo
+echo "=== cache-stability: setting up writable source tree ==="
+
+feedback="$work_dir/feedback-read-paths.json"
+cp "$A/bazel-bin/elements/hello-world/read_paths.json" "$feedback"
+
+# Editable source tree the scenarios will mutate.
+edit_src="$work_dir/edit-src"
+cp -r testdata/meta-project/sources/hello-world/. "$edit_src"
+edit_bst="$work_dir/edit.bst"
+cat > "$edit_bst" <<EOF
+kind: cmake
+sources:
+- kind: local
+  path: $edit_src
+EOF
+
+# Each scenario re-renders both projects from the editable tree.
+# write-a wipes project B's elements/<name>/ on each run; the smoke
+# target lives outside that path and survives, but the per-element
+# BUILD must be re-staged from project A's bazel-bin output.
+restage_b() {
+    cp "$build_out_a" "$B/elements/hello-world/BUILD.bazel"
+    if grep -q BUILD_NOT_YET_STAGED "$B/elements/hello-world/BUILD.bazel"; then
+        echo "meta-hello: re-stage failed; placeholder still present" >&2
+        exit 1
+    fi
+}
+
+rerender_with_feedback() {
+    "$bin_dir/write-a" \
+        --bst "$edit_bst" \
+        --out "$A" \
+        --out-b "$B" \
+        --convert-element "$bin_dir/convert-element" \
+        --read-paths-feedback "$feedback" >/dev/null
+}
+
+# Narrowing transition: re-render with feedback and confirm project A
+# still produces the same BUILD.bazel.out (zero_files-based shape
+# doesn't shift the converter's view).
+rerender_with_feedback
+run_bazel "$A" build //elements/hello-world:hello-world_converted 2>&1 | tail -3
+sha_a_narrowed=$(sha_of "$build_out_a")
+if [ "$sha_a_narrowed" != "$sha_a1" ]; then
+    echo "meta-hello: narrowing transition shifted A's BUILD.bazel.out" >&2
+    echo "  pre-narrow: $sha_a1" >&2
+    echo "  narrowed:   $sha_a_narrowed" >&2
+    exit 1
+fi
+restage_b
+echo "meta-hello: narrowed-mode A build sha matches initial run"
+
+echo
+echo "=== Scenario A: edit hello.c (NOT in read set) ==="
+echo "// scenario-A test edit" >> "$edit_src/hello.c"
+rerender_with_feedback
+scen_a_log=$(run_bazel "$A" build //elements/hello-world:hello-world_converted 2>&1 | tail -3)
+sha_a_scen_a=$(sha_of "$build_out_a")
+if [ "$sha_a_scen_a" != "$sha_a_narrowed" ]; then
+    echo "Scenario A FAILED: A's BUILD.bazel.out shifted after hello.c edit" >&2
+    exit 1
+fi
+echo "Scenario A: A's BUILD.bazel.out byte-identical"
+# Soft check: bazel's "X processes" line on a cache-only run reports
+# only internals. Different bazel versions format slightly; print a
+# diagnostic but don't fail on shape mismatch.
+if echo "$scen_a_log" | grep -q '1 process: 1 internal'; then
+    echo "Scenario A: project A reports cache-only (no action ran)"
+else
+    echo "Scenario A: project A bazel summary: $scen_a_log"
+fi
+restage_b
+# Project B's behavior on Scenario A is incidental to the gate: the
+# *appended C-comment* doesn't change the compiled output regardless
+# of whether bazel decides to rebuild. The check here is the
+# functional invariant — the smoke binary still links + still prints
+# "Hello, World!". The win for the meta-project shape is the A-side
+# claim above (conversion didn't re-run).
+run_bazel "$B" build //smoke:hello_smoke 2>&1 | tail -3
+smoke_out=$(run_bazel "$B" run //smoke:hello_smoke 2>&1 | tail -3)
+if ! echo "$smoke_out" | grep -q "Hello, World!"; then
+    echo "Scenario A FAILED: B's smoke output broken after hello.c edit" >&2
+    echo "$smoke_out" >&2
+    exit 1
+fi
+echo "Scenario A: B's smoke binary still prints Hello, World!"
+
+echo
+echo "=== Scenario A': edit CMakeLists.txt comment (IS in read set) ==="
+echo "# scenario-A' comment $(date +%s)" >> "$edit_src/CMakeLists.txt"
+rerender_with_feedback
+sha_smoke_before_aprime=$(sha_of "$B/bazel-bin/smoke/hello_smoke")
+run_bazel "$A" build //elements/hello-world:hello-world_converted 2>&1 | tail -3
+sha_a_aprime=$(sha_of "$build_out_a")
+if [ "$sha_a_aprime" != "$sha_a_narrowed" ]; then
+    echo "Scenario A' FAILED: A's BUILD.bazel.out shifted after comment edit" >&2
+    echo "  expected: $sha_a_narrowed" >&2
+    echo "  got:      $sha_a_aprime" >&2
+    exit 1
+fi
+echo "Scenario A': A's BUILD.bazel.out byte-identical (cmake parser strips comments)"
+restage_b
+# Project B should NOT rebuild: nothing in any cc_* rule's srcs/deps
+# changed, and the staged BUILD.bazel is byte-identical.
+run_bazel "$B" build //smoke:hello_smoke 2>&1 | tail -3
+sha_smoke_after_aprime=$(sha_of "$B/bazel-bin/smoke/hello_smoke")
+if [ "$sha_smoke_before_aprime" != "$sha_smoke_after_aprime" ]; then
+    echo "Scenario A' FAILED: B's smoke binary changed after comment edit" >&2
+    echo "  before: $sha_smoke_before_aprime" >&2
+    echo "  after:  $sha_smoke_after_aprime" >&2
+    exit 1
+fi
+echo "Scenario A': B's smoke binary sha unchanged (no rebuild)"
+
+echo
+echo "meta-hello: ok (round-trip + scenarios A and A' validated through both projects)"
