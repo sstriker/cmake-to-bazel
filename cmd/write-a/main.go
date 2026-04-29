@@ -1,22 +1,24 @@
-// Command write-a-spike is the toy "writer-of-A" for the meta-project
-// hello-world spike. It parses a single .bst file (kind:cmake only),
-// resolves its sources, and renders a project-A workspace tree
-// containing one per-element generated BUILD.bazel that invokes
-// convert-element via a genrule.
+// Command write-a is the production writer-of-A for the meta-project
+// (Bazel-as-orchestrator) shape described in docs/whole-project-plan.md.
+// It parses .bst element files, resolves their sources, and renders a
+// project-A workspace tree where each element gets a per-element
+// generated BUILD.bazel containing one genrule that invokes the
+// per-kind translator binary (convert-element for kind:cmake) under
+// Bazel's action graph.
 //
-// This is a SPIKE: the goal is to validate that the meta-project shape
-// described in docs/whole-project-plan.md works end-to-end against a
-// minimal fixture, NOT to ship a production writer-of-A. After the
-// spike validates, this gets replaced by a proper writer-of-A under
-// cmd/write-a/ that handles the full .bst surface (kind dispatch,
-// dep resolution, module extension wiring, etc.) per Phase 1 of the
-// plan.
+// Phase 1 scope (cmake-only acceptance per the plan):
+//   - kind:cmake elements only.
+//   - kind:local sources only.
+//   - no cross-element deps.
+//   - no toolchain handling (uses the host's cc_toolchain).
 //
-// Scope intentionally narrow:
-//   - kind:cmake elements only
-//   - kind:local sources only
-//   - no cross-element deps
-//   - no toolchain handling (uses the host's cc_toolchain)
+// Subsequent phases extend this to multi-element graphs (Phase 3+),
+// non-cmake kinds (Phase 3 / 4), additional source kinds (via the
+// existing orchestrator/internal/sourcecheckout package), and a real
+// bzlmod module extension shape that lazily generates per-element
+// repos. This binary's interface (--bst, --out, --convert-element,
+// --read-paths-feedback) is stable across those extensions; what
+// grows is the writer's per-kind dispatch and graph handling.
 //
 // Shadow-tree narrowing:
 //   - With --read-paths-feedback unset: every source file is staged
@@ -48,9 +50,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// zero_files.bzl is embedded into the spike binary so the writer
-// doesn't depend on its caller's working directory. Production
-// wiring would pull the rule from a real bazel module instead.
+// zero_files.bzl is embedded into the binary so the writer doesn't
+// depend on its caller's working directory. A future iteration may
+// expose the rule via a published bazel module so consumers can
+// `bazel_dep` it directly; for now embedding keeps the deployment
+// shape one-binary-and-go.
 //
 //go:embed assets/zero_files.bzl
 var zeroFilesBzl string
@@ -103,7 +107,7 @@ func main() {
 		log.Fatalf("load element: %v", err)
 	}
 	if elem.Bst.Kind != "cmake" {
-		log.Fatalf("spike supports only kind:cmake; got %q", elem.Bst.Kind)
+		log.Fatalf("write-a (Phase 1) supports only kind:cmake; got %q", elem.Bst.Kind)
 	}
 
 	convertAbs, err := filepath.Abs(*convertBin)
@@ -157,11 +161,11 @@ func loadElement(bstPath string) (*element, error) {
 
 	bstDir := filepath.Dir(bstPath)
 	if len(f.Sources) != 1 {
-		return nil, fmt.Errorf("spike requires exactly one source; got %d", len(f.Sources))
+		return nil, fmt.Errorf("write-a (Phase 1) requires exactly one source per element; got %d", len(f.Sources))
 	}
 	src := f.Sources[0]
 	if src.Kind != "local" {
-		return nil, fmt.Errorf("spike supports only kind:local sources; got %q", src.Kind)
+		return nil, fmt.Errorf("write-a (Phase 1) supports only kind:local sources; got %q", src.Kind)
 	}
 	// kind:local path is interpreted relative to the .bst dir if it
 	// isn't already absolute (matches BuildStream semantics).
@@ -196,12 +200,13 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 	}
 
 	// Wire the zero_files rule by writing the embedded .bzl content
-	// into project A's rules/ dir. The spike's rule has no deps, so a
-	// flat copy works; production wiring would expose it via a module.
+	// into project A's rules/ dir. The rule has no deps, so a flat
+	// copy works; future iterations may expose it via a published
+	// bazel module instead.
 	if err := writeFile(filepath.Join(outDir, "rules", "zero_files.bzl"), zeroFilesBzl); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(outDir, "rules", "BUILD.bazel"), "# rules/ exposes per-spike starlark utilities.\n"); err != nil {
+	if err := writeFile(filepath.Join(outDir, "rules", "BUILD.bazel"), "# rules/ holds the starlark utilities project A's per-element BUILDs use.\n"); err != nil {
 		return err
 	}
 
@@ -328,7 +333,7 @@ func partitionSources(elem *element) error {
 }
 
 func moduleBazel(elem *element) string {
-	return fmt.Sprintf(`module(name = "meta_project_spike_%s", version = "0.0.0")
+	return fmt.Sprintf(`module(name = "meta_project_a_%s", version = "0.0.0")
 
 # Project A only runs genrules (one per element invoking the
 # per-kind translator). It declares no bazel_dep — bazel pulls in
@@ -346,7 +351,7 @@ func sanitizeModuleName(s string) string {
 }
 
 func elementBuild(elem *element) string {
-	return fmt.Sprintf(`# Generated by write-a-spike. Do not edit by hand.
+	return fmt.Sprintf(`# Generated by cmd/write-a. Do not edit by hand.
 
 package(default_visibility = ["//visibility:public"])
 
@@ -354,7 +359,7 @@ package(default_visibility = ["//visibility:public"])
 # can $(location) it for the source-root anchor — Bazel rejects
 # $(location) on a filegroup-internal path. The rest of the source
 # tree (real files copied from the user's tree + zero-length stubs
-# materialized by write-a-spike when --read-paths-feedback is set)
+# materialized by write-a when --read-paths-feedback is set)
 # flows through the filegroup unchanged.
 filegroup(
     name = "%[1]s_sources",
@@ -382,8 +387,8 @@ genrule(
     tools = ["//tools:convert-element"],
 )
 
-# Typed exports project B consumes. The spike emits the converter's
-# raw outputs; production rules expand cmake-config-bundle.tar into
+# Typed exports project B consumes. Phase 1 emits the converter's
+# raw outputs; later phases expand cmake-config-bundle.tar into
 # the typed slices (cmake_config / pkg_config / headers / libs).
 filegroup(
     name = "build_bazel",
@@ -421,8 +426,8 @@ func copyFile(src, dst string) error {
 }
 
 // copyTree recursively copies src to dst. Symlinks resolve to their
-// targets (they're rare in source trees and the spike doesn't need to
-// preserve them).
+// targets (they're rare in kind:local trees and Phase 1 doesn't need
+// to preserve them).
 func copyTree(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

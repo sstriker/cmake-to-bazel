@@ -92,7 +92,7 @@ e2e-orchestrate-scale: orchestrator
 
 # Meta-project hello-world spike (Phase 2 of docs/whole-project-plan.md
 # post-rewrite). Renders project A from a single .bst via
-# cmd/write-a-spike and validates the rendered tree shape; if bazel
+# cmd/write-a and validates the rendered tree shape; if bazel
 # is on PATH, drives the genrule end-to-end and asserts the
 # convert-element output. Skips the bazel phase cleanly when bazel
 # isn't installed (the rendering phase is the meaningful regression
