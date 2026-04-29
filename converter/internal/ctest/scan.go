@@ -54,8 +54,8 @@ type scanner struct {
 	pos int
 }
 
-func (s *scanner) eof() bool   { return s.pos >= len(s.src) }
-func (s *scanner) peek() byte  { return s.src[s.pos] }
+func (s *scanner) eof() bool  { return s.pos >= len(s.src) }
+func (s *scanner) peek() byte { return s.src[s.pos] }
 func (s *scanner) advance() {
 	if !s.eof() {
 		s.pos++
