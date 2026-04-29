@@ -107,8 +107,8 @@ add_library(foo::extra SHARED IMPORTED)
 	}
 
 	el := exports.AsElement("components/foo", raw, nil)
-	if el.Name != "elem_components_foo" {
-		t.Errorf("Element.Name = %q, want elem_components_foo", el.Name)
+	if el.Name != "components/foo" {
+		t.Errorf("Element.Name = %q, want components/foo", el.Name)
 	}
 	if len(el.Exports) != 2 {
 		t.Fatalf("Exports = %d, want 2", len(el.Exports))
@@ -116,11 +116,11 @@ add_library(foo::extra SHARED IMPORTED)
 	for _, e := range el.Exports {
 		switch e.CMakeTarget {
 		case "foo::core":
-			if e.BazelLabel != "@elem_components_foo//:core" {
+			if e.BazelLabel != "//elements/components/foo:core" {
 				t.Errorf("core BazelLabel = %q", e.BazelLabel)
 			}
 		case "foo::extra":
-			if e.BazelLabel != "@elem_components_foo//:extra" {
+			if e.BazelLabel != "//elements/components/foo:extra" {
 				t.Errorf("extra BazelLabel = %q", e.BazelLabel)
 			}
 		default:

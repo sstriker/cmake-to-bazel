@@ -62,10 +62,6 @@ internal/                   shared substrates (used by both binaries)
   manifest                  per-package + per-run JSON schemas
   shadow                    path-only-stat shadow-tree creator + read-path tracer
 
-bazel/                      downstream Bazel envelope
-  MODULE.bazel              bzlmod root; declares converted_pkg_repos extension
-  converted_pkg_repo.bzl    extension that synthesizes one repo per element
-
 deploy/buildbarn/           local-dev REAPI cluster
   docker-compose.yml        bb-storage + bb-scheduler + bb-worker + bb-runner-bare
   config/*.jsonnet          per-service configs
@@ -210,8 +206,10 @@ for that.
 ### `internal/manifest`
 
 JSON schemas for per-package `manifest.json` and run-level
-`converted.json`. The bazel extension at `bazel/converted_pkg_repo.bzl`
-reads these.
+`converted.json`. The orchestrator's `<out>/MODULE.bazel` makes the
+output directory a self-contained bzlmod project; cross-element
+`BazelLabel`s in the per-element imports manifests are
+`//elements/<name>:<target>`-shaped.
 
 ### `internal/shadow`
 
@@ -237,20 +235,19 @@ gate on conversion — only a test.
 
 ## Downstream Bazel envelope
 
-`bazel/converted_pkg_repo.bzl` is a bzlmod module extension. Given
-the `converted.json` manifest path as an attr, it iterates the
-elements and declares one `_converted_pkg_repository` per converted
-element. Each such repository symlinks the element's `BUILD.bazel`,
-its `cmake-config/` bundle, and the original `source/` tree into
-the repo root, plus emits a synthetic `MODULE.bazel` and
-`WORKSPACE.bazel` so the repo is loadable. Downstream `MODULE.bazel`s
-just `bazel_dep()` rules_cc and `use_extension(":converted_pkg_repo.bzl",
-"converted_pkg_repos").of_manifest(…)`.
+The orchestrator's `<out>/` is a self-contained bzlmod project. The
+orchestrator emits `<out>/MODULE.bazel` declaring `bazel_dep` on
+`rules_cc`; each converted element lives at
+`<out>/elements/<name>/BUILD.bazel`, with the source root's top-level
+entries symlinked at the package root so the converter's
+relative-path `srcs`/`hdrs` resolve. Cross-element labels are
+`//elements/<name>:<target>` and resolve directly within the module.
 
 The bazel-build downstream e2e
 (`orchestrator/internal/orchestrator/bazelbuild_test.go`) runs the
-orchestrator over the FDSDK subset, then `bazel build //:smoke`
-against a downstream consumer that depends on a converted element.
+orchestrator over the FDSDK subset, then runs
+`bazel build //elements/components/uses-hello:uses_hello_bin`
+directly inside `<out>/`.
 
 ## Build / test targets
 
@@ -301,8 +298,9 @@ If you're new and want a single thread through the codebase:
 3. `orchestrator/cmd/orchestrate/main.go` and
    `orchestrator/internal/orchestrator/run.go` — the multi-element
    driver.
-4. `bazel/converted_pkg_repo.bzl` — the bzlmod extension that makes
-   converter outputs consumable by Bazel.
+4. `orchestrator/internal/orchestrator/run.go`'s `writeBzlmodProject`
+   — emits `<out>/MODULE.bazel` so the orchestrator output is a
+   self-contained, directly-buildable bzlmod project.
 5. `orchestrator/internal/orchestrator/fidelity_e2e_test.go` — the
    e2e test that proves the whole stack produces the same artifacts
    cmake would.

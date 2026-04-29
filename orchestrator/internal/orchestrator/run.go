@@ -325,7 +325,30 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if err := writeManifest(opts.Out, r.res); err != nil {
 		return nil, err
 	}
+	if err := writeBzlmodProject(opts.Out); err != nil {
+		return nil, err
+	}
 	return r.res, nil
+}
+
+// rulesCCVersion is the rules_cc bzlmod dep that the generated MODULE.bazel
+// pins. The per-element BUILD.bazel emitted by the converter loads
+// `@rules_cc//cc:defs.bzl`, so this version must be ≥ what those rules
+// require. Bumping the pin invalidates `bazel build` against the
+// orchestrator output and is a coordinated change with the converter.
+const rulesCCVersion = "0.2.17"
+
+// writeBzlmodProject emits a self-contained MODULE.bazel at <out>/ so the
+// orchestrator's per-element BUILD.bazel files form a directly-buildable
+// bzlmod project. Cross-element deps stamped by exports.AsElement use
+// `//elements/<name>:<target>` labels which resolve against this module
+// root.
+func writeBzlmodProject(out string) error {
+	body := []byte(`module(name = "converted", version = "0.0.0")
+
+bazel_dep(name = "rules_cc", version = "` + rulesCCVersion + `")
+`)
+	return os.WriteFile(filepath.Join(out, "MODULE.bazel"), body, 0o644)
 }
 
 // aggregateTimings reads each cache-miss element's timings.json and
@@ -628,33 +651,46 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 		RawExports:         raw,
 		PrefixRelLinkPaths: relPaths,
 	}
-	// Stage source-file symlinks alongside BUILD.bazel so the M5
-	// converted_pkg_repo extension can hand them to Bazel as the
-	// repo's input files. Without this, `bazel build @<repo>//:foo`
-	// fails with "missing input file 'hello.c'" — BUILD.bazel
-	// references srcs/hdrs by relative path but elemOut only carries
-	// the generated BUILD.bazel + cmake-config bundle. Re-stage on
-	// every successful pass (cache-hit or miss) since the source/ tree
-	// isn't part of the cached Action output.
-	if err := stageSourceSymlinks(filepath.Join(r.opts.Out, "elements", name, "source"), realSrcRoot); err != nil {
+	// Stage source-file symlinks at the per-element package root so
+	// `bazel build //elements/<name>:<target>` resolves srcs/hdrs the
+	// converter emitted as relative paths (e.g. `srcs = ["src/hello.c"]`).
+	// Without this, Bazel reports "missing input file" — elemOut only
+	// carries the generated BUILD.bazel + cmake-config bundle. Re-stage
+	// on every successful pass (cache-hit or miss) since the source
+	// symlinks aren't part of the cached Action output.
+	if err := stageSourceSymlinks(filepath.Join(r.opts.Out, "elements", name), realSrcRoot); err != nil {
 		return fmt.Errorf("element %s: stage source symlinks: %w", name, err)
 	}
 	r.res.Converted = append(r.res.Converted, name)
 	return nil
 }
 
-// stageSourceSymlinks (re)builds dst as a directory containing one
-// symlink per top-level entry in srcRoot. The links target absolute
-// paths so the bazel envelope can follow them at analysis time. The
-// staged tree is excluded from determinism.json on purpose since
-// per-host absolute paths would make the SHA-by-tree comparison
-// flap across machines.
-func stageSourceSymlinks(dst, srcRoot string) error {
-	if err := os.RemoveAll(dst); err != nil {
+// stageSourceSymlinks creates one symlink per top-level entry of srcRoot
+// directly under pkgDir (the element's package root, alongside BUILD.bazel
+// and cmake-config/) so Bazel can resolve the converter's relative
+// srcs/hdrs paths. Existing symlinks at colliding paths are replaced;
+// non-symlinks (e.g. the generated BUILD.bazel) are left untouched and
+// the conflicting srcRoot entry is skipped. The staged links are
+// excluded from determinism.json on purpose since per-host absolute
+// targets would make the SHA-by-tree comparison flap across machines.
+func stageSourceSymlinks(pkgDir, srcRoot string) error {
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	// Drop any existing symlinks first so a renamed or deleted top-level
+	// source-root entry doesn't leave a stale symlink behind on re-runs.
+	// Non-symlinks (BUILD.bazel, cmake-config/) stay.
+	existing, err := os.ReadDir(pkgDir)
+	if err != nil {
 		return err
+	}
+	for _, e := range existing {
+		if e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		if err := os.Remove(filepath.Join(pkgDir, e.Name())); err != nil {
+			return err
+		}
 	}
 	entries, err := os.ReadDir(srcRoot)
 	if err != nil {
@@ -665,7 +701,13 @@ func stageSourceSymlinks(dst, srcRoot string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.Symlink(target, filepath.Join(dst, e.Name())); err != nil {
+		link := filepath.Join(pkgDir, e.Name())
+		// Non-symlink (the converter's BUILD.bazel, cmake-config/, etc.) —
+		// skip rather than clobber.
+		if info, err := os.Lstat(link); err == nil && info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		if err := os.Symlink(target, link); err != nil {
 			return err
 		}
 	}

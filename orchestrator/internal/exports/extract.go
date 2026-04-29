@@ -41,7 +41,7 @@ var importedLocationStanzaRe = regexp.MustCompile(`set_target_properties\(\s*([A
 // FromBundle scans a cmake-config bundle directory for imported targets and
 // returns one manifest.Export per declaration. Element name is NOT applied
 // to BazelLabel here — that's the caller's job (the orchestrator stamps the
-// `@elem_<name>//:<target>` label after picking up the raw exports).
+// `//elements/<name>:<target>` label after picking up the raw exports).
 func FromBundle(bundleDir string) ([]*manifest.Export, error) {
 	entries, err := os.ReadDir(bundleDir)
 	if err != nil {
@@ -141,18 +141,17 @@ func parseFile(path string) ([]*manifest.Export, error) {
 }
 
 // AsElement stamps a per-element BazelLabel onto raw exports and wraps
-// them as a manifest.Element. The label form
-// `@elem_<element-name>//:<target>` matches what M3's MODULE.bazel
-// declares for each converted element repository; the `<target>` half is
-// the second segment of the cmake-target namespaced name (`Pkg::target`
-// -> `target`).
+// them as a manifest.Element. The label form `//elements/<element-name>:<target>`
+// addresses each converted element as a Bazel package within the
+// orchestrator-emitted bzlmod project rooted at <out>/. The `<target>`
+// half is the second segment of the cmake-target namespaced name
+// (`Pkg::target` -> `target`).
 //
 // LinkPaths, when non-nil, supplies the absolute link-fragment paths the
 // orchestrator computed for this element under the consumer's synth-
 // prefix tree (one set per consumer because the prefix root differs).
 // linkPathsFor maps cmake_target -> []absolute paths.
 func AsElement(elementName string, raw []*manifest.Export, linkPathsFor map[string][]string) *manifest.Element {
-	bazelRepo := bazelRepoFor(elementName)
 	out := make([]*manifest.Export, 0, len(raw))
 	for _, ex := range raw {
 		// CMakeTarget is "Pkg::target"; the second half becomes the label.
@@ -163,7 +162,7 @@ func AsElement(elementName string, raw []*manifest.Export, linkPathsFor map[stri
 		target := ex.CMakeTarget[idx+2:]
 		stamped := &manifest.Export{
 			CMakeTarget: ex.CMakeTarget,
-			BazelLabel:  fmt.Sprintf("@%s//:%s", bazelRepo, target),
+			BazelLabel:  fmt.Sprintf("//elements/%s:%s", elementName, target),
 		}
 		if linkPathsFor != nil {
 			if paths, ok := linkPathsFor[ex.CMakeTarget]; ok {
@@ -173,30 +172,7 @@ func AsElement(elementName string, raw []*manifest.Export, linkPathsFor map[stri
 		out = append(out, stamped)
 	}
 	return &manifest.Element{
-		Name:    bazelRepo,
+		Name:    elementName,
 		Exports: out,
 	}
-}
-
-// bazelRepoFor maps an element name (with directory components) to a Bazel
-// external-repo identifier. Bazel repo names are restricted to
-// [A-Za-z0-9_-]; we replace path separators and dots with underscores and
-// prefix with `elem_` so the orchestrator's MODULE.bazel can declare them
-// uniformly.
-func bazelRepoFor(elementName string) string {
-	var sb strings.Builder
-	sb.WriteString("elem_")
-	for i := 0; i < len(elementName); i++ {
-		c := elementName[i]
-		switch {
-		case (c >= 'a' && c <= 'z'),
-			(c >= 'A' && c <= 'Z'),
-			(c >= '0' && c <= '9'),
-			c == '_':
-			sb.WriteByte(c)
-		default:
-			sb.WriteByte('_')
-		}
-	}
-	return sb.String()
 }

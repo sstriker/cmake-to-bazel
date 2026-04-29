@@ -1,17 +1,16 @@
 //go:build e2e
 
-// bazelbuild_test exercises the M5 downstream-Bazel acceptance gate:
+// bazelbuild_test exercises the M3 downstream-Bazel acceptance gate:
 //
 //  1. Run the orchestrator against the fdsdk-subset fixture using the
-//     real convert-element binary. Outputs land at <out>/elements/<name>/.
-//  2. Stage testdata/bazel-downstream/{MODULE.bazel, BUILD.bazel,
-//     smoke.c} into a fresh tmpdir, with MODULE.bazel.tmpl's
-//     placeholders filled in to point at the orchestrator's converted.json
-//     and the cmake-to-bazel module root.
-//  3. Run `bazel build //:smoke` from that tmpdir. The build pulls in
-//     @elem_components_uses_hello//:uses_hello_bin via the
-//     converted_pkg_repo extension; success means the BUILD.bazel the
-//     converter emitted is consumable by Bazel + rules_cc end-to-end.
+//     real convert-element binary. Outputs land at <out>/elements/<name>/
+//     and the orchestrator emits <out>/MODULE.bazel making <out>/ a
+//     self-contained bzlmod project.
+//  2. Run `bazel build //elements/components/uses-hello:uses_hello_bin`
+//     directly inside <out>/. The build resolves the cross-element
+//     dep //elements/components/hello:hello via the orchestrator-stamped
+//     imports manifest; success means the BUILD.bazel the converter
+//     emitted is consumable by Bazel + rules_cc end-to-end.
 //
 // Gated behind the `e2e` build tag and skips if `bazel` (or `bazelisk`)
 // is not on PATH. CI runs this via `make e2e-bazel-build`.
@@ -22,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/orchestrator"
@@ -42,17 +40,9 @@ func TestE2E_BazelBuild_DownstreamConsumesConvertedRepos(t *testing.T) {
 		}
 	}
 
-	// The cmake_to_bazel module lives at <repo>/bazel/MODULE.bazel.
-	// local_path_override needs the directory containing that file.
-	moduleRoot, err := filepath.Abs("../../../bazel")
-	if err != nil {
-		t.Fatalf("module root: %v", err)
-	}
-
 	proj, g := mustLoadFixture(t)
 	out := t.TempDir()
 
-	// Step 1: run the orchestrator.
 	if _, err := orchestrator.Run(context.Background(), orchestrator.Options{
 		Project:         proj,
 		Graph:           g,
@@ -63,37 +53,13 @@ func TestE2E_BazelBuild_DownstreamConsumesConvertedRepos(t *testing.T) {
 		t.Fatalf("orchestrator: %v", err)
 	}
 
-	// Step 2: stage the downstream consumer.
-	downstream := t.TempDir()
-	tmplBody, err := os.ReadFile(filepath.Join("..", "..", "testdata", "bazel-downstream", "MODULE.bazel.tmpl"))
-	if err != nil {
-		t.Fatalf("read tmpl: %v", err)
-	}
-	manifest := filepath.Join(out, "manifest", "converted.json")
-	moduleBody := strings.NewReplacer(
-		"__MODULE_ROOT__", moduleRoot,
-		"__MANIFEST__", manifest,
-	).Replace(string(tmplBody))
-	if err := os.WriteFile(filepath.Join(downstream, "MODULE.bazel"), []byte(moduleBody), 0o644); err != nil {
-		t.Fatalf("write MODULE.bazel: %v", err)
-	}
-	for _, f := range []string{"BUILD.bazel", "smoke.c"} {
-		body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "bazel-downstream", f))
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		if err := os.WriteFile(filepath.Join(downstream, f), body, 0o644); err != nil {
-			t.Fatalf("write %s: %v", f, err)
-		}
-	}
-
-	// Step 3: bazel build.
-	cmd := exec.CommandContext(context.Background(), bazel, "build", "//:smoke")
-	cmd.Dir = downstream
+	cmd := exec.CommandContext(context.Background(), bazel,
+		"build", "//elements/components/uses-hello:uses_hello_bin")
+	cmd.Dir = out
 	cmd.Stdout = testLog{t}
 	cmd.Stderr = testLog{t}
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("bazel build //:smoke: %v", err)
+		t.Fatalf("bazel build inside %s: %v", out, err)
 	}
 }
 
@@ -104,6 +70,6 @@ func lookupBazel(t *testing.T) string {
 			return p
 		}
 	}
-	t.Skipf("bazel/bazelisk not on PATH; skipping M5 downstream-build acceptance")
+	t.Skipf("bazel/bazelisk not on PATH; skipping M3 downstream-build acceptance")
 	return ""
 }

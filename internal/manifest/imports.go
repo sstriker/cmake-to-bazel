@@ -43,7 +43,9 @@ type Export struct {
 	CMakeTarget string `json:"cmake_target"`
 
 	// BazelLabel is the absolute Bazel label that replaces the import in
-	// generated BUILD.bazel deps lists, e.g. "@elem_glibc//:c".
+	// generated BUILD.bazel deps lists, e.g.
+	// "//elements/components/glibc:c". Resolves against the orchestrator-
+	// emitted bzlmod project rooted at <out>/.
 	BazelLabel string `json:"bazel_label"`
 
 	// InterfaceIncludes are package-relative include directories the

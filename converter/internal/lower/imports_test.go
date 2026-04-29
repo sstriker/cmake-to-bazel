@@ -42,10 +42,10 @@ func TestToIR_CrossElementDep_ResolvedViaManifest(t *testing.T) {
 	rsv, err := manifest.Index(&manifest.Imports{
 		Version: 1,
 		Elements: []*manifest.Element{{
-			Name: "elem_glibc",
+			Name: "components/glibc",
 			Exports: []*manifest.Export{{
 				CMakeTarget: "Glibc::c",
-				BazelLabel:  "@elem_glibc//:c",
+				BazelLabel:  "//elements/components/glibc:c",
 			}},
 		}},
 	})
@@ -64,8 +64,8 @@ func TestToIR_CrossElementDep_ResolvedViaManifest(t *testing.T) {
 		t.Fatalf("Targets = %d, want 1", len(pkg.Targets))
 	}
 	deps := pkg.Targets[0].Deps
-	if len(deps) != 1 || deps[0] != "@elem_glibc//:c" {
-		t.Errorf("Deps = %v, want [@elem_glibc//:c]", deps)
+	if len(deps) != 1 || deps[0] != "//elements/components/glibc:c" {
+		t.Errorf("Deps = %v, want [//elements/components/glibc:c]", deps)
 	}
 }
 

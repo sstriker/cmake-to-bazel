@@ -263,9 +263,9 @@ func TestRun_ImportsManifestForDownstream(t *testing.T) {
 	importsBody := mustReadFile(t, string(usesRec))
 	for _, want := range []string{
 		`"version": 1`,
-		`"name": "elem_components_hello"`,
+		`"name": "components/hello"`,
 		`"cmake_target": "hello::hello"`,
-		`"bazel_label": "@elem_components_hello//:hello"`,
+		`"bazel_label": "//elements/components/hello:hello"`,
 	} {
 		if !strings.Contains(string(importsBody), want) {
 			t.Errorf("imports.json missing %q\n%s", want, importsBody)
