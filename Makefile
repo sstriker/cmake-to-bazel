@@ -1,6 +1,6 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
-        buildbarn-up buildbarn-down install-bazelisk install-cmake \
+        buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
 # Pinned external tool versions. Hard-failed at runtime by the converter,
@@ -182,6 +182,18 @@ install-bazelisk:
 install-cmake:
 	tools/install-pinned-cmake.sh
 
+# Full pipeline: convert an FDSDK-style root, then bazel build inside
+# the resulting <out>/. Requires bazel or bazelisk on PATH (run
+# `make install-bazelisk` first if missing). Override BAZEL_TARGET to
+# build a specific label instead of //... .
+#
+#   make convert-and-build FDSDK_ROOT=/path/to/fdsdk OUT=/tmp/out
+#   make convert-and-build FDSDK_ROOT=/path/to/fdsdk OUT=/tmp/out BAZEL_TARGET=//elements/components/foo:bar
+convert-and-build: converter orchestrator
+	@[ -n "$(FDSDK_ROOT)" ] || (echo "set FDSDK_ROOT=path/to/fdsdk-root"; exit 1)
+	@[ -n "$(OUT)" ] || (echo "set OUT=output-dir"; exit 1)
+	$(ORCHESTRATOR) --fdsdk-root $(FDSDK_ROOT) --out $(OUT) --converter $(CONVERTER) --bazel-build $(or $(BAZEL_TARGET),//...)
+
 # Fetch the M2 acceptance package out-of-band. Idempotent.
 fetch-fmt:
 	@if [ ! -d "$(FMT_DIR)" ]; then \
@@ -212,10 +224,8 @@ fmt:
 check-tools:
 	@command -v cmake >/dev/null || (echo "cmake not on PATH"; exit 1)
 	@command -v ninja >/dev/null || (echo "ninja not on PATH"; exit 1)
-	@command -v bwrap >/dev/null || (echo "bwrap not on PATH (apt install bubblewrap)"; exit 1)
 	@cmake --version | head -1
 	@ninja --version
-	@bwrap --version 2>&1 | head -1
 
 clean:
 	rm -rf $(BUILD_DIR)

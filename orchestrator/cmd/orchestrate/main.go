@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -59,6 +60,7 @@ func main() {
 		platformFlag    = fs.String("platform", "", "Action.platform overrides as comma-separated name=value (e.g. cmake-version=3.30.0,ninja-version=1.12.0). Overrides built-in defaults; the orchestrator MUST agree with workers on platform values to share cache hits.")
 		elemTimeout     = fs.Duration("element-timeout", 0, "per-element pipeline cap (e.g. 30m, 2h). Zero = orchestrator default (30m). Mirrored into Action.timeout for remote workers.")
 		toolchainCMake  = fs.String("toolchain-cmake-file", "", "CMake toolchain file (typically derive-toolchain's toolchain.cmake) passed to every per-element converter invocation. Skips cmake's compiler-detection probe — measurable per-conversion latency win.")
+		bazelBuild      = fs.String("bazel-build", "", "after a successful conversion, run `bazel build <target>` inside --out (e.g. //... or //elements/components/foo:bar). Requires bazel or bazelisk on PATH.")
 		logFormat       = fs.String("log-format", "text", "structured-log handler: text (human-readable, default) or json (one record per line for ingestion)")
 	)
 
@@ -176,6 +178,39 @@ func main() {
 	if len(res.Failed) > 0 {
 		os.Exit(2)
 	}
+	if *bazelBuild != "" {
+		if err := runBazelBuild(ctx, *out, *bazelBuild, logger); err != nil {
+			fmt.Fprintf(os.Stderr, "orchestrate: bazel build: %v\n", err)
+			os.Exit(2)
+		}
+	}
+}
+
+// runBazelBuild invokes `bazel build <target>` inside out (the
+// orchestrator's output dir, which now carries a self-contained
+// MODULE.bazel + per-element packages). Streams bazel's own
+// stdout/stderr through to the operator. Picks bazelisk when present
+// so version pins from a .bazelversion or BAZEL_VERSION env var win.
+func runBazelBuild(ctx context.Context, out, target string, logger *slog.Logger) error {
+	bazel := lookupBazelBinary()
+	if bazel == "" {
+		return fmt.Errorf("bazel/bazelisk not on PATH")
+	}
+	logger.Info("bazel build", "binary", bazel, "target", target, "out", out)
+	cmd := exec.CommandContext(ctx, bazel, "build", target)
+	cmd.Dir = out
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func lookupBazelBinary() string {
+	for _, name := range []string{"bazelisk", "bazel"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // buildLogger returns a slog.Logger backed by the requested handler kind.
