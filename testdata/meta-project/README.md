@@ -1,7 +1,8 @@
-# Meta-project spike testdata
+# Meta-project hello-world testdata
 
-Smallest viable end-to-end demonstration of the Bazel-as-orchestrator
-shape described in `docs/whole-project-plan.md` (post-rewrite).
+Smallest viable end-to-end fixture for the Bazel-as-orchestrator
+shape described in `docs/whole-project-plan.md`. Drives Phase 1's
+acceptance gate (`make e2e-meta-hello`).
 
 ## Layout
 
@@ -14,35 +15,44 @@ testdata/meta-project/
     include/hello.h
 ```
 
-The spike pipeline (added incrementally across follow-up commits):
+## Pipeline (driven by `scripts/meta-hello.sh`)
 
-1. A toy "writer-of-A" Go binary parses `hello-world.bst`, resolves
-   the `kind: local` source, and renders project A:
-   - `MODULE.bazel` declaring a generated repo for the element
-   - `external/+_writer+hello-world/BUILD.bazel` containing one
-     `genrule` that invokes `convert-element` plus typed
-     `filegroup` exports.
-2. Project A's `bazel build //...` runs `convert-element` against
-   the source tree; outputs land at
-   `bazel-bin/external/+_writer+hello-world/...`.
-3. A wrapper materializes project A's outputs into project B's
-   source tree (BUILD.bazel + cmake-config bundle as files,
-   the original sources as symlinks).
-4. Project B's `bazel build //...` builds the converted hello-world
-   library against the host toolchain.
+1. `cmd/write-a` parses `hello-world.bst`, resolves the `kind: local`
+   source, and renders **two** workspaces:
+   - **Project A** (the meta workspace): `MODULE.bazel`,
+     `tools/convert-element` (staged binary), `rules/zero_files.bzl`,
+     and `elements/hello-world/BUILD.bazel` containing one `genrule`
+     that invokes `convert-element` plus a `zero_files` target for
+     any source paths the converter doesn't read.
+   - **Project B** (the consumer workspace): `MODULE.bazel`
+     (`bazel_dep` on `rules_cc`), the user's source tree under
+     `elements/hello-world/`, and a `BUILD_NOT_YET_STAGED`
+     placeholder waiting for project A's converted output.
+2. `bazel build` in project A runs the genrule; convert-element
+   emits `BUILD.bazel.out` (a `cc_library` declaration) plus
+   `cmake-config-bundle.tar` and `read_paths.json`.
+3. The driver overwrites project B's per-element `BUILD.bazel`
+   with project A's `BUILD.bazel.out`. The placeholder is gone;
+   project B's element package is now well-formed.
+4. The driver writes a hand-authored smoke target into
+   `project-B/smoke/` (`cc_binary` linking against the converted
+   `cc_library`).
+5. `bazel build` + `bazel run` in project B compiles + executes the
+   smoke binary; the gate asserts the output contains
+   "Hello, World!".
 
-After the spike works end-to-end, two cache-stability assertions:
+After the round-trip succeeds, two cache-stability assertions
+through both projects:
 
-- **Scenario A** (`hello.c` content edit): project A cache hits
-  on the convert-element action (the file is in the zero-stub
-  set for that action — cmake configure walks the directory but
-  doesn't open compilation sources). Project B's cc_library
-  recompiles only the affected target.
-- **Scenario A'** (CMakeLists.txt comment edit): project A
-  cache-misses (CMakeLists is in the read set) but produces
-  byte-identical output (cmake's parser strips comments before
-  the codemodel). Project B sees no source delta and doesn't
-  rebuild.
+- **Scenario A** (`hello.c` content edit): convert-element cache-hits
+  in project A (zero-stub-backed input merkle is content-stable
+  across edits to non-read source files); project B's smoke binary
+  still prints "Hello, World!".
+- **Scenario A'** (CMakeLists.txt comment edit): convert-element
+  re-runs in project A (CMakeLists is real) but produces a
+  byte-identical `BUILD.bazel.out` (cmake's parser strips comments
+  before the codemodel); project B's smoke binary sha is unchanged
+  (no rebuild).
 
 ## Why this fixture
 
@@ -50,12 +60,4 @@ The element source tree is a verbatim copy of
 `converter/testdata/sample-projects/hello-world/` — the smallest
 cmake project that exercises the full convert-element pipeline
 (cc_library + install + cmake-config export). Reusing it keeps
-the spike's correctness anchored to existing fmt-fidelity-style
-gates: convert-element's behavior on this source is already
-covered by the converter's unit + e2e tests.
-
-## Status
-
-This directory is the *input* layer of the spike. Subsequent
-commits add the writer-of-A binary, the `zero_files.bzl` rule,
-and the wrapper that drives both Bazel passes.
+the gate's correctness anchored to existing fixture coverage.
