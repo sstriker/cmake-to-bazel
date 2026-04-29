@@ -69,8 +69,8 @@ func run(a cli.Args) error {
 			}
 		}
 
-		// Real-cmake path: spin a tmp build dir, configure under bwrap, then
-		// load the reply produced inside it.
+		// Real-cmake path: spin a tmp build dir, configure cmake against
+		// it, then load the reply.
 		buildDir, err := os.MkdirTemp("", "convert-element-build-*")
 		if err != nil {
 			return err
@@ -79,15 +79,15 @@ func run(a cli.Args) error {
 		defer os.RemoveAll(buildDir)
 
 		opts := cmakerun.Options{
-			HostSourceRoot:         a.SourceRoot,
-			HostBuildDir:           buildDir,
-			HostPrefixDir:          a.PrefixDir,
-			HostToolchainCMakeFile: a.ToolchainCMakeFile,
-			Stdout:                 os.Stderr, // route cmake noise to our stderr
-			Stderr:                 os.Stderr,
+			SourceRoot:         a.SourceRoot,
+			BuildDir:           buildDir,
+			PrefixDir:          a.PrefixDir,
+			ToolchainCMakeFile: a.ToolchainCMakeFile,
+			Stdout:             os.Stderr, // route cmake noise to our stderr
+			Stderr:             os.Stderr,
 		}
 		if a.OutReadPaths != "" {
-			opts.TracePath = "/build/trace.jsonl"
+			opts.TracePath = filepath.Join(buildDir, "trace.jsonl")
 		}
 		configureStart := time.Now()
 		reply, err := cmakerun.Configure(ctx, opts)
@@ -95,7 +95,7 @@ func run(a cli.Args) error {
 		if err != nil {
 			return failure.New(failure.ConfigureFailed, "%v", err)
 		}
-		replyDir = reply.HostPath
+		replyDir = reply.Path
 		ninjaPath = filepath.Join(buildDir, "build.ninja")
 	} else {
 		// Offline path: a build.ninja is sometimes checked in alongside the
@@ -137,8 +137,16 @@ func run(a cli.Args) error {
 		}
 	}
 
+	prefixAbs := ""
+	if a.PrefixDir != "" {
+		prefixAbs, err = filepath.Abs(a.PrefixDir)
+		if err != nil {
+			return err
+		}
+	}
 	pkg, err := lower.ToIR(r, g, lower.Options{
 		HostSourceRoot: a.SourceRoot,
+		HostPrefixDir:  prefixAbs,
 		Imports:        imports,
 	})
 	if err != nil {

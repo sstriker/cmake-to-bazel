@@ -26,7 +26,7 @@ func TestE2E_HelloWorld_ShadowTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	realOut := runConvert(t, realSrc, "")
+	realOut := runConvert(t, realSrc, false)
 	t.Logf("real-tree BUILD.bazel:\n%s", realOut)
 
 	// Build the shadow tree.
@@ -35,11 +35,7 @@ func TestE2E_HelloWorld_ShadowTree(t *testing.T) {
 		t.Fatalf("shadow.Build: %v", err)
 	}
 
-	// Where the trace will land on the host. The build dir gets created by
-	// runConvert; we tell cmakerun to redirect trace inside the sandbox at
-	// /build/trace.jsonl, which maps to <buildDir>/trace.jsonl.
-	traceRel := "trace.jsonl"
-	shadowOut := runConvert(t, shadowSrc, "/build/"+traceRel)
+	shadowOut := runConvert(t, shadowSrc, true)
 
 	// Scrub absolute source paths before comparison: realSrc and shadowSrc
 	// differ, but both should reduce to a stable form.
@@ -51,38 +47,40 @@ func TestE2E_HelloWorld_ShadowTree(t *testing.T) {
 	}
 }
 
-// runConvert spins a fresh build dir, runs cmake under bwrap, lowers the
-// reply, and emits BUILD.bazel. Returns the emitter output. If tracePath is
-// non-empty (in-sandbox absolute path), the trace is also captured and the
-// extracted source-relative read paths are logged for triage.
-func runConvert(t *testing.T, src, sandboxTracePath string) []byte {
+// runConvert spins a fresh build dir, runs cmake, lowers the reply, and
+// emits BUILD.bazel. Returns the emitter output. If trace is true, cmake's
+// --trace-redirect output is captured and the extracted source-relative
+// read paths are logged for triage.
+func runConvert(t *testing.T, src string, trace bool) []byte {
 	t.Helper()
 	buildDir := t.TempDir()
+	tracePath := ""
+	if trace {
+		tracePath = filepath.Join(buildDir, "trace.jsonl")
+	}
 
 	reply, err := cmakerun.Configure(t.Context(), cmakerun.Options{
-		HostSourceRoot: src,
-		HostBuildDir:   buildDir,
-		TracePath:      sandboxTracePath,
-		Stdout:         testWriter{t},
-		Stderr:         testWriter{t},
+		SourceRoot: src,
+		BuildDir:   buildDir,
+		TracePath:  tracePath,
+		Stdout:     testWriter{t},
+		Stderr:     testWriter{t},
 	})
 	if err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 
-	if sandboxTracePath != "" {
-		// Trace landed at <buildDir>/<basename(sandboxTracePath)>.
-		hostTrace := filepath.Join(buildDir, filepath.Base(sandboxTracePath))
-		raw, err := os.ReadFile(hostTrace)
+	if tracePath != "" {
+		raw, err := os.ReadFile(tracePath)
 		if err != nil {
-			t.Logf("trace not produced at %s: %v", hostTrace, err)
+			t.Logf("trace not produced at %s: %v", tracePath, err)
 		} else {
 			reads := shadow.ExtractReadPaths(raw, src)
 			t.Logf("trace read paths under %s: %v", src, reads)
 		}
 	}
 
-	r, err := fileapi.Load(reply.HostPath)
+	r, err := fileapi.Load(reply.Path)
 	if err != nil {
 		t.Fatalf("fileapi.Load: %v", err)
 	}

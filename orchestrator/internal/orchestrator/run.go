@@ -145,7 +145,7 @@ type Options struct {
 const defaultPerElementTimeout = 30 * time.Minute
 
 // defaultPlatform mirrors the toolchain pins enforced by the Makefile
-// and by hermetic.AssertCMakeVersion. Bumping any pin invalidates every
+// and by cmakerun.AssertVersion. Bumping any pin invalidates every
 // element's cache by changing the Action digest — that's the contract.
 var defaultPlatform = []reapi.PlatformProperty{
 	{Name: "Arch", Value: "x86_64"},
@@ -208,9 +208,14 @@ type FailureRecord struct {
 	Message string `json:"message"`
 }
 
-// sandboxPrefix is the in-sandbox path the converter's hermetic layer
-// mounts --prefix-dir at. Must match
-// converter/internal/hermetic/sandbox.go's --ro-bind target.
+// sandboxPrefix is the canonical, host-independent anchor the imports
+// manifest uses for cross-element link paths. The token is virtual: no
+// filesystem path of that name exists. lower remaps real prefix-dir
+// paths recorded in cmake's codemodel onto this anchor before the
+// LookupLinkPath call (see lower.manifestPrefixAnchor — the two must
+// match). The token shape is a holdover from the bwrap era when the
+// converter actually mounted --prefix-dir at /opt/prefix; we keep the
+// shape rather than churn the manifest schema.
 const sandboxPrefix = "/opt/prefix/"
 
 // Run drives the conversion. Returns a populated Result on success even if
@@ -962,13 +967,12 @@ func writeImportsForElement(importsRoot, name string, g *element.Graph, depRecor
 		}
 		linkPathsFor := map[string][]string{}
 		if prefixPath != "" {
-			// CMake's codemodel records link.commandFragments paths as
-			// they appear *inside* the converter's bwrap sandbox, where
-			// the synth-prefix tree is mounted at /opt/prefix (per
-			// converter/internal/hermetic/sandbox.go's --ro-bind line).
-			// link_paths in the imports manifest must use the same
-			// anchoring so lower's path-match in
-			// LookupLinkPath actually fires.
+			// CMake's codemodel records link.commandFragments at the real
+			// prefix dir's absolute path. lower (see manifestPrefixAnchor
+			// in converter/internal/lower/lower.go) remaps those onto the
+			// canonical sandboxPrefix token before LookupLinkPath, so the
+			// imports manifest stays host-independent regardless of where
+			// the consumer's prefix tree happens to land on disk.
 			for tgt, rels := range rec.PrefixRelLinkPaths {
 				for _, rel := range rels {
 					linkPathsFor[tgt] = append(linkPathsFor[tgt],
