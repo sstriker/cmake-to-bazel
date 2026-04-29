@@ -139,12 +139,24 @@ buildbarn-up:
 		docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=200; \
 		exit 1; \
 	)
-	@echo "waiting for bb-storage HTTP /-/healthy..."
+	@echo "waiting for bb-storage + bb-scheduler HTTP /-/healthy..."
+	@# Both bb-storage (:9980) and bb-scheduler (:9982) expose the same
+	@# /-/healthy diagnostics endpoint as their gRPC server. Polling
+	@# only bb-storage races scheduler-bound tests (TestE2E_Buildbarn_Execute
+	@# dials :8983 = bb-scheduler gRPC) past scheduler startup — the
+	@# scheduler container reports docker-`Started` before its gRPC
+	@# server has bound the port, and the test client sees `connection
+	@# reset by peer` / `broken pipe` / `connection refused`. Waiting
+	@# for both healthchecks closes the race; once /-/healthy answers,
+	@# the gRPC server on the same process is bound.
 	@for i in $$(seq 1 180); do \
-		if curl -fsS http://127.0.0.1:9980/-/healthy >/dev/null 2>&1; then echo "ready in $${i}s"; exit 0; fi; \
+		if curl -fsS http://127.0.0.1:9980/-/healthy >/dev/null 2>&1 \
+		   && curl -fsS http://127.0.0.1:9982/-/healthy >/dev/null 2>&1; then \
+			echo "ready in $${i}s"; exit 0; \
+		fi; \
 		sleep 1; \
 	done; \
-	echo "bb-storage did not become healthy within 180s; container logs:"; \
+	echo "bb-storage / bb-scheduler did not become healthy within 180s; container logs:"; \
 	docker compose -f $(BUILDBARN_COMPOSE) ps; \
 	docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=200; \
 	exit 1
