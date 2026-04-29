@@ -85,7 +85,10 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 	got := string(body)
 	for _, marker := range []string{
 		`tools = ["//tools:convert-element"]`,
-		`exclude = ["sources/CMakeLists.txt"]`,
+		// The shadow-merge cmd iterates $(SRCS) and strips down to
+		// the source-relative suffix.
+		`for src in $(SRCS)`,
+		`rel="$${src##*sources/}"`,
 		`"BUILD.bazel.out"`,
 		`"read_paths.json"`,
 		`"cmake-config-bundle.tar"`,
