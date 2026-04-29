@@ -107,7 +107,7 @@ func TestResolve_RemoteAsset_FetchAndMaterialize(t *testing.T) {
 		t.Fatalf("first Resolve: %v", err)
 	}
 	for name, want := range map[string][]byte{"CMakeLists.txt": cmakeLists, "hello.c": helloC} {
-		got, err := os.ReadFile(filepath.Join(first, name))
+		got, err := os.ReadFile(filepath.Join(first.Path, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
@@ -115,14 +115,20 @@ func TestResolve_RemoteAsset_FetchAndMaterialize(t *testing.T) {
 			t.Errorf("%s body mismatch", name)
 		}
 	}
+	if first.Digest == nil {
+		t.Errorf("kind:remote-asset Resolve returned nil Digest")
+	}
 
 	// Second call: cache hit, no extra RAA / CAS round-trip needed.
 	second, err := r.Resolve(ctx, el)
 	if err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
-	if first != second {
-		t.Errorf("cache miss on second call: %q vs %q", first, second)
+	if first.Path != second.Path {
+		t.Errorf("cache miss on second call: %q vs %q", first.Path, second.Path)
+	}
+	if second.Digest == nil || (first.Digest != nil && first.Digest.Hash != second.Digest.Hash) {
+		t.Errorf("digest changed across cache hits: first=%v second=%v", first.Digest, second.Digest)
 	}
 }
 

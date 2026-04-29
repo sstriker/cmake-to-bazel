@@ -542,11 +542,16 @@ func (r *runner) processElement(ctx context.Context, name string) error {
 	}
 
 	el := r.opts.Project.Elements[name]
-	realSrcRoot, err := r.resolver.Resolve(ctx, el)
+	resolved, err := r.resolver.Resolve(ctx, el)
 	if err != nil {
 		return fmt.Errorf("element %s: %w", name, err)
 	}
-	r.logger.Info("element start", "name", name)
+	realSrcRoot := resolved.Path
+	if resolved.Digest != nil {
+		r.logger.Info("element start", "name", name, "source_digest", resolved.Digest.Hash)
+	} else {
+		r.logger.Info("element start", "name", name)
+	}
 
 	// allowlist registry is shared persistent state — serialize.
 	r.mu.Lock()
