@@ -25,6 +25,7 @@ package reapi_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -224,6 +225,19 @@ func TestE2E_Buildbarn_ExecuteRealConvertElement(t *testing.T) {
 			{Name: "cmake-version", Value: "3.28.3"},
 			{Name: "ninja-version", Value: "1.11.1"},
 		},
+		// PATH must be set explicitly: REAPI Actions run with only
+		// the env vars declared in Command.environment_variables, NOT
+		// the worker's container PATH. Without this, convert-element's
+		// child cmake invocation fails with
+		//   cmakerun: cmake not on PATH: exec: "cmake": executable
+		//   file not found in $PATH
+		// even though our custom runner image symlinks cmake into
+		// /usr/local/bin. The runner image ships cmake at /opt/cmake/bin
+		// + a /usr/local/bin/cmake symlink; ninja and bwrap are in
+		// /usr/bin (apt-installed); we cover both.
+		EnvVars: map[string]string{
+			"PATH": "/usr/local/bin:/usr/bin:/bin",
+		},
 		Timeout: 4 * time.Minute,
 	})
 	if err != nil {
@@ -235,7 +249,18 @@ func TestE2E_Buildbarn_ExecuteRealConvertElement(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	if ar.ExitCode != 0 {
-		t.Fatalf("convert-element ExitCode = %d, want 0\n  stderr digest: %v", ar.ExitCode, ar.StderrDigest)
+		// Pull the stderr blob from CAS so the failure message is
+		// self-explanatory; otherwise CI just shows the digest hash.
+		stderr := "<no stderr digest reported>"
+		if ar.StderrDigest != nil {
+			if body, gerr := store.GetBlob(ctx, ar.StderrDigest); gerr == nil {
+				stderr = string(body)
+			} else {
+				stderr = fmt.Sprintf("<fetch failed: %v>", gerr)
+			}
+		}
+		t.Fatalf("convert-element ExitCode = %d, want 0\n  stderr digest: %v\n  stderr:\n%s",
+			ar.ExitCode, ar.StderrDigest, stderr)
 	}
 
 	// The converter's canonical outputs: BUILD.bazel at root, cmake-config/

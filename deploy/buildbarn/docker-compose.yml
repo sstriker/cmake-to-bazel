@@ -53,21 +53,6 @@ services:
       bb-storage:
         condition: service_started
 
-  bb-worker:
-    image: ghcr.io/buildbarn/bb-worker:20251031T081715Z-4415657
-    container_name: bb-worker
-    restart: unless-stopped
-    command: ["/config/worker.jsonnet"]
-    volumes:
-      - ./config:/config:ro
-      - bb-worker-build:/worker/build
-      - bb-worker-cache:/worker/cache
-    depends_on:
-      bb-storage:
-        condition: service_started
-      bb-scheduler:
-        condition: service_started
-
   bb-runner-bare:
     # Custom image: upstream bb-runner-bare layered with cmake / ninja /
     # bwrap at the versions the orchestrator's defaultPlatform asserts.
@@ -81,15 +66,68 @@ services:
     image: cmake-to-bazel/bb-runner:local
     container_name: bb-runner-bare
     restart: unless-stopped
-    command: ["/config/runner.jsonnet"]
+    # Pre-create /worker/build and /worker/cache before bb_runner
+    # starts. bb-worker hardlinks input files from cache_directory_path
+    # to build_directory_path; both paths must be on the SAME
+    # filesystem or the hardlink fails with EXDEV (invalid cross-device
+    # link). Mounting them as a single /worker volume keeps them on
+    # one filesystem, but the volume starts empty and bb-worker doesn't
+    # mkdir its working dirs — runner-bare creates them here, having
+    # /bin/sh available (debian:bookworm-slim base).
+    entrypoint: ["sh", "-c"]
+    command:
+      - "mkdir -p /worker/build /worker/cache && exec /app/bb_runner /config/runner.jsonnet"
     volumes:
       - ./config:/config:ro
-      - bb-worker-build:/worker/build
+      # Shared /worker volume covers both buildDirectoryPath
+      # (/worker/build) and cacheDirectoryPath (/worker/cache),
+      # placing bb-worker's hardlink source + destination on the
+      # same filesystem.
+      - bb-worker:/worker
+      # Dedicated socket volume, shared with bb-worker. Cannot live
+      # inside /worker/build: bb_runner clears stale entries from
+      # buildDirectoryPath at startup and would unlink its own
+      # listening socket. /sock is a sibling mount with nothing else
+      # in it, so the socket persists.
+      - bb-runner-sock:/sock
+    healthcheck:
+      test: ["CMD", "test", "-S", "/sock/runner.sock"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 5s
+
+  bb-worker:
+    image: ghcr.io/buildbarn/bb-worker:20251031T081715Z-4415657
+    container_name: bb-worker
+    restart: unless-stopped
+    command: ["/config/worker.jsonnet"]
+    volumes:
+      - ./config:/config:ro
+      # Single /worker volume holds both build_directory_path and
+      # cache_directory_path; bb-worker hardlinks between them and
+      # needs them on the same filesystem.
+      - bb-worker:/worker
+      - bb-runner-sock:/sock
+    ports:
+      - "127.0.0.1:9981:9981"  # diagnostics http (used by make buildbarn-up readiness)
     depends_on:
-      bb-worker:
+      bb-storage:
         condition: service_started
+      bb-scheduler:
+        condition: service_started
+      # bb-worker dials bb-runner-bare's unix socket on startup
+      # (worker.jsonnet's runners[].endpoint = unix:///worker/build/runner.sock).
+      # If runner hasn't bound the socket yet, the worker logs
+      # "Worker failed readiness check: dial unix .../runner.sock: connect:
+      # no such file or directory" and never registers with the scheduler;
+      # TestE2E_Buildbarn_Execute then fails with "No workers exist for
+      # platform ...". Waiting on runner's socket-bound healthcheck
+      # closes the race deterministically.
+      bb-runner-bare:
+        condition: service_healthy
 
 volumes:
   bb-storage-data:
-  bb-worker-build:
-  bb-worker-cache:
+  bb-worker:
+  bb-runner-sock:
