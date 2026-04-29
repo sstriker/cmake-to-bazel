@@ -309,7 +309,7 @@ exercises:
     cmake's read set): convert-element cache-hits in A; smoke
     binary still runs in B. The `zero_files`-backed input merkle
     is content-stable across edits to non-read files.
-  - Cache-stability scenario A' (edit a CMakeLists.txt comment IS
+  - Cache-stability scenario B (edit a CMakeLists.txt comment IS
     in the read set): convert-element re-runs in A but produces a
     byte-identical `BUILD.bazel.out`; B's smoke binary sha is
     unchanged. cmake's parser strips comments before the codemodel.

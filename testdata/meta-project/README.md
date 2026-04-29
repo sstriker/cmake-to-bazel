@@ -48,7 +48,7 @@ through both projects:
   in project A (zero-stub-backed input merkle is content-stable
   across edits to non-read source files); project B's smoke binary
   still prints "Hello, World!".
-- **Scenario A'** (CMakeLists.txt comment edit): convert-element
+- **Scenario B** (CMakeLists.txt comment edit): convert-element
   re-runs in project A (CMakeLists is real) but produces a
   byte-identical `BUILD.bazel.out` (cmake's parser strips comments
   before the codemodel); project B's smoke binary sha is unchanged
