@@ -1,5 +1,6 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
+        e2e-meta-hello \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -90,15 +91,16 @@ e2e-orchestrate: check-tools converter orchestrator
 e2e-orchestrate-scale: orchestrator
 	$(GO) test -run TestRun_Scale_DeterministicAcrossLevels -timeout 300s ./orchestrator/internal/orchestrator/...
 
-# Meta-project hello-world spike (Phase 2 of docs/whole-project-plan.md
-# post-rewrite). Renders project A from a single .bst via
-# cmd/write-a and validates the rendered tree shape; if bazel
-# is on PATH, drives the genrule end-to-end and asserts the
-# convert-element output. Skips the bazel phase cleanly when bazel
-# isn't installed (the rendering phase is the meaningful regression
-# check on its own).
-spike-hello: check-tools converter
-	scripts/spike-hello.sh
+# Phase 1 acceptance gate for the meta-project (Bazel-as-orchestrator)
+# shape (docs/whole-project-plan.md). Renders project A and project B
+# from the hello-world fixture via cmd/write-a, then drives the full
+# two-pass pipeline: bazel build A (runs convert-element via genrule)
+# -> stage A's BUILD.bazel.out into B -> bazel build + run B's smoke
+# binary linking against the converted cc_library. Skips the bazel
+# phases cleanly when bazel >= 7 isn't on PATH; the rendering checks
+# alone are still a useful regression gate.
+e2e-meta-hello: check-tools converter
+	scripts/meta-hello.sh
 
 # M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
 # in addition to the standard cmake/ninja/bwrap; if absent the test
