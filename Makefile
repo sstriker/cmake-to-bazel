@@ -1,6 +1,6 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
-        e2e-meta-hello \
+        e2e-meta-hello e2e-meta-stack \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -101,6 +101,16 @@ e2e-orchestrate-scale: orchestrator
 # alone are still a useful regression gate.
 e2e-meta-hello: check-tools converter
 	scripts/meta-hello.sh
+
+# Phase 2 acceptance gate for the meta-project. Multi-element fixture
+# (testdata/meta-project/two-libs/) — two kind:cmake elements + one
+# kind:stack bundling them. Validates write-a's per-kind dispatch +
+# graph-shape rendering + the kind:stack handler's filegroup
+# composition end-to-end through both projects, with a smoke binary
+# linking against both cmake elements. Same bazel-availability
+# gating as e2e-meta-hello.
+e2e-meta-stack: check-tools converter
+	scripts/meta-stack.sh
 
 # M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
 # in addition to the standard cmake/ninja/bwrap; if absent the test
