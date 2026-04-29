@@ -59,7 +59,7 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 		t.Fatalf("writeProjectA: %v", err)
 	}
 
-	// Required files in the rendered tree.
+	// Required files in the rendered project-A tree.
 	for _, want := range []string{
 		"MODULE.bazel",
 		"BUILD.bazel",
@@ -71,8 +71,43 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 		"elements/hello/sources/CMakeLists.txt",
 	} {
 		if _, err := os.Stat(filepath.Join(outDir, want)); err != nil {
-			t.Errorf("missing rendered file %q: %v", want, err)
+			t.Errorf("missing rendered file %q in project A: %v", want, err)
 		}
+	}
+
+	// Project B is rendered in parallel.
+	outBDir := filepath.Join(tmp, "project-B")
+	if err := writeProjectB(elem, outBDir); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	for _, want := range []string{
+		"MODULE.bazel",
+		"BUILD.bazel",
+		"elements/hello/BUILD.bazel", // placeholder, staged later
+		"elements/hello/CMakeLists.txt",
+	} {
+		if _, err := os.Stat(filepath.Join(outBDir, want)); err != nil {
+			t.Errorf("missing rendered file %q in project B: %v", want, err)
+		}
+	}
+	// Project B's MODULE.bazel must declare rules_cc so the
+	// converter-emitted load() resolves once the placeholder is
+	// replaced with A's BUILD.bazel.out.
+	bModule, err := os.ReadFile(filepath.Join(outBDir, "MODULE.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bModule), `bazel_dep(name = "rules_cc"`) {
+		t.Errorf("project B MODULE.bazel missing rules_cc bazel_dep:\n%s", bModule)
+	}
+	// The BUILD.bazel placeholder is recognizable so the driver's
+	// stage step is checkable.
+	bPlaceholder, err := os.ReadFile(filepath.Join(outBDir, "elements/hello/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bPlaceholder), "BUILD_NOT_YET_STAGED") {
+		t.Errorf("project B element BUILD missing placeholder marker:\n%s", bPlaceholder)
 	}
 
 	// The element's BUILD references the staged convert-element via
