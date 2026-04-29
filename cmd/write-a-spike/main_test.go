@@ -60,7 +60,7 @@ func TestSpikeWriter_HelloWorldShape(t *testing.T) {
 
 	// Required files in the rendered tree.
 	for _, want := range []string{
-		"MODULE.bazel",
+		"WORKSPACE.bazel",
 		"BUILD.bazel",
 		"rules/zero_files.bzl",
 		"rules/BUILD.bazel",

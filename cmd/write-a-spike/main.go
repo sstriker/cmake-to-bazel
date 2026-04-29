@@ -124,8 +124,14 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 		return err
 	}
 
-	// Top-level files.
-	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazel(elem)); err != nil {
+	// Top-level files. The spike uses WORKSPACE.bazel rather than
+	// bzlmod's MODULE.bazel because the meta workspace has no
+	// external deps (only genrules) and WORKSPACE keeps the spike
+	// compatible with older bazel versions in dev environments.
+	// Production wiring switches to MODULE.bazel + a real module
+	// extension that pulls per-kind translator binaries from a
+	// proper module.
+	if err := writeFile(filepath.Join(outDir, "WORKSPACE.bazel"), workspaceBazel(elem)); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"), "# project A root; per-element packages live under elements/<name>/.\n"); err != nil {
@@ -180,13 +186,20 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 	return nil
 }
 
-func moduleBazel(elem *element) string {
-	return `module(name = "meta_project_spike", version = "0.0.0")
+func workspaceBazel(elem *element) string {
+	return fmt.Sprintf(`workspace(name = "meta_project_spike_%s")
 
 # Project A only runs genrules (one per element invoking the
 # per-kind translator). It needs no rules_cc — that lives in
 # project B, which builds the converted output.
-`
+`, sanitizeForWorkspace(elem.Name))
+}
+
+// sanitizeForWorkspace returns a bazel-workspace-name-safe string:
+// only [A-Za-z0-9_], with hyphens replaced by underscores. Bazel
+// rejects workspace names containing '-'.
+func sanitizeForWorkspace(s string) string {
+	return strings.NewReplacer("-", "_", ".", "_", "/", "_").Replace(s)
 }
 
 func elementBuild(elem *element) string {
