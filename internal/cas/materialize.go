@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	repb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"google.golang.org/protobuf/proto"
@@ -29,6 +30,22 @@ func MaterializeDirectory(ctx context.Context, store Store, d *Digest, dst strin
 		return fmt.Errorf("materialize: mkdir %s: %w", dst, err)
 	}
 	return materializeDirRecurse(ctx, store, d, dst)
+}
+
+// writeFile writes a materialized file to disk. For executable files it
+// holds syscall.ForkLock for read while the FD is open so no concurrent
+// goroutine's fork+exec can inherit the in-flight write FD: a child that
+// inherits a write FD to the same inode (post-rename) would later
+// trigger ETXTBSY when its sibling tries to exec the materialized
+// binary. Non-executable files skip the lock — only exec'd binaries
+// matter for ETXTBSY.
+func writeFile(path string, body []byte, mode os.FileMode, isExecutable bool) error {
+	if !isExecutable {
+		return os.WriteFile(path, body, mode)
+	}
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	return os.WriteFile(path, body, mode)
 }
 
 // ErrMissingBlob wraps ErrNotFound with the digest of the missing
@@ -68,7 +85,7 @@ func materializeDirRecurse(ctx context.Context, store Store, d *Digest, dst stri
 		if f.IsExecutable {
 			mode = 0o755
 		}
-		if err := os.WriteFile(filepath.Join(dst, f.Name), body, mode); err != nil {
+		if err := writeFile(filepath.Join(dst, f.Name), body, mode, f.IsExecutable); err != nil {
 			return fmt.Errorf("materialize: write %s: %w", filepath.Join(dst, f.Name), err)
 		}
 	}

@@ -46,22 +46,39 @@ func stubConverter() int {
 	}
 	_, _ = replyDir, prefixDir
 
-	// Optional: record the imports-manifest path so the test can inspect it.
-	if recDir := os.Getenv("ORCHESTRATOR_STUB_RECORD_DIR"); recDir != "" {
-		_ = os.MkdirAll(recDir, 0o755)
-		recPath := filepath.Join(recDir, filepath.Base(*srcRoot)+".imports.txt")
-		_ = os.WriteFile(recPath, []byte(*importsManifest), 0o644)
-	}
-
 	mode := os.Getenv("ORCHESTRATOR_STUB_MODE")
 	if mode == "" {
 		mode = "success"
 	}
+	// elementName comes from the orchestrator's EnvVars plumbing; under
+	// LocalExecutor srcRoot is the relative input-root path "source",
+	// so filepath.Base(srcRoot) is no longer the element identity.
+	// Falls back to filepath.Base(*srcRoot) for legacy callers.
+	elementName := os.Getenv("ORCHESTRATOR_ELEMENT_NAME")
+	if elementName == "" {
+		elementName = filepath.Base(*srcRoot)
+	}
+
+	// Optional: record the imports-manifest contents so the test can
+	// inspect them. Pre-M5, the stub recorded the manifest path, but the
+	// path is now relative to the executor's input root (e.g.
+	// "imports.json") and unreadable from the test harness — so we
+	// record the resolved content instead.
+	if recDir := os.Getenv("ORCHESTRATOR_STUB_RECORD_DIR"); recDir != "" {
+		_ = os.MkdirAll(recDir, 0o755)
+		recPath := filepath.Join(recDir, filepath.Base(elementName)+".imports.txt")
+		var content []byte
+		if *importsManifest != "" {
+			content, _ = os.ReadFile(*importsManifest)
+		}
+		_ = os.WriteFile(recPath, content, 0o644)
+	}
+
 	// Per-element override: ORCHESTRATOR_STUB_MODE_<sanitized-element-name>
 	// where the element name is uppercased and non-[A-Z0-9_] chars are
 	// replaced with _. Lets one Run invocation drive different
 	// elements to different outcomes — needed for dep-failed tests.
-	if perElem := os.Getenv("ORCHESTRATOR_STUB_MODE_" + sanitizeStubKey(*srcRoot)); perElem != "" {
+	if perElem := os.Getenv("ORCHESTRATOR_STUB_MODE_" + sanitizeStubKey(elementName)); perElem != "" {
 		mode = perElem
 	}
 	// Optional sentinel emitted to stdout, used by tests asserting
@@ -80,7 +97,7 @@ func stubConverter() int {
 
 	switch mode {
 	case "success":
-		body := fmt.Sprintf("# stub BUILD.bazel for %s\n", filepath.Base(*srcRoot))
+		body := fmt.Sprintf("# stub BUILD.bazel for %s\n", elementName)
 		if err := os.MkdirAll(filepath.Dir(*outBuild), 0o755); err != nil {
 			return 70
 		}
@@ -91,7 +108,10 @@ func stubConverter() int {
 			if err := os.MkdirAll(*outBundle, 0o755); err != nil {
 				return 70
 			}
-			pkg := strings.ToLower(filepath.Base(*srcRoot))
+			// Strip any path components in the element name ("components/hello"
+			// -> "hello") so bundle filenames stay short and stable across
+			// element layouts.
+			pkg := strings.ToLower(filepath.Base(elementName))
 			_ = os.WriteFile(filepath.Join(*outBundle, pkg+"Config.cmake"), []byte("# stub config\n"), 0o644)
 			// Realistic Targets.cmake so the orchestrator's exports-extraction
 			// picks up the import declaration when building the next element's
@@ -248,19 +268,17 @@ func TestRun_ImportsManifestForDownstream(t *testing.T) {
 
 	// hello converts first; its imports manifest should be empty since
 	// `base` (its only dep) is kind:manual, not in the export registry.
-	// The stub records to <basename>.imports.txt where basename is the
-	// shadow tree's last path segment (= element name's last segment).
+	// The stub records the manifest contents to <basename>.imports.txt.
 	helloRec := mustReadFile(t, filepath.Join(rec, "hello.imports.txt"))
 	if len(helloRec) != 0 {
 		t.Errorf("hello got --imports-manifest=%q, want empty (no cmake deps)", helloRec)
 	}
 
 	// uses-hello sees a non-empty imports.json.
-	usesRec := mustReadFile(t, filepath.Join(rec, "uses-hello.imports.txt"))
-	if len(usesRec) == 0 {
+	importsBody := mustReadFile(t, filepath.Join(rec, "uses-hello.imports.txt"))
+	if len(importsBody) == 0 {
 		t.Fatal("uses-hello did not receive --imports-manifest")
 	}
-	importsBody := mustReadFile(t, string(usesRec))
 	for _, want := range []string{
 		`"version": 1`,
 		`"name": "components/hello"`,
