@@ -92,12 +92,13 @@ type element struct {
 func main() {
 	log.SetFlags(0)
 	bstPath := flag.String("bst", "", "path to the .bst file")
-	outDir := flag.String("out", "", "output directory for project A")
+	outA := flag.String("out", "", "output directory for project A (the meta workspace whose genrules run convert-element)")
+	outB := flag.String("out-b", "", "optional: output directory for project B (the consumer workspace built against project A's outputs). When unset, only project A is rendered.")
 	convertBin := flag.String("convert-element", "", "path to the convert-element binary (will be referenced from project-A's tools/)")
 	readPathsFeedback := flag.String("read-paths-feedback", "", "optional: path to a prior run's read_paths.json. When set, narrows the source-tree staging to that set + CMakeLists.txt files; everything else becomes a zero_files stub.")
 	flag.Parse()
 
-	if *bstPath == "" || *outDir == "" || *convertBin == "" {
+	if *bstPath == "" || *outA == "" || *convertBin == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -127,11 +128,18 @@ func main() {
 		elem.HasFeedback = true
 	}
 
-	if err := writeProjectA(elem, *outDir, convertAbs); err != nil {
+	if err := writeProjectA(elem, *outA, convertAbs); err != nil {
 		log.Fatalf("write project A: %v", err)
 	}
 	fmt.Printf("wrote project A for element %q at %s (real=%d, zero=%d)\n",
-		elem.Name, *outDir, len(elem.RealPaths), len(elem.ZeroPaths))
+		elem.Name, *outA, len(elem.RealPaths), len(elem.ZeroPaths))
+
+	if *outB != "" {
+		if err := writeProjectB(elem, *outB); err != nil {
+			log.Fatalf("write project B: %v", err)
+		}
+		fmt.Printf("wrote project B for element %q at %s\n", elem.Name, *outB)
+	}
 }
 
 // loadReadPaths parses a convert-element-emitted read_paths.json
@@ -262,6 +270,94 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 	}
 
 	return nil
+}
+
+// writeProjectB renders the consumer workspace project B reads against
+// project A's outputs. Layout:
+//
+//	<outDir>/
+//	  MODULE.bazel             ← bazel_dep(rules_cc)
+//	  BUILD.bazel              ← top-level placeholder
+//	  elements/<name>/
+//	    BUILD.bazel            ← placeholder; the driver script
+//	                             overwrites this with project A's
+//	                             bazel-bin/elements/<name>/BUILD.bazel.out
+//	                             after the bazel-A pass.
+//	    <element source tree>  ← full set of the user's sources (no
+//	                             narrowing — project B compiles the
+//	                             converted cc_library, so it needs the
+//	                             real files.)
+//
+// Project B doesn't run convert-element; it consumes A's converted
+// BUILD.bazel.out, which references rules_cc (load("@rules_cc//cc:defs.bzl",
+// "cc_library")). The MODULE.bazel here pulls rules_cc from the
+// registry — first-time bzlmod runs need network access to bcr (or a
+// mirror via SPIKE_BAZEL_*_ARGS, see scripts/spike-hello.sh comment).
+func writeProjectB(elem *element, outDir string) error {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+
+	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelB(elem)); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"),
+		"# project B root; per-element packages live under elements/<name>/.\n",
+	); err != nil {
+		return err
+	}
+
+	elemPkg := filepath.Join(outDir, "elements", elem.Name)
+	if err := os.MkdirAll(elemPkg, 0o755); err != nil {
+		return err
+	}
+
+	// Stage the FULL source tree (no narrowing). Project B's
+	// cc_library needs the real source bytes to compile, so this is
+	// the user's tree verbatim. Idempotent: blow away any prior
+	// staging first so re-runs reflect the current source state.
+	if err := os.RemoveAll(elemPkg); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(elemPkg, 0o755); err != nil {
+		return err
+	}
+	if err := copyTree(elem.AbsSourceDir, elemPkg); err != nil {
+		return fmt.Errorf("stage element sources for project B: %w", err)
+	}
+
+	// Placeholder BUILD; the driver script overwrites this after the
+	// bazel-A pass produces the converter's BUILD.bazel.out. Without
+	// the placeholder, Bazel would try to load() rules_cc against an
+	// empty package and fail with a confusing error before the stage
+	// step ran; the placeholder makes the staging-not-yet-run state
+	// explicit.
+	placeholder := fmt.Sprintf(`# Placeholder for cmd/write-a-rendered project B.
+# The driver script overwrites this file with project A's
+# bazel-bin/elements/%s/BUILD.bazel.out (the converter's output)
+# after the project-A bazel build succeeds. If this file is still
+# the placeholder when project B's bazel build runs, the staging
+# step was skipped.
+filegroup(name = "BUILD_NOT_YET_STAGED", srcs = [])
+`, elem.Name)
+	if err := writeFile(filepath.Join(elemPkg, "BUILD.bazel"), placeholder); err != nil {
+		return err
+	}
+	return nil
+}
+
+// moduleBazelB is project B's MODULE.bazel. Declares rules_cc so
+// project A's converted BUILD.bazel.out (which loads cc_library from
+// @rules_cc//cc:defs.bzl) resolves cleanly.
+func moduleBazelB(elem *element) string {
+	return fmt.Sprintf(`module(name = "meta_project_b_%s", version = "0.0.0")
+
+# rules_cc is what the cmake-converter emits load() lines against
+# (load("@rules_cc//cc:defs.bzl", "cc_library")). Pin a recent stable
+# release; this is downloaded from bcr.bazel.build the first time
+# project B's bazel build runs.
+bazel_dep(name = "rules_cc", version = "0.0.17")
+`, sanitizeModuleName(elem.Name))
 }
 
 // partitionSources walks the element's source tree and decides which
