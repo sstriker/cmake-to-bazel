@@ -1,8 +1,12 @@
 // Smoke tests for the cmd/write-a binary. These don't run Bazel —
-// they verify the rendered project-A tree has the expected structure
-// and key content. End-to-end Bazel-build validation through both
-// project A and project B lives in the `make e2e-meta-hello` target
-// (gated on Bazel availability).
+// they verify the rendered project-A and project-B trees have the
+// expected structure and key content. End-to-end Bazel-build
+// validation through both projects lives in:
+//
+//   - make e2e-meta-hello (single-element kind:cmake fixture, Phase 1)
+//   - make e2e-meta-stack (multi-element kind:cmake + kind:stack fixture, Phase 2)
+//
+// both gated on Bazel availability.
 
 package main
 
@@ -13,17 +17,49 @@ import (
 	"testing"
 )
 
-const sampleBst = `kind: cmake
+const sampleCmakeBst = `kind: cmake
 
 sources:
 - kind: local
   path: src
 `
 
+// fakeConvertBin makes a marker file the writer can stat() + copy. The
+// writer never executes it inside these tests; rendering doesn't run
+// any actions.
+func fakeConvertBin(t *testing.T, dir string) string {
+	t.Helper()
+	bin := filepath.Join(dir, "convert-element")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// makeCmakeBst stages a tiny kind:local cmake source tree at
+// dir/<name>/src/ and writes <name>.bst pointing at it. Returns the
+// .bst path.
+func makeCmakeBst(t *testing.T, dir, name string) string {
+	t.Helper()
+	srcDir := filepath.Join(dir, name+"-src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject("+name+")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(dir, name+".bst")
+	body := "kind: cmake\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return bst
+}
+
 func TestWriter_HelloWorldShape(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Stage a minimal cmake source tree.
 	srcDir := filepath.Join(tmp, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -33,33 +69,26 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	bstPath := filepath.Join(tmp, "hello.bst")
-	if err := os.WriteFile(bstPath, []byte(sampleBst), 0o644); err != nil {
+	if err := os.WriteFile(bstPath, []byte(sampleCmakeBst), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A fake convert-element binary — just a marker file. The writer
-	// only stat()s and copies it; no execution happens in this test.
-	binPath := filepath.Join(tmp, "convert-element-bin")
-	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	binPath := fakeConvertBin(t, tmp)
 
-	elem, err := loadElement(bstPath)
+	g, err := loadGraph([]string{bstPath})
 	if err != nil {
-		t.Fatalf("loadElement: %v", err)
+		t.Fatalf("loadGraph: %v", err)
 	}
-	if elem.Name != "hello" {
-		t.Errorf("Name = %q, want hello", elem.Name)
+	if len(g.Elements) != 1 || g.Elements[0].Name != "hello" {
+		t.Fatalf("Elements = %+v, want [hello]", g.Elements)
 	}
-	if elem.Bst.Kind != "cmake" {
-		t.Errorf("Kind = %q, want cmake", elem.Bst.Kind)
+	if g.Elements[0].Bst.Kind != "cmake" {
+		t.Errorf("Kind = %q, want cmake", g.Elements[0].Bst.Kind)
 	}
 
-	outDir := filepath.Join(tmp, "project-A")
-	if err := writeProjectA(elem, outDir, binPath); err != nil {
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
 		t.Fatalf("writeProjectA: %v", err)
 	}
-
-	// Required files in the rendered project-A tree.
 	for _, want := range []string{
 		"MODULE.bazel",
 		"BUILD.bazel",
@@ -70,39 +99,33 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 		"elements/hello/BUILD.bazel",
 		"elements/hello/sources/CMakeLists.txt",
 	} {
-		if _, err := os.Stat(filepath.Join(outDir, want)); err != nil {
+		if _, err := os.Stat(filepath.Join(outA, want)); err != nil {
 			t.Errorf("missing rendered file %q in project A: %v", want, err)
 		}
 	}
 
-	// Project B is rendered in parallel.
-	outBDir := filepath.Join(tmp, "project-B")
-	if err := writeProjectB(elem, outBDir); err != nil {
+	outB := filepath.Join(tmp, "project-B")
+	if err := writeProjectB(g, outB); err != nil {
 		t.Fatalf("writeProjectB: %v", err)
 	}
 	for _, want := range []string{
 		"MODULE.bazel",
 		"BUILD.bazel",
-		"elements/hello/BUILD.bazel", // placeholder, staged later
+		"elements/hello/BUILD.bazel",
 		"elements/hello/CMakeLists.txt",
 	} {
-		if _, err := os.Stat(filepath.Join(outBDir, want)); err != nil {
+		if _, err := os.Stat(filepath.Join(outB, want)); err != nil {
 			t.Errorf("missing rendered file %q in project B: %v", want, err)
 		}
 	}
-	// Project B's MODULE.bazel must declare rules_cc so the
-	// converter-emitted load() resolves once the placeholder is
-	// replaced with A's BUILD.bazel.out.
-	bModule, err := os.ReadFile(filepath.Join(outBDir, "MODULE.bazel"))
+	bModule, err := os.ReadFile(filepath.Join(outB, "MODULE.bazel"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(bModule), `bazel_dep(name = "rules_cc"`) {
 		t.Errorf("project B MODULE.bazel missing rules_cc bazel_dep:\n%s", bModule)
 	}
-	// The BUILD.bazel placeholder is recognizable so the driver's
-	// stage step is checkable.
-	bPlaceholder, err := os.ReadFile(filepath.Join(outBDir, "elements/hello/BUILD.bazel"))
+	bPlaceholder, err := os.ReadFile(filepath.Join(outB, "elements/hello/BUILD.bazel"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,17 +134,15 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 	}
 
 	// The element's BUILD references the staged convert-element via
-	// tools = [//tools:convert-element], split CMakeLists out of the
-	// glob, and produces the three expected outputs.
-	body, err := os.ReadFile(filepath.Join(outDir, "elements/hello/BUILD.bazel"))
+	// tools = [//tools:convert-element], merges sources via the
+	// shadow-build cmd, and produces the three expected outputs.
+	body, err := os.ReadFile(filepath.Join(outA, "elements/hello/BUILD.bazel"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(body)
 	for _, marker := range []string{
 		`tools = ["//tools:convert-element"]`,
-		// The shadow-merge cmd iterates $(SRCS) and strips down to
-		// the source-relative suffix.
 		`for src in $(SRCS)`,
 		`rel="$${src##*sources/}"`,
 		`"BUILD.bazel.out"`,
@@ -135,32 +156,92 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 	}
 }
 
-func TestWriter_RejectsNonCmakeKind(t *testing.T) {
-	tmp := t.TempDir()
-	bstPath := filepath.Join(tmp, "x.bst")
-	if err := os.WriteFile(bstPath, []byte("kind: meson\nsources:\n- kind: local\n  path: .\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	elem, err := loadElement(bstPath)
-	if err != nil {
-		t.Fatalf("loadElement: %v", err)
-	}
-	if elem.Bst.Kind != "meson" {
-		t.Errorf("expected to parse meson kind for the rejection check, got %q", elem.Bst.Kind)
-	}
-	// The main() function rejects non-cmake; loadElement itself
-	// permits the parse so a later writer can extend dispatch.
-	// Validate the rejection path stays where main() can surface a
-	// useful error message when a future caller adds a new kind.
-}
-
 func TestWriter_RejectsNonLocalSource(t *testing.T) {
 	tmp := t.TempDir()
 	bstPath := filepath.Join(tmp, "x.bst")
 	if err := os.WriteFile(bstPath, []byte("kind: cmake\nsources:\n- kind: tar\n  url: foo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadElement(bstPath); err == nil {
+	if _, err := loadGraph([]string{bstPath}); err == nil {
 		t.Errorf("expected error for non-local source, got nil")
 	}
+}
+
+func TestWriter_RejectsDuplicateElementName(t *testing.T) {
+	tmp := t.TempDir()
+	dir1 := filepath.Join(tmp, "d1")
+	dir2 := filepath.Join(tmp, "d2")
+	bst1 := makeCmakeBst(t, dir1, "shared")
+	bst2 := makeCmakeBst(t, dir2, "shared")
+	if _, err := loadGraph([]string{bst1, bst2}); err == nil {
+		t.Errorf("expected error for duplicate element name, got nil")
+	}
+}
+
+func TestWriter_GraphTopoSorted(t *testing.T) {
+	// Build three cmake elements where leaf <- mid <- root; load them
+	// in reverse order and check the graph comes out in dep order.
+	tmp := t.TempDir()
+	leafBst := makeCmakeBst(t, tmp, "leaf")
+	midBst := makeCmakeBst(t, tmp, "mid")
+	rootBst := makeCmakeBst(t, tmp, "root")
+	// Inject depends: edges by appending to the .bst files.
+	if err := appendDepends(midBst, []string{"leaf"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendDepends(rootBst, []string{"mid"}); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{rootBst, midBst, leafBst}) // reverse order
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	got := []string{}
+	for _, e := range g.Elements {
+		got = append(got, e.Name)
+	}
+	want := []string{"leaf", "mid", "root"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("topo order = %v, want %v", got, want)
+	}
+}
+
+func TestWriter_RejectsCycle(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := makeCmakeBst(t, tmp, "b")
+	// a depends on b, b depends on a → cycle.
+	if err := appendDepends(a, []string{"b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendDepends(b, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadGraph([]string{a, b}); err == nil {
+		t.Errorf("expected cycle error, got nil")
+	}
+}
+
+func TestWriter_RejectsMissingDep(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	if err := appendDepends(a, []string{"nonexistent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadGraph([]string{a}); err == nil {
+		t.Errorf("expected unresolved-dep error, got nil")
+	}
+}
+
+// appendDepends adds a depends: list to an existing .bst file.
+func appendDepends(bstPath string, deps []string) error {
+	body, err := os.ReadFile(bstPath)
+	if err != nil {
+		return err
+	}
+	body = append(body, "depends:\n"...)
+	for _, d := range deps {
+		body = append(body, "- "+d+"\n"...)
+	}
+	return os.WriteFile(bstPath, body, 0o644)
 }
