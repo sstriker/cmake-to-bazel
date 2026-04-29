@@ -11,8 +11,12 @@
 //
 // Notable schema notes:
 //   - blobstore.{contentAddressableStorage,actionCache} are
-//     BlobAccessConfigurations; the grpc backend takes
-//     `client: { address: ... }`, not bare `address`.
+//     BlobAccessConfigurations whose `grpc` backend IS a
+//     ClientConfiguration — its `address` field is at the top
+//     level, not nested under `client`. Wrapping in
+//     `grpc: { client: { address: ... } }` fails proto unmarshal
+//     with "unknown field 'client'" (the parser is already inside
+//     ClientConfiguration when it sees the `client` key).
 //   - default_execution_timeout / maximum_execution_timeout used to
 //     live on each runner; they were moved to the scheduler's
 //     action_router.initial_size_class_analyzer. Setting them here
@@ -32,15 +36,24 @@
   },
   blobstore: {
     contentAddressableStorage: {
-      grpc: { client: { address: 'bb-storage:8980' } },
+      grpc: { address: 'bb-storage:8980' },
     },
     actionCache: {
-      grpc: { client: { address: 'bb-storage:8980' } },
+      grpc: { address: 'bb-storage:8980' },
     },
   },
   scheduler: { address: 'bb-scheduler:8984' },
   browserUrl: 'http://localhost:7984/',
   maximumMessageSizeBytes: 16 * 1024 * 1024,
+  // Per-process concurrency for staging input roots from CAS and
+  // uploading output blobs back. Both fields are REQUIRED by
+  // bb-worker; unset (0) causes a fatal "Nonpositive input download
+  // concurrency: 0" / "Nonpositive output upload concurrency: 0" at
+  // startup. Values are per-worker-process not per-action; for a
+  // single-action validation worker, modest values keep the local
+  // gRPC client pool small without bottlenecking real workloads.
+  inputDownloadConcurrency: 10,
+  outputUploadConcurrency: 10,
   // The build root the runner shares — bb-worker writes input roots
   // here and bb-runner-bare exec's commands inside subdirectories.
   buildDirectories: [{
@@ -52,7 +65,7 @@
       cacheReplacementPolicy: 'LEAST_RECENTLY_USED',
     },
     runners: [{
-      endpoint: { address: 'unix:///worker/build/runner.sock' },
+      endpoint: { address: 'unix:///sock/runner.sock' },
       concurrency: 1,
       // Platform properties mirror orchestrator's defaultPlatform.
       // Operators bumping any pin must update both sides.

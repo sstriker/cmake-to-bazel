@@ -149,12 +149,32 @@ buildbarn-up:
 		docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=200; \
 		exit 1; \
 	)
-	@echo "waiting for bb-storage HTTP /-/healthy..."
+	@echo "waiting for bb-storage + bb-scheduler + bb-worker HTTP /-/healthy..."
+	@# Each container exposes /-/healthy on its diagnostics http port:
+	@#   bb-storage   :9980
+	@#   bb-scheduler :9982
+	@#   bb-worker    :9981
+	@# Polling only bb-storage masked schema-config crashes elsewhere;
+	@# polling only storage + scheduler still missed bb-worker
+	@# crashes (TestE2E_Buildbarn_Execute then saw "No workers exist
+	@# for instance name prefix ..." because bb-worker had never
+	@# managed to register against bb-scheduler:8984).
+	@#
+	@# Waiting for all three closes the visibility gap. Worker health
+	@# also serves as a coarse "scheduler has at least seen the
+	@# worker" signal — bb-worker only binds its diagnostics http
+	@# AFTER its config parses and BEFORE registering with the
+	@# scheduler, so a successful poll guarantees the config is
+	@# valid; registration follows shortly after on the same process.
 	@for i in $$(seq 1 180); do \
-		if curl -fsS http://127.0.0.1:9980/-/healthy >/dev/null 2>&1; then echo "ready in $${i}s"; exit 0; fi; \
+		if curl -fsS http://127.0.0.1:9980/-/healthy >/dev/null 2>&1 \
+		   && curl -fsS http://127.0.0.1:9982/-/healthy >/dev/null 2>&1 \
+		   && curl -fsS http://127.0.0.1:9981/-/healthy >/dev/null 2>&1; then \
+			echo "ready in $${i}s"; exit 0; \
+		fi; \
 		sleep 1; \
 	done; \
-	echo "bb-storage did not become healthy within 180s; container logs:"; \
+	echo "buildbarn stack did not become healthy within 180s; container logs:"; \
 	docker compose -f $(BUILDBARN_COMPOSE) ps; \
 	docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=200; \
 	exit 1
@@ -174,8 +194,44 @@ e2e-buildbarn: buildbarn-up
 # `make converter` is a prerequisite of the real-converter test; if the
 # binary isn't present that subtest skips with a clear message.
 e2e-buildbarn-execute: converter buildbarn-up
-	$(GO) test -tags=buildbarn -run TestE2E_Buildbarn_Execute ./internal/reapi/...
-	$(MAKE) buildbarn-down
+	@# On test failure, dump per-container logs before tearing down so
+	@# CI shows worker/scheduler/runner state when "No workers exist"
+	@# or similar registration-side errors fire. /-/healthy says "the
+	@# diagnostics http server bound" but says nothing about whether
+	@# bb-worker has finished registering against bb-scheduler:8984;
+	@# the logs disambiguate.
+	@$(GO) test -tags=buildbarn -run TestE2E_Buildbarn_Execute ./internal/reapi/...; \
+	  ec=$$?; \
+	  if [ $$ec -ne 0 ]; then \
+	    echo "=== container state ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) ps -a; \
+	    echo "=== bb-runner-bare inspect (RestartCount, ExitCode, OOMKilled) ==="; \
+	    docker inspect bb-runner-bare --format='RestartCount={{.RestartCount}} State.Status={{.State.Status}} ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Error="{{.State.Error}}"' || true; \
+	    echo "=== bb-runner-bare healthcheck history ==="; \
+	    docker inspect bb-runner-bare --format='{{range .State.Health.Log}}{{.Start}} ExitCode={{.ExitCode}} Output={{.Output | printf "%q"}}{{println}}{{end}}' || true; \
+	    echo "=== bb-runner-bare procs ==="; \
+	    docker top bb-runner-bare || true; \
+	    echo "=== bb-runner-bare find for runner.sock anywhere ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) exec -T bb-runner-bare find / -name 'runner.sock' -o -name 'runner' -type s 2>/dev/null || true; \
+	    echo "=== bb-runner-bare /worker tree ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) exec -T bb-runner-bare ls -lR /worker 2>&1 || true; \
+	    echo "=== bb-runner-bare /tmp ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) exec -T bb-runner-bare ls -la /tmp 2>&1 || true; \
+	    for svc in bb-worker bb-scheduler bb-runner-bare bb-storage; do \
+	      echo "=== $$svc logs ==="; \
+	      docker compose -f $(BUILDBARN_COMPOSE) logs --no-color --timestamps --tail=100 $$svc; \
+	    done; \
+	    echo "=== bb-runner-bare /worker/build view ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) exec -T bb-runner-bare ls -la /worker/build/ || true; \
+	    echo "=== bb-worker /worker/build view ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) exec -T bb-worker ls -la /worker/build/ || true; \
+	    echo "=== bb-worker uid/gid ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) exec -T bb-worker id || true; \
+	    echo "=== bb-runner-bare uid/gid ==="; \
+	    docker compose -f $(BUILDBARN_COMPOSE) exec -T bb-runner-bare id || true; \
+	  fi; \
+	  $(MAKE) buildbarn-down; \
+	  exit $$ec
 
 # Local-dev bazelisk bootstrap. Installs to ~/.local/bin by default
 # (override with PREFIX=). The bazel-tagged e2e tests self-skip when

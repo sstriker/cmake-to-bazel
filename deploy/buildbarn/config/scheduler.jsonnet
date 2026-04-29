@@ -35,10 +35,19 @@
     },
   },
   // CAS lookup for Action protos. BlobAccessConfiguration's grpc
-  // backend wants a nested `client` (ClientConfiguration), not a
-  // bare `address` field.
+  // backend IS a ClientConfiguration (its `address` field is at the
+  // top level, not nested under `client`). The proto:
+  //   message BlobAccessConfiguration {
+  //     oneof backend {
+  //       buildbarn.configuration.grpc.ClientConfiguration grpc = 7;
+  //       ...
+  //     }
+  //   }
+  // So `grpc: { address: ... }` is correct; wrapping in
+  // `grpc: { client: { address: ... } }` produces "unknown field
+  // 'client'" because the parser is already inside ClientConfiguration.
   contentAddressableStorage: {
-    grpc: { client: { address: 'bb-storage:8980' } },
+    grpc: { address: 'bb-storage:8980' },
   },
   // Client-facing gRPC (Execution + Capabilities). The orchestrator
   // submits Action digests here.

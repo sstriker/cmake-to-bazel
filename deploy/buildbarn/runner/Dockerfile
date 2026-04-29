@@ -32,6 +32,15 @@ ARG BWRAP_VERSION=0.8.0
 #   cmake          3.25.1   (need 3.28.3 — download from Kitware GitHub releases)
 #   ninja-build    1.11.1   (matches NINJA_VERSION pin exactly)
 #   bubblewrap     0.8.0    (matches BWRAP_VERSION pin exactly)
+#   gcc            12.2.0   (whatever bookworm ships; convert-element only
+#                            needs *a* C compiler reachable from cmake's
+#                            project() probe — exact version is the
+#                            converter's responsibility, not ours)
+#
+# build-essential pulls gcc + g++ + make + libc6-dev. We only need the C
+# compiler for cmake's enable_language(C) probe, so pull `gcc` directly
+# (smaller layer); add libc6-dev so #include <stdio.h> works in test
+# fixtures that exercise compilation.
 #
 # For cmake we used to use Kitware's apt repo, but apt.kitware.com only
 # carries one (rolling) cmake version, so once they bumped past 3.28.x
@@ -41,6 +50,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl \
+        gcc libc6-dev \
         ninja-build \
         bubblewrap \
     ; \
