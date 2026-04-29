@@ -16,7 +16,7 @@
 #   5. bazel build + bazel run in project B compiles and executes the
 #      smoke binary; output is asserted to contain "Hello, World!".
 #
-# Cache-stability scenarios A and A' are exercised inline after the
+# Cache-stability scenarios A and B are exercised inline after the
 # initial round-trip succeeds, asserting both project A's conversion
 # stability AND project B's downstream rebuild behavior.
 #
@@ -194,7 +194,7 @@ sha_smoke_initial=$(sha_of "$B/bazel-bin/smoke/hello_smoke")
 #
 # The meta-project shape's two cache-stability claims:
 #
-#   Scenario A  (edit hello.c — NOT in cmake's read set):
+#   Scenario A (edit hello.c — NOT in cmake's read set):
 #     - Project A: convert-element cache-hits (zero_files makes the
 #       genrule's input merkle stable across hello.c content changes).
 #     - Project B: cc_library recompiles, since hello.c is in its
@@ -203,7 +203,7 @@ sha_smoke_initial=$(sha_of "$B/bazel-bin/smoke/hello_smoke")
 #       that depend on hello-world's exports also wouldn't rebuild
 #       (no sibling here, so the check is just A's stability).
 #
-#   Scenario A' (edit CMakeLists.txt comment — IS in the read set):
+#   Scenario B (edit CMakeLists.txt comment — IS in the read set):
 #     - Project A: convert-element re-runs (CMakeLists is real),
 #       but produces byte-identical output (cmake's parser strips
 #       comments before the codemodel).
@@ -302,31 +302,31 @@ fi
 echo "Scenario A: B's smoke binary still prints Hello, World!"
 
 echo
-echo "=== Scenario A': edit CMakeLists.txt comment (IS in read set) ==="
-echo "# scenario-A' comment $(date +%s)" >> "$edit_src/CMakeLists.txt"
+echo "=== Scenario B: edit CMakeLists.txt comment (IS in read set) ==="
+echo "# scenario-B comment $(date +%s)" >> "$edit_src/CMakeLists.txt"
 rerender_with_feedback
 sha_smoke_before_aprime=$(sha_of "$B/bazel-bin/smoke/hello_smoke")
 run_bazel "$A" build //elements/hello-world:hello-world_converted 2>&1 | tail -3
 sha_a_aprime=$(sha_of "$build_out_a")
 if [ "$sha_a_aprime" != "$sha_a_narrowed" ]; then
-    echo "Scenario A' FAILED: A's BUILD.bazel.out shifted after comment edit" >&2
+    echo "Scenario B FAILED: A's BUILD.bazel.out shifted after comment edit" >&2
     echo "  expected: $sha_a_narrowed" >&2
     echo "  got:      $sha_a_aprime" >&2
     exit 1
 fi
-echo "Scenario A': A's BUILD.bazel.out byte-identical (cmake parser strips comments)"
+echo "Scenario B: A's BUILD.bazel.out byte-identical (cmake parser strips comments)"
 restage_b
 # Project B should NOT rebuild: nothing in any cc_* rule's srcs/deps
 # changed, and the staged BUILD.bazel is byte-identical.
 run_bazel "$B" build //smoke:hello_smoke 2>&1 | tail -3
 sha_smoke_after_aprime=$(sha_of "$B/bazel-bin/smoke/hello_smoke")
 if [ "$sha_smoke_before_aprime" != "$sha_smoke_after_aprime" ]; then
-    echo "Scenario A' FAILED: B's smoke binary changed after comment edit" >&2
+    echo "Scenario B FAILED: B's smoke binary changed after comment edit" >&2
     echo "  before: $sha_smoke_before_aprime" >&2
     echo "  after:  $sha_smoke_after_aprime" >&2
     exit 1
 fi
-echo "Scenario A': B's smoke binary sha unchanged (no rebuild)"
+echo "Scenario B: B's smoke binary sha unchanged (no rebuild)"
 
 echo
-echo "meta-hello: ok (round-trip + scenarios A and A' validated through both projects)"
+echo "meta-hello: ok (round-trip + scenarios A and B validated through both projects)"
