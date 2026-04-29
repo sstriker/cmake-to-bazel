@@ -73,8 +73,7 @@ type Args struct {
 	// Local-dev only; M3 must never set this.
 	AllowCMakeVersionMismatch bool
 
-	// PrefixDir, when non-empty, is mounted read-only into the sandbox at
-	// /opt/prefix and exposed to cmake via CMAKE_PREFIX_PATH. Holds the
+	// PrefixDir, when non-empty, is added to CMAKE_PREFIX_PATH. Holds the
 	// synthesized cmake-config bundles + zero-byte IMPORTED_LOCATION
 	// stubs that let find_package resolve out-of-tree deps. The
 	// orchestrator (M3a step 4) builds the tree per-codebase from the
@@ -86,8 +85,7 @@ type Args struct {
 	// populates the compiler-detection cache. cmakerun passes it via
 	// -DCMAKE_TOOLCHAIN_FILE so cmake skips the compiler-detection
 	// probe — a measurable per-conversion latency win at project
-	// scale. The file is mounted into the sandbox alongside the
-	// source root.
+	// scale.
 	ToolchainCMakeFile string
 }
 
@@ -106,7 +104,7 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.StringVar(&a.OutReadPaths, "out-read-paths", "", "write JSON array of source-tree paths cmake read at configure time (requires --source-root, optional)")
 	fs.StringVar(&a.OutTimings, "out-timings", "", "write JSON with per-phase wall-clock timings (cmake configure, translation, total)")
 	fs.BoolVar(&a.AllowCMakeVersionMismatch, "allow-cmake-version-mismatch", false, "let convert-element run with cmake older than the codemodel-v2 floor (local-dev escape hatch)")
-	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory mounted at /opt/prefix and added to CMAKE_PREFIX_PATH (out-of-tree synth-prefix; orchestrator-driven)")
+	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory added to CMAKE_PREFIX_PATH (out-of-tree synth-prefix; orchestrator-driven)")
 	fs.StringVar(&a.ToolchainCMakeFile, "toolchain-cmake-file", "", "CMake toolchain file (typically derive-toolchain's toolchain.cmake); skips per-conversion compiler probing")
 
 	if err := fs.Parse(argv); err != nil {

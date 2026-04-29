@@ -45,16 +45,16 @@ func TestE2E_Fmt_Converts(t *testing.T) {
 
 	buildDir := t.TempDir()
 	reply, err := cmakerun.Configure(context.Background(), cmakerun.Options{
-		HostSourceRoot: fmtSourceRoot,
-		HostBuildDir:   buildDir,
-		Stdout:         testWriter{t},
-		Stderr:         testWriter{t},
+		SourceRoot: fmtSourceRoot,
+		BuildDir:   buildDir,
+		Stdout:     testWriter{t},
+		Stderr:     testWriter{t},
 	})
 	if err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 
-	r, err := fileapi.Load(reply.HostPath)
+	r, err := fileapi.Load(reply.Path)
 	if err != nil {
 		t.Fatalf("fileapi.Load: %v", err)
 	}

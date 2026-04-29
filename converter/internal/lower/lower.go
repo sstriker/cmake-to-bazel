@@ -27,10 +27,16 @@ import (
 type Options struct {
 	// HostSourceRoot is the on-disk path to the source tree, used for
 	// filesystem walks (e.g. header discovery under each include directory).
-	// It may differ from the source root recorded in the File API codemodel
-	// when cmake ran inside a sandbox that bind-mounted the source tree at
-	// a different path (e.g. /src). Defaults to the codemodel's source path.
+	// Defaults to the source path recorded in the File API codemodel.
 	HostSourceRoot string
+
+	// HostPrefixDir, when set, is the absolute on-disk path to the
+	// synthesized prefix tree cmake configured against (CMAKE_PREFIX_PATH).
+	// Codemodel link.commandFragments paths anchored at this dir are
+	// remapped to manifestPrefixAnchor before manifest lookup so the
+	// host-independent imports manifest matches regardless of where on
+	// disk the prefix tree happens to live.
+	HostPrefixDir string
 
 	// Imports resolves out-of-tree imported targets (find_package-style
 	// names that aren't part of the current codebase) to Bazel labels.
@@ -38,6 +44,13 @@ type Options struct {
 	// link deps trigger unresolved-link-dep.
 	Imports *manifest.Resolver
 }
+
+// manifestPrefixAnchor is the canonical token the orchestrator's imports
+// manifest uses to anchor cross-element link paths (see
+// orchestrator.sandboxPrefix). The token is virtual — no filesystem path
+// of that name exists; lower remaps real prefix paths onto it before
+// LookupLinkPath.
+const manifestPrefixAnchor = "/opt/prefix/"
 
 // Header file extensions we treat as `hdrs` candidates when walking include
 // directories. Lowercase comparison.
@@ -97,7 +110,7 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 			return nil, failure.New(failure.FileAPIMalformed,
 				"target id %q in codemodel but not loaded", tref.Id)
 		}
-		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, g, cc, idToName, utilityIDs, opts.Imports)
+		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, opts.HostPrefixDir, g, cc, idToName, utilityIDs, opts.Imports)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +137,7 @@ func projectName(r *fileapi.Reply) string {
 	return ""
 }
 
-func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *ninja.Graph, cc *codegenContext, idToName map[string]string, utilityIDs map[string]bool, imports *manifest.Resolver) (*ir.Target, error) {
+func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix string, g *ninja.Graph, cc *codegenContext, idToName map[string]string, utilityIDs map[string]bool, imports *manifest.Resolver) (*ir.Target, error) {
 	irt := &ir.Target{Name: t.Name}
 
 	switch t.Type {
@@ -262,6 +275,9 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc string, g *nin
 			path := strings.TrimSpace(frag.Fragment)
 			if path == "" || !filepath.IsAbs(path) {
 				continue
+			}
+			if hostPrefix != "" && strings.HasPrefix(path, hostPrefix+string(filepath.Separator)) {
+				path = manifestPrefixAnchor + path[len(hostPrefix)+1:]
 			}
 			if export := imports.LookupLinkPath(path); export != nil {
 				if !seen[export.BazelLabel] {

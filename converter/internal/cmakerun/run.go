@@ -1,78 +1,79 @@
-// Package cmakerun invokes cmake against a sandboxed source/build pair and
-// returns the resolved File API reply directory.
+// Package cmakerun invokes cmake configure against a source/build pair
+// and returns the File API reply directory.
 //
-// One Configure call corresponds to exactly one cmake invocation. The caller
-// is responsible for the build dir lifecycle (create, clean up); this package
+// One Configure call corresponds to exactly one cmake invocation. The
+// caller owns the build dir lifecycle (create, clean up); this package
 // only writes inside it.
+//
+// Hermeticity is the caller's responsibility — typically achieved by
+// running cmakerun.Configure inside an REAPI Action whose worker
+// provides the sandbox. The package sets the deterministic env
+// (SOURCE_DATE_EPOCH, locale, find_package suppression) on the cmake
+// child process so configure-time outputs stay byte-stable across hosts
+// even when no outer sandbox is in play.
 package cmakerun
 
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-
-	"github.com/sstriker/cmake-to-bazel/converter/internal/hermetic"
 )
 
-// Options configures one Configure call. M1 surface is intentionally narrow.
+// SourceDateEpoch is the project-wide fixed timestamp for deterministic
+// configure-time outputs. 2020-01-01T00:00:00Z, picked arbitrarily to be
+// visibly synthetic and not collide with real package mtimes.
+const SourceDateEpoch = "1577836800"
+
+// Options configures one Configure call.
 type Options struct {
-	// HostSourceRoot, HostBuildDir are real paths on the host. They get
-	// mounted into the sandbox at /src and /build respectively.
-	HostSourceRoot string
-	HostBuildDir   string
+	// SourceRoot is the cmake source root (-S).
+	SourceRoot string
 
-	// HostPrefixDir is the optional dependency-prefix tree, mounted at
-	// /opt/prefix.
-	HostPrefixDir string
+	// BuildDir is the cmake build directory (-B). Caller owns lifecycle.
+	BuildDir string
 
-	// HostToolchainCMakeFile, when non-empty, is mounted read-only
-	// at /toolchain.cmake in the sandbox and passed to cmake via
-	// -DCMAKE_TOOLCHAIN_FILE. Pre-derived by derive-toolchain;
+	// PrefixDir, when non-empty, is added to CMAKE_PREFIX_PATH so
+	// find_package picks up the synthetic prefix tree of dep
+	// <Pkg>Config.cmake bundles produced by previous conversions.
+	PrefixDir string
+
+	// ToolchainCMakeFile, when non-empty, is passed via
+	// -DCMAKE_TOOLCHAIN_FILE=. Pre-derived by derive-toolchain;
 	// skips cmake's compiler-detection probe, cutting per-conversion
 	// configure latency.
-	HostToolchainCMakeFile string
+	ToolchainCMakeFile string
 
-	// BuildType is passed as -DCMAKE_BUILD_TYPE. M1 always passes "Release".
+	// BuildType is passed as -DCMAKE_BUILD_TYPE. Defaults to Release.
 	BuildType string
 
 	// TracePath, when non-empty, enables `cmake --trace-expand
-	// --trace-format=json-v1 --trace-redirect=<path>`. The path is
-	// in-sandbox; cmakerun bind-mounts BuildDir at /build, so a TracePath
-	// like "/build/trace.jsonl" lands at filepath.Join(HostBuildDir,
-	// "trace.jsonl") on the host afterward.
+	// --trace-format=json-v1 --trace-redirect=<TracePath>`.
 	TracePath string
 
 	// Stdout/Stderr capture cmake output. Nil discards.
-	Stdout, Stderr interface {
-		Write([]byte) (int, error)
-	}
+	Stdout, Stderr io.Writer
 }
 
-// Reply is the File API reply directory cmake produced, expressed both as
-// the host-visible absolute path and the in-sandbox path. Callers that load
-// the reply outside the sandbox use Host; loaders that work in-sandbox use
-// Sandbox.
+// Reply is the File API reply directory cmake produced.
 type Reply struct {
-	HostPath    string
-	SandboxPath string
+	Path string
 }
 
-// Configure runs cmake -B /build -S /src under bwrap, with File API queries
+// Configure runs cmake -B <build> -S <source>, with File API queries
 // pre-staged for codemodel-v2, toolchains-v1, cmakeFiles-v1, and cache-v2.
 // Returns the reply directory location on success.
 func Configure(ctx context.Context, opts Options) (Reply, error) {
-	if opts.HostSourceRoot == "" || opts.HostBuildDir == "" {
-		return Reply{}, fmt.Errorf("cmakerun: HostSourceRoot and HostBuildDir required")
+	if opts.SourceRoot == "" || opts.BuildDir == "" {
+		return Reply{}, fmt.Errorf("cmakerun: SourceRoot and BuildDir required")
 	}
 	if opts.BuildType == "" {
 		opts.BuildType = "Release"
 	}
 
-	// Stage File API query files. cmake reads these on configure to decide
-	// which reply objects to emit.
-	queryDir := filepath.Join(opts.HostBuildDir, ".cmake", "api", "v1", "query")
+	queryDir := filepath.Join(opts.BuildDir, ".cmake", "api", "v1", "query")
 	if err := os.MkdirAll(queryDir, 0o755); err != nil {
 		return Reply{}, fmt.Errorf("cmakerun: stage query dir: %w", err)
 	}
@@ -84,121 +85,78 @@ func Configure(ctx context.Context, opts Options) (Reply, error) {
 		_ = f.Close()
 	}
 
-	cmakeBin, extraBinds, err := resolveToolchainBinaries()
+	// Empty HOME defeats ~/.cmake/packages reads when no outer sandbox
+	// rewrites HOME. Best-effort cleanup; cmake only reads from here.
+	homeDir, err := os.MkdirTemp("", "cmakerun-home-*")
 	if err != nil {
-		return Reply{}, err
+		return Reply{}, fmt.Errorf("cmakerun: stage home: %w", err)
 	}
+	defer os.RemoveAll(homeDir)
 
-	cmakeArgv := []string{
-		cmakeBin,
-		"-S", "/src",
-		"-B", "/build",
+	argv := []string{
+		"-S", opts.SourceRoot,
+		"-B", opts.BuildDir,
 		"-G", "Ninja",
 		"-DCMAKE_BUILD_TYPE=" + opts.BuildType,
 		"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 	}
 	if opts.TracePath != "" {
-		cmakeArgv = append(cmakeArgv,
+		argv = append(argv,
 			"--trace-expand",
 			"--trace-format=json-v1",
 			"--trace-redirect="+opts.TracePath,
 		)
 	}
-	if opts.HostToolchainCMakeFile != "" {
-		// The toolchain file gets mounted at /toolchain.cmake in
-		// the sandbox; pass that in-sandbox path to cmake.
-		cmakeArgv = append(cmakeArgv, "-DCMAKE_TOOLCHAIN_FILE=/toolchain.cmake")
-		extraBinds = append(extraBinds, [2]string{
-			opts.HostToolchainCMakeFile, "/toolchain.cmake",
-		})
+	if opts.ToolchainCMakeFile != "" {
+		// CMake resolves CMAKE_TOOLCHAIN_FILE relative paths against
+		// the build-dir first, then the source-dir; neither matches
+		// the executor's input-root layout where the file lands at
+		// <workdir>/toolchain.cmake. Pass an absolute path so cmake
+		// loads the file regardless of cwd / build-dir choice.
+		toolchainAbs, err := filepath.Abs(opts.ToolchainCMakeFile)
+		if err != nil {
+			return Reply{}, fmt.Errorf("cmakerun: abs toolchain file: %w", err)
+		}
+		argv = append(argv, "-DCMAKE_TOOLCHAIN_FILE="+toolchainAbs)
 	}
 
-	sb := hermetic.Sandbox{
-		SourceRoot:   opts.HostSourceRoot,
-		BuildDir:     opts.HostBuildDir,
-		PrefixDir:    opts.HostPrefixDir,
-		Argv:         cmakeArgv,
-		Stdout:       opts.Stdout,
-		Stderr:       opts.Stderr,
-		ExtraROBinds: extraBinds,
-	}
+	cmd := exec.CommandContext(ctx, "cmake", argv...)
+	cmd.Stdout = opts.Stdout
+	cmd.Stderr = opts.Stderr
+	cmd.Env = configureEnv(homeDir, opts.PrefixDir)
 
-	if err := sb.Run(ctx); err != nil {
+	if err := cmd.Run(); err != nil {
 		return Reply{}, fmt.Errorf("cmakerun: cmake failed: %w", err)
 	}
 
 	return Reply{
-		HostPath:    filepath.Join(opts.HostBuildDir, ".cmake", "api", "v1", "reply"),
-		SandboxPath: "/build/.cmake/api/v1/reply",
+		Path: filepath.Join(opts.BuildDir, ".cmake", "api", "v1", "reply"),
 	}, nil
 }
 
-// resolveToolchainBinaries finds cmake and ninja on the host PATH and returns
-// the cmake invocation path plus any extra read-only bind mounts the sandbox
-// needs to make the resolved binaries reachable inside it.
-//
-// On developer machines cmake is usually at /usr/bin/cmake — already covered
-// by the standard /usr ro-bind. On GitHub Actions runners the toolcache puts
-// cmake at /usr/local/bin/cmake (still under /usr) symlinked to
-// /opt/hostedtoolcache/cmake/<ver>/x64/bin/cmake — that target is outside
-// /usr and needs an extra mount. The same applies to ninja, which cmake
-// invokes by absolute path baked into CMakeCache.txt at configure time.
-func resolveToolchainBinaries() (cmakeArgv0 string, extraBinds [][2]string, err error) {
-	cmakeOnPath, err := exec.LookPath("cmake")
-	if err != nil {
-		return "", nil, fmt.Errorf("cmakerun: cmake not on PATH: %w", err)
+// configureEnv returns the controlled env for the cmake child. PATH is
+// inherited so cmake/ninja resolve via whatever the host or worker
+// provides; the rest is fixed for cross-host determinism. The
+// CMAKE_FIND_USE_*_PATH cluster suppresses host-leak find_package paths
+// (see docs/cmake_analysis.md).
+func configureEnv(homeDir, prefixDir string) []string {
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + homeDir,
+		"LC_ALL=C",
+		"LANG=C",
+		"SOURCE_DATE_EPOCH=" + SourceDateEpoch,
+		"CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=OFF",
+		"CMAKE_FIND_USE_CMAKE_PATH=OFF",
+		"CMAKE_FIND_USE_CMAKE_SYSTEM_PATH=OFF",
+		"CMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
+		"CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF",
+		"CMAKE_FIND_USE_PACKAGE_ROOT_PATH=ON",
+		"CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH=OFF",
+		"CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON",
 	}
-	binds, err := mountsForBinary(cmakeOnPath)
-	if err != nil {
-		return "", nil, err
+	if prefixDir != "" {
+		env = append(env, "CMAKE_PREFIX_PATH="+prefixDir)
 	}
-	extraBinds = append(extraBinds, binds...)
-
-	if ninjaOnPath, err := exec.LookPath("ninja"); err == nil {
-		nb, err := mountsForBinary(ninjaOnPath)
-		if err != nil {
-			return "", nil, err
-		}
-		extraBinds = append(extraBinds, nb...)
-	}
-	// dedupe
-	extraBinds = dedupeBinds(extraBinds)
-
-	return cmakeOnPath, extraBinds, nil
-}
-
-// mountsForBinary returns the ro-bind pairs required to make a host binary
-// accessible inside the sandbox at the same path. If the binary's symlink
-// target is outside /usr, both the symlink dir and the target dir are
-// mounted; otherwise no extra mount is needed.
-func mountsForBinary(host string) ([][2]string, error) {
-	target, err := filepath.EvalSymlinks(host)
-	if err != nil {
-		return nil, fmt.Errorf("cmakerun: eval %s: %w", host, err)
-	}
-	var out [][2]string
-	for _, p := range []string{filepath.Dir(host), filepath.Dir(target)} {
-		if isUnderUsr(p) {
-			continue
-		}
-		out = append(out, [2]string{p, p})
-	}
-	return out, nil
-}
-
-func isUnderUsr(p string) bool {
-	return p == "/usr" || len(p) >= 5 && p[:5] == "/usr/"
-}
-
-func dedupeBinds(in [][2]string) [][2]string {
-	seen := map[[2]string]struct{}{}
-	out := make([][2]string, 0, len(in))
-	for _, m := range in {
-		if _, ok := seen[m]; ok {
-			continue
-		}
-		seen[m] = struct{}{}
-		out = append(out, m)
-	}
-	return out
+	return env
 }

@@ -104,26 +104,23 @@ func Probe(ctx context.Context, opts ProbeOptions) ([]ProbeResult, error) {
 			return results, fmt.Errorf("toolchain.Probe: mkdir variant %q: %w", v.Name, err)
 		}
 
-		// cmakerun.Configure has a BuildType field (legacy) plus the
-		// rest comes from -D arguments via env / cmake argv. For now
-		// we map known keys to the dedicated fields and pass the
-		// rest as raw cache settings — but cmakerun.Options doesn't
-		// have a "raw cache vars" surface yet (queued). For
-		// correctness the build-type case is the one that matters
-		// today.
+		// cmakerun.Options surfaces BuildType as a dedicated field;
+		// other CacheVars don't have a "raw -D pass-through" surface
+		// yet (queued). Build type is the variant axis that matters
+		// for correctness today.
 		buildType := v.CacheVars["CMAKE_BUILD_TYPE"]
 
 		reply, err := cmakerun.Configure(ctx, cmakerun.Options{
-			HostSourceRoot: opts.SourceRoot,
-			HostBuildDir:   buildDir,
-			BuildType:      buildType,
-			Stdout:         opts.Stdout,
-			Stderr:         opts.Stderr,
+			SourceRoot: opts.SourceRoot,
+			BuildDir:   buildDir,
+			BuildType:  buildType,
+			Stdout:     opts.Stdout,
+			Stderr:     opts.Stderr,
 		})
 		if err != nil {
 			return results, fmt.Errorf("toolchain.Probe: configure variant %q: %w", v.Name, err)
 		}
-		r, err := fileapi.Load(reply.HostPath)
+		r, err := fileapi.Load(reply.Path)
 		if err != nil {
 			return results, fmt.Errorf("toolchain.Probe: load reply for %q: %w", v.Name, err)
 		}

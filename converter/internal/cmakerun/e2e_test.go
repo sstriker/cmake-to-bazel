@@ -1,8 +1,8 @@
 //go:build e2e
 
 // e2e_test runs the full pipeline (cmakerun -> fileapi -> lower -> emit)
-// under a real bwrap+cmake invocation. Gated by the `e2e` build tag and
-// by `make test-e2e`; not part of the default `go test ./...` to keep the
+// against a real cmake invocation. Gated by the `e2e` build tag and by
+// `make test-e2e`; not part of the default `go test ./...` to keep the
 // no-cmake unit-test loop fast.
 package cmakerun_test
 
@@ -26,16 +26,16 @@ func TestE2E_HelloWorld(t *testing.T) {
 
 	buildDir := t.TempDir()
 	reply, err := cmakerun.Configure(t.Context(), cmakerun.Options{
-		HostSourceRoot: src,
-		HostBuildDir:   buildDir,
-		Stdout:         testWriter{t},
-		Stderr:         testWriter{t},
+		SourceRoot: src,
+		BuildDir:   buildDir,
+		Stdout:     testWriter{t},
+		Stderr:     testWriter{t},
 	})
 	if err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
 
-	r, err := fileapi.Load(reply.HostPath)
+	r, err := fileapi.Load(reply.Path)
 	if err != nil {
 		t.Fatalf("fileapi.Load: %v", err)
 	}
