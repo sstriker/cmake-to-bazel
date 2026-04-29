@@ -313,6 +313,38 @@ succeeds. Document any FDSDK-specific deltas in
 `docs/fidelity-known-deltas.md`. After this, the gate moves to
 the full FDSDK graph.
 
+## Future direction (parked, not v1)
+
+**Bazel-as-orchestrator (two-pass meta-project).** Once the per-kind
+translators are stable, an architectural simplification worth
+revisiting: replace the orchestrator's bespoke action cache + REAPI
+executor + cross-element scheduling with a thin "meta" Bazel
+workspace whose BUILD files are themselves generated from the .bst
+graph. Each element becomes one `genrule` whose action invokes
+`convert-element`; the genrule's `srcs` declare the cross-element
+inputs (each dep's `cmake-config/` bundle) so Bazel's action graph
+threads the same dataflow today's orchestrator threads explicitly.
+The fine-grained BUILD files the meta workspace produces are
+materialized into an adjacent "real" Bazel workspace consumers
+build against.
+
+What it would let us delete: the orchestrator-internal action cache
+(M3a), parts of the regression diff (M4 — Bazel's action graph is
+the source of truth), the REAPI Executor abstraction (M3b/M5 —
+Bazel's `--remote_executor` is the same Buildbarn). What stays:
+`convert-element` itself, the per-kind translator interface (just
+hosted as a tool that genrules invoke instead of a Go dispatch
+table), the fmt fidelity gate (it's the precondition for the
+meta-workspace's action cache to deliver value — convert-element
+must be bit-stable on identical inputs).
+
+Why it's parked: too big a jump for v1; the current orchestrator
+shape is well-trodden and the per-kind translators land
+incrementally against it. The shift is recoverable later because
+the translators don't care which host invokes them. Revisit after
+Phase 6 (toolchain bootstrap) lands and the orchestrator's action
+cache becomes the dominant complexity weight.
+
 ## Out of scope (explicitly)
 
 - **Replacing every element kind's plugin with a fine-grained
