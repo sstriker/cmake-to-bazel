@@ -290,38 +290,48 @@ Independent of element kind. Already partially handled by
 
 ## Phasing
 
-Five phases, each its own PR. Phases 3 and 4 can interleave once
-Phase 2 confirms the shape works.
+Phases 2 and 3 can interleave once Phase 1's gate is green; Phase
+4 sequences last.
 
-**Phase 1 — writer-of-A + cmake elements only.** New `cmd/write-a/`
-Go binary. New `rules/zero_files.bzl`. The existing
-`orchestrator/cmd/orchestrate` continues to work alongside as the
-fallback path during transition. Acceptance: a cmake-only fixture
-(hello-world.bst) round-trips through writer-of-A → project A
-build → project B build. Today's `make e2e-orchestrate` style
-gate on the meta-project shape.
+**Phase 1 — writer-of-A + cmake elements only.** *(delivered)*
+`cmd/write-a` Go binary, `rules/zero_files.bzl` Starlark rule,
+`testdata/meta-project/hello-world.bst` fixture, and
+`scripts/meta-hello.sh` driving `make e2e-meta-hello`. The
+existing `orchestrator/cmd/orchestrate` continues to work
+alongside as the fallback path during transition. The gate
+exercises:
 
-**Phase 2 — hello-world end-to-end through both projects.** Smallest
-viable demonstration. Validates cache-stability scenarios A
-(`.c` edit cache-hits convert-element) and A' (CMakeLists.txt
-comment edit cache-misses but produces byte-identical output).
+  - Hello-world round-trip: writer-of-A renders project A and
+    project B; bazel build A invokes convert-element via genrule;
+    bazel build B compiles a smoke `cc_binary` against the
+    converted `cc_library` and runs it.
+  - Cache-stability scenario A (edit a `.c` source file NOT in
+    cmake's read set): convert-element cache-hits in A; smoke
+    binary still runs in B. The `zero_files`-backed input merkle
+    is content-stable across edits to non-read files.
+  - Cache-stability scenario A' (edit a CMakeLists.txt comment IS
+    in the read set): convert-element re-runs in A but produces a
+    byte-identical `BUILD.bazel.out`; B's smoke binary sha is
+    unchanged. cmake's parser strips comments before the codemodel.
+
 This is the gate for committing to delete the old orchestrator
-machinery.
+machinery; with the meta-project shape proven on hello-world,
+Phases 3-5 expand the kind set and graph shape.
 
-**Phase 3 — install-tree-manipulation kinds.** stack, filter,
+**Phase 2 — install-tree-manipulation kinds.** stack, filter,
 import, compose, flatpak_image, snap_image, flatpak_repo,
 collect_manifest, collect_initial_scripts, collect_integration,
 check_forbidden. All are pure starlark filegroup composition; no
 action runs, no new translator binaries. ~13 % of FDSDK in this
 bucket.
 
-**Phase 4 — buildsystem-variant kinds.** meson, autotools, make,
+**Phase 3 — buildsystem-variant kinds.** meson, autotools, make,
 manual, pyproject, makemaker, modulebuild, script. The fine-
 grained meson translator is its own genrule shape; the coarse
 ones share the install-pipeline pattern. Together with cmake
 this covers ~70 % of FDSDK by element count.
 
-**Phase 5 — FDSDK acceptance.** Run the full pipeline over the
+**Phase 4 — FDSDK acceptance.** Run the full pipeline over the
 FDSDK kind set the survey covers. `bazel build //...` against
 project B succeeds. Document remaining deltas in
 `docs/fidelity-known-deltas.md`. After this, the gate moves to
@@ -346,7 +356,9 @@ the full FDSDK graph; the old orchestrator code can be deleted.
    wrapper script (`make convert && bazel build //...`) or a
    repo rule in B that triggers project A as a sub-build. The
    former is simpler; the latter composes better with downstream
-   `bazel_dep`. Phase 2's spike is the place to decide.
+   `bazel_dep`. Phase 1 picked the wrapper-script path
+   (`scripts/meta-hello.sh`); the repo-rule alternative is
+   re-evaluated when graphs grow past one element.
 2. **Where `read_paths.json` lives.** Committed alongside each
    .bst (the orchestrator's allowlistreg-on-disk pattern today),
    or generated as a project-A action output and consumed by a
@@ -354,5 +366,5 @@ the full FDSDK graph; the old orchestrator code can be deleted.
    is simpler; revisit if churn is annoying in practice.
 3. **`derive-toolchain` migration timing.** Phase 1 uses the
    host's `cc_toolchain` to keep the writer-of-A small. The
-   toolchain-bootstrap macro lands in Phase 4 alongside
-   `kind: manual`. Phase 5's FDSDK gate forces the migration.
+   toolchain-bootstrap macro lands in Phase 3 alongside
+   `kind: manual`. Phase 4's FDSDK gate forces the migration.

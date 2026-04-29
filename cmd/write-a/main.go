@@ -292,7 +292,7 @@ func writeProjectA(elem *element, outDir, convertBin string) error {
 // BUILD.bazel.out, which references rules_cc (load("@rules_cc//cc:defs.bzl",
 // "cc_library")). The MODULE.bazel here pulls rules_cc from the
 // registry — first-time bzlmod runs need network access to bcr (or a
-// mirror via SPIKE_BAZEL_*_ARGS, see scripts/spike-hello.sh comment).
+// mirror via META_BAZEL_*_ARGS, see scripts/meta-hello.sh comment).
 func writeProjectB(elem *element, outDir string) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err

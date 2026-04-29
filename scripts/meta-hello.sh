@@ -17,11 +17,11 @@
 #      smoke binary; output is asserted to contain "Hello, World!".
 #
 # Cache-stability scenarios A and A' are exercised inline after the
-# initial round-trip succeeds — same shape as the spike's checks but
-# now also asserting that project B doesn't rebuild on Scenario A.
+# initial round-trip succeeds, asserting both project A's conversion
+# stability AND project B's downstream rebuild behavior.
 #
 # Bazel-availability gating: rendering checks always run; bazel build
-# phases self-skip when no bazel >= 7 is on PATH (via SPIKE_BAZEL_*_ARGS
+# phases self-skip when no bazel >= 7 is on PATH (via META_BAZEL_*_ARGS
 # documented below).
 
 set -eu
@@ -91,7 +91,7 @@ if [ "$bazel_major" -lt 7 ]; then
     exit 0
 fi
 
-# SPIKE_BAZEL_STARTUP_ARGS / SPIKE_BAZEL_BUILD_ARGS let sandboxed dev
+# META_BAZEL_STARTUP_ARGS / META_BAZEL_BUILD_ARGS let sandboxed dev
 # environments inject overrides for bcr.bazel.build access (proxy
 # whitelists, JVM truststore paths, alternative registries). Empty by
 # default; on a normal dev machine bazel reaches bcr fine and needs
@@ -103,13 +103,13 @@ fi
 # separately. Example for dev containers without bcr egress but with
 # github:
 #
-#   export SPIKE_BAZEL_STARTUP_ARGS="\
+#   export META_BAZEL_STARTUP_ARGS="\
 #     --host_jvm_args=-Djavax.net.ssl.trustStore=/etc/ssl/certs/java/cacerts \
 #     --host_jvm_args=-Djavax.net.ssl.trustStorePassword=changeit"
-#   export SPIKE_BAZEL_BUILD_ARGS="\
+#   export META_BAZEL_BUILD_ARGS="\
 #     --registry=https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main"
-SPIKE_BAZEL_STARTUP_ARGS=${SPIKE_BAZEL_STARTUP_ARGS:-}
-SPIKE_BAZEL_BUILD_ARGS=${SPIKE_BAZEL_BUILD_ARGS:-}
+META_BAZEL_STARTUP_ARGS=${META_BAZEL_STARTUP_ARGS:-}
+META_BAZEL_BUILD_ARGS=${META_BAZEL_BUILD_ARGS:-}
 
 bzl_cache="$work_dir/.bazel"
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
@@ -122,10 +122,10 @@ run_bazel() {
     shift
     cmd="$1"
     shift
-    # shellcheck disable=SC2086 # SPIKE_BAZEL_*_ARGS is intentionally word-split.
+    # shellcheck disable=SC2086 # META_BAZEL_*_ARGS is intentionally word-split.
     (cd "$workspace" && "$BZL" --output_user_root="$bzl_cache" \
-        $SPIKE_BAZEL_STARTUP_ARGS \
-        "$cmd" "$@" $SPIKE_BAZEL_BUILD_ARGS)
+        $META_BAZEL_STARTUP_ARGS \
+        "$cmd" "$@" $META_BAZEL_BUILD_ARGS)
 }
 
 # === Pass 1: bazel build project A ===
