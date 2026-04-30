@@ -150,6 +150,41 @@ func TestCompose_ProjectRootRelativePaths(t *testing.T) {
 	}
 }
 
+// TestCompose_BareListMergeDirective covers the FDSDK shape
+// where a list-valued key is wrapped in a list-merge directive
+// (`{(>): [...]}`) without a parent to compose against. In real
+// BuildStream, (>): means "append these to the parent's list at
+// this path"; with no parent (no enclosing (@): include) the
+// directive's value IS the resulting list. The pre-processor
+// collapses `{(>): [...]}` to `[...]` so subsequent struct-decode
+// sees the expected list shape.
+func TestCompose_BareListMergeDirective(t *testing.T) {
+	tmp := t.TempDir()
+	main := filepath.Join(tmp, "main.yml")
+	if err := os.WriteFile(main, []byte(`sources:
+  (>):
+  - kind: local
+    path: a
+  - kind: local
+    path: b
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := loadAndComposeYAML(main, tmp, map[string]bool{})
+	if err != nil {
+		t.Fatalf("loadAndComposeYAML: %v", err)
+	}
+	var got struct {
+		Sources []bstSource `yaml:"sources"`
+	}
+	if err := doc.Decode(&got); err != nil {
+		t.Fatalf("decode: %v (bare (>): wrapping should have collapsed)", err)
+	}
+	if len(got.Sources) != 2 {
+		t.Errorf("expected 2 sources after (>): collapse; got %d", len(got.Sources))
+	}
+}
+
 // TestCompose_ConditionalDirectivePreserved covers the composer's
 // hand-off contract for (?): blocks: composer leaves them in the
 // tree (the variables-level extractor in conditional.go pulls them

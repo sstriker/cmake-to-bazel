@@ -189,8 +189,8 @@ sources:
 	if src.URL != "https://example.org/foo.tar.gz" {
 		t.Errorf("Sources[0].URL: got %q, want %q", src.URL, "https://example.org/foo.tar.gz")
 	}
-	if src.Ref != "a1b2c3" {
-		t.Errorf("Sources[0].Ref: got %q, want %q", src.Ref, "a1b2c3")
+	if src.Ref.Value != "a1b2c3" {
+		t.Errorf("Sources[0].Ref.Value: got %q, want %q", src.Ref.Value, "a1b2c3")
 	}
 	if src.AbsPath != "" {
 		t.Errorf("Sources[0].AbsPath should be empty for non-kind:local; got %q", src.AbsPath)
@@ -1484,8 +1484,8 @@ sources:
 	if gitSrc.URL != "somealias:repo.git" {
 		t.Errorf("Sources[1].URL: got %q, want somealias:repo.git", gitSrc.URL)
 	}
-	if gitSrc.Ref != "deadbeef" || gitSrc.Track != "master" {
-		t.Errorf("Sources[1] ref/track not recorded: %+v", gitSrc)
+	if gitSrc.Ref.Value != "deadbeef" || gitSrc.Track != "master" {
+		t.Errorf("Sources[1] ref/track not recorded: ref=%q track=%q", gitSrc.Ref.Value, gitSrc.Track)
 	}
 }
 
@@ -1781,6 +1781,63 @@ build-depends:
 	bElem := g.ByName["b"]
 	if len(bElem.Deps) != 1 {
 		t.Errorf("duplicate dep across depends + build-depends should dedupe; got %d edges", len(bElem.Deps))
+	}
+}
+
+// TestWriter_DepFilenameListExpandsToEdges covers FDSDK's
+// "depend on each of these elements with the same shared config:"
+// shape:
+//
+//   build-depends:
+//   - filename:
+//     - bootstrap/bzip2.bst
+//     - bootstrap/zlib-ng.bst
+//     config:
+//       location: "%{sysroot}"
+//
+// Each filename in the list expands to a separate dep edge in
+// element.Deps. The shared config: applies to each (recorded but
+// inert in v1).
+func TestWriter_DepFilenameListExpandsToEdges(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := makeCmakeBst(t, tmp, "b")
+	c := makeCmakeBst(t, tmp, "c")
+	bad := filepath.Join(tmp, "list.bst")
+	body := `kind: stack
+
+build-depends:
+- filename:
+  - a.bst
+  - b.bst
+  - c.bst
+  config:
+    location: "%{sysroot}"
+`
+	if err := os.WriteFile(bad, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{a, b, c, bad})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	listElem := g.ByName["list"]
+	if listElem == nil {
+		t.Fatal("list element not in graph")
+	}
+	if len(listElem.Deps) != 3 {
+		t.Errorf("list-form dep should expand to 3 edges; got Deps=%v", listElem.Deps)
+	}
+	// All three names should appear in Deps.
+	wantNames := map[string]bool{"a": true, "b": true, "c": true}
+	for _, d := range listElem.Deps {
+		if !wantNames[d.Name] {
+			t.Errorf("unexpected dep name %q in list expansion", d.Name)
+		}
+		delete(wantNames, d.Name)
+	}
+	for n := range wantNames {
+		t.Errorf("missing dep %q from list expansion", n)
 	}
 }
 
