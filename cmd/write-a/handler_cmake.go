@@ -22,10 +22,29 @@ func (cmakeHandler) NeedsSources() bool     { return true }
 func (cmakeHandler) HasProjectABuild() bool { return true }
 
 func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
+	srcStage := filepath.Join(elemPkg, "sources")
+	if err := os.RemoveAll(srcStage); err != nil {
+		return err
+	}
+
+	// Read-set narrowing only applies to single-source-no-directory
+	// elements (the v1 fixture shape). Multi-source elements or any
+	// source with a Directory subpath fall back to "stage everything
+	// as real" — narrowing across multiple source roots needs
+	// additional bookkeeping that lands when an FDSDK fixture forces
+	// it.
+	if cmakeMultiSource(elem) {
+		elem.RealPaths = nil
+		elem.ZeroPaths = nil
+		if err := stageAllSources(elem, srcStage); err != nil {
+			return err
+		}
+		return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), cmakeElementBuild(elem))
+	}
+
 	if err := partitionSources(elem); err != nil {
 		return fmt.Errorf("partition sources: %w", err)
 	}
-
 	// Real sources are staged as files in project A's source tree;
 	// the glob in the per-element BUILD picks them up. Zero stubs are
 	// NOT staged on disk — they're produced at action time by the
@@ -33,25 +52,35 @@ func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 	// genrule's cmd. The rendered project-A tree only contains the
 	// files the user can actually inspect; the empty stubs are an
 	// action-graph detail Bazel handles.
-	srcStage := filepath.Join(elemPkg, "sources")
-	if err := os.RemoveAll(srcStage); err != nil {
-		return err
-	}
+	src := elem.Sources[0].AbsPath
 	for _, rel := range elem.RealPaths {
-		if err := copyFile(filepath.Join(elem.AbsSourceDir, rel), filepath.Join(srcStage, rel)); err != nil {
+		if err := copyFile(filepath.Join(src, rel), filepath.Join(srcStage, rel)); err != nil {
 			return fmt.Errorf("stage real source %s: %w", rel, err)
 		}
 	}
 	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), cmakeElementBuild(elem))
 }
 
+// cmakeMultiSource reports whether this cmake element's sources are
+// in any shape that prevents the single-source-tree narrowing path:
+// either >1 source declared, or the lone source has a non-empty
+// Directory subpath. Both shapes flow through stageAllSources without
+// path-narrowing.
+func cmakeMultiSource(elem *element) bool {
+	if len(elem.Sources) != 1 {
+		return true
+	}
+	return elem.Sources[0].Directory != ""
+}
+
 func (cmakeHandler) RenderB(elem *element, elemPkg string) error {
 	// Stage the FULL source tree (no narrowing). Project B's
 	// cc_library needs the real source bytes to compile, so this is
 	// the user's tree verbatim. (writeProjectB already cleared and
-	// re-created elemPkg before calling us.)
-	if err := copyTree(elem.AbsSourceDir, elemPkg); err != nil {
-		return fmt.Errorf("stage element sources for project B: %w", err)
+	// re-created elemPkg before calling us.) Multi-source elements
+	// honor each source's Directory subpath via stageAllSources.
+	if err := stageAllSources(elem, elemPkg); err != nil {
+		return err
 	}
 	// Placeholder BUILD; the driver script overwrites this after
 	// project-A's bazel build produces the converter's
@@ -79,16 +108,21 @@ filegroup(name = "BUILD_NOT_YET_STAGED", srcs = [])
 //     CMakeLists.txt files in the source tree (cmake parses the entry
 //     CMakeLists before any trace event fires; auto-including them
 //     keeps cmake configure correct after narrowing).
+//
+// Caller (cmakeHandler.RenderA) gates this on the single-source-no-
+// directory case (cmakeMultiSource(elem) == false), so reading
+// elem.Sources[0].AbsPath here is unconditional.
 func partitionSources(elem *element) error {
+	root := elem.Sources[0].AbsPath
 	universe := []string{}
-	err := filepath.Walk(elem.AbsSourceDir, func(p string, info os.FileInfo, err error) error {
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(elem.AbsSourceDir, p)
+		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return err
 		}
