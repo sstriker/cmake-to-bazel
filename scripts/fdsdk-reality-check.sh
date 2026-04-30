@@ -127,6 +127,44 @@ BST_EOF
         --convert-element "$bin_dir/convert-element" 2>&1 >/dev/null) || true
 fi
 
+# Synthesized multi-element FDSDK-shape probe. Renders a tiny
+# project (synthetic project.conf + element-path: elements +
+# two .bst files in different subdirs with a path-qualified
+# build-depends edge between them). Demonstrates write-a's
+# multi-element resolution pipeline end-to-end without depending
+# on real FDSDK content — useful for proving forward progress on
+# the loader / resolver punch-list items even when the curated
+# isolated probes (which are diagnostic for first-failure) all
+# trip on earlier gaps.
+synth_dir="$work_dir/synth"
+mkdir -p "$synth_dir/elements/components" "$synth_dir/elements/bootstrap" "$synth_dir/src-bar"
+cat > "$synth_dir/project.conf" <<'CONF_EOF'
+variables:
+  prefix: /usr
+element-path: elements
+CONF_EOF
+cat > "$synth_dir/src-bar/CMakeLists.txt" <<'CMAKE_EOF'
+cmake_minimum_required(VERSION 3.20)
+project(bar)
+CMAKE_EOF
+cat > "$synth_dir/elements/bootstrap/bar.bst" <<EOF
+kind: cmake
+sources:
+- kind: local
+  path: $synth_dir/src-bar
+EOF
+cat > "$synth_dir/elements/components/foo.bst" <<'BST_EOF'
+kind: stack
+build-depends:
+- bootstrap/bar.bst
+BST_EOF
+synth_err=$("$bin_dir/write-a" \
+    --bst "$synth_dir/elements/components/foo.bst" \
+    --bst "$synth_dir/elements/bootstrap/bar.bst" \
+    --out "$synth_dir/A" \
+    --out-b "$synth_dir/B" \
+    --convert-element "$bin_dir/convert-element" 2>&1 >/dev/null) || true
+
 total=$((ok+fail))
 printf "fdsdk-reality-check: %d/%d isolated-element probes succeeded\n\n" "$ok" "$total"
 printf "%b\n" "$report"
@@ -137,6 +175,16 @@ if [ -z "$project_conf_err" ]; then
 else
     first_err=$(echo "$project_conf_err" | head -1)
     echo "  FAIL    project.conf"
+    echo "          → $first_err"
+fi
+echo
+echo "Synthetic multi-element probe (FDSDK-shape: 1 cmake + 1 stack with"
+echo "path-qualified build-depends edge under element-path: elements):"
+if [ -z "$synth_err" ]; then
+    echo "  OK      synthetic"
+else
+    first_err=$(echo "$synth_err" | head -1)
+    echo "  FAIL    synthetic"
     echo "          → $first_err"
 fi
 echo
