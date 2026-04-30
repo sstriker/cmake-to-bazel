@@ -197,29 +197,36 @@ fail on source-kind anymore. The next gap is "single-element load
 doesn't see transitive deps", which is a probe-shape limitation
 rather than a write-a gap.
 
-### 9. `(?):` conditional directive (81 elements)
+### 9. `(?):` conditional directive (81 elements) ✓ done
 
-Per-arch / per-target variable overrides:
+`cmd/write-a/conditional.go` parses `(?):` blocks at the
+`variables:` level into structured `[]conditionalBranch` form.
+`extractConditionalsFromVariables` runs after the (@): composer
+and before the struct-decode pass, pulling the directive out of
+the YAML tree onto `bstFile.Conditionals` /
+`projectConf.Conditionals`. Recognized expression syntax:
+`target_arch == "X"`, `target_arch != "X"`,
+`target_arch in ("X", "Y", ...)`, and `or`-joined chains.
 
-```yaml
-variables:
-  (?):
-  - target_arch == "x86_64":
-      aom_target: x86_64
-  - target_arch == "aarch64":
-      aom_target: arm64
-```
+`resolveVarsForArch` composes the same four-layer scope as
+`resolveVars` plus the matching branch from each conditional set
+when one applies to arch. The pipeline handler's RenderA detects
+when any conditional set is non-empty, resolves once per
+supported arch (x86_64, aarch64, i686, ppc64le, riscv64,
+loongarch64), groups arches by identical resolution, and emits
+`cmd = select({...})` over `@platforms//cpu:*` — one branch per
+arch, with dedup-collapse to single-string cmd when all per-arch
+resolutions are identical.
 
-Per the design discussion (see PR #34's comment thread), these
-should lower to project-B Starlark `select()` over `@platforms`,
-**not** be evaluated at write-a time — Bazel does target-platform
-resolution per-action, and baking write-a's host arch into the
-rendered cmd would break cross-compile (which is most of FDSDK).
+Bazel resolves the cmd per target platform at build time rather
+than write-a baking host-arch into a single rendered cmd. Cross-
+compile lands without further write-a changes.
 
-Fix shape: parse `(?):` blocks, hoist them out of the variable
-resolver, and emit per-arch values into the rendered project-B
-BUILD via `select(...)`. The genrule cmd references the selected
-value through a make-var bound to the select.
+Gated by `make e2e-meta-conditional` against
+`testdata/meta-project/conditional-greet/` (single kind:manual
+element with `target_arch == "X"` / `target_arch in (X, Y)`
+branches; the rendered cmd has one select() entry per supported
+arch with the per-arch resolved path).
 
 ### 11. kind:local path resolution (project-root vs bst-dir relative) ✓ done
 
@@ -274,28 +281,35 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-Items #1 through #8 and #11 are closed. The synthetic multi-
-element probe exercises every closed item end-to-end and passes
-today. Every in-place probe whose first failure was previously a
-write-a gap (parse / resolution / source-kind / kind:local path)
-now reaches either the dep-resolution phase ("dep X not in
-graph") or, in boot-keys-prod's case, an FDSDK-checkout-level
-issue (production keys aren't shipped in the repo).
+**Every original write-a-side punch-list item is closed.** Items
+#1 through #9, plus #11. The synthetic multi-element probe
+exercises every closed item end-to-end and passes. The in-place
+probes have moved past every parse / resolution / source-kind /
+kind:local-path / arch-conditional gap; their first-failures now
+either point at the probe's single-element-load limitation
+("dep X not in graph") or an FDSDK-checkout-level issue
+(boot-keys-prod's keys aren't shipped in the repo).
 
-The remaining items are non-write-a / architectural:
+The remaining items are non-write-a / orchestration-side:
 
 - **multi-element load probe shape** — the script loads only the
   named .bst, not its transitive dep tree. Single-element loads
   naturally trip on missing deps. A subgraph-loading probe would
   surface what's actually next; doesn't need a write-a change.
-- **`(?):` conditional → project-B `select()`** (#9) — the
-  architectural piece. Lowers per-arch variable overrides into
-  Bazel-native multi-arch resolution rather than baking write-a's
-  host arch into the rendered cmd. Today the composer strips the
-  blocks; a real FDSDK build with arch-specific variables won't
-  reflect those overrides until this lands.
 - **real source-fetch integration** — write-a now records
   kind:git_repo / kind:tar / etc. metadata on `resolvedSource`,
   but skips them at staging time. A bazel-build of those elements
   needs the existing `orchestrator/internal/sourcecheckout` layer
   (or its successor) to actually fetch sources and feed them in.
+- **`(?):` outside variables:** — write-a's extractor only handles
+  conditional blocks at the `variables:` level (the dominant
+  FDSDK pattern). Per-arch `config:` blocks (e.g., per-arch
+  install-commands) would need an analogous extractor on
+  `bstFile.Config`. Lands when an FDSDK fixture forces it.
+- **richer `(?):` expression syntax** — the v1 parser recognizes
+  `target_arch == "X"`, `target_arch != "X"`,
+  `target_arch in (X, Y, ...)`, and `or`-joined chains.
+  `host_arch` / `build_arch` references and `and`-combinators are
+  rare in FDSDK; lands when they show up. Branches with
+  unrecognized expressions are silently skipped (no select()
+  entry emitted).
