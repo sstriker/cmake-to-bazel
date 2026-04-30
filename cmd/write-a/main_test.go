@@ -1750,14 +1750,15 @@ config:
 	}
 	got := string(rendered)
 	for _, marker := range []string{
-		// One config_setting per used (option, value).
-		`name = "snap_grade_devel"`,
-		`name = "snap_grade_stable"`,
+		// Per-tuple config_setting names use sorted-by-varname
+		// values joined with '_'. Single-dim → just the value.
+		`name = "devel"`,
+		`name = "stable"`,
 		`"//options:snap_grade": "devel"`,
 		`"//options:snap_grade": "stable"`,
 		// select() arms reference the config_settings.
-		`":snap_grade_devel":`,
-		`":snap_grade_stable":`,
+		`":devel":`,
+		`":stable":`,
 		// Per-arm bodies differ in the resolved out-marker.
 		`install -D x.txt $$INSTALL_ROOT/usr/share/dev.txt`,
 		`install -D x.txt $$INSTALL_ROOT/usr/share/prod.txt`,
@@ -1773,12 +1774,13 @@ config:
 	}
 }
 
-// TestWriter_MixedDispatchVarsErrors covers the v1 single-
-// dispatch-variable contract: an element with both target_arch
-// and option-typed (?): branches surfaces a clear error pointing
-// at the cross-product follow-up rather than rendering an
-// incomplete select().
-func TestWriter_MixedDispatchVarsErrors(t *testing.T) {
+// TestWriter_CrossProductDispatch covers the multi-dispatch
+// case: an element whose (?): branches reference both target_arch
+// and an option-typed variable produces config_settings that
+// combine constraint_values + flag_values, one per cross-product
+// tuple, with select() arms keyed on the local config_setting
+// labels. Replaces the prior v1 single-dispatch-variable contract.
+func TestWriter_CrossProductDispatch(t *testing.T) {
 	tmp := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
 		[]byte(`options:
@@ -1807,16 +1809,21 @@ sources:
   path: ` + srcDir + `
 
 variables:
-  flag-value: 'unknown'
+  arch-marker: 'unknown'
+  grade-marker: 'unknown'
   (?):
   - target_arch == "x86_64":
-      flag-value: 'arch-x86'
+      arch-marker: 'amd64'
+  - target_arch == "aarch64":
+      arch-marker: 'arm64'
+  - snap_grade == "devel":
+      grade-marker: 'dev'
   - snap_grade == "stable":
-      flag-value: 'grade-stable'
+      grade-marker: 'prod'
 
 config:
   install-commands:
-  - install -D x.txt %{install-root}/usr/share/%{flag-value}.txt
+  - install -D x.txt %{install-root}/usr/share/%{arch-marker}-%{grade-marker}.txt
 `
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -1827,10 +1834,38 @@ config:
 	}
 	binPath := fakeConvertBin(t, tmp)
 	outA := filepath.Join(tmp, "A")
-	if err := writeProjectA(g, outA, binPath); err == nil {
-		t.Fatal("expected error for mixed dispatch variables, got nil")
-	} else if !strings.Contains(err.Error(), "multiple dispatch variables") {
-		t.Errorf("error should mention multiple dispatch variables; got: %v", err)
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(outA, "elements/elem/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(rendered)
+	for _, marker := range []string{
+		// Per-tuple config_settings combining constraint_values + flag_values.
+		// Tuple keys sorted by varname → "snap_grade_target_arch" name shape.
+		`name = "devel_x86_64"`,
+		`name = "stable_x86_64"`,
+		`name = "devel_aarch64"`,
+		`name = "stable_aarch64"`,
+		`constraint_values = [`,
+		`"@platforms//cpu:x86_64"`,
+		`flag_values = {`,
+		`"//options:snap_grade": "devel"`,
+		`"//options:snap_grade": "stable"`,
+		// select() arms reference the local config_settings.
+		`":devel_x86_64":`,
+		`":stable_x86_64":`,
+		// Per-tuple resolved bodies.
+		`install -D x.txt $$INSTALL_ROOT/usr/share/amd64-dev.txt`,
+		`install -D x.txt $$INSTALL_ROOT/usr/share/amd64-prod.txt`,
+		`install -D x.txt $$INSTALL_ROOT/usr/share/arm64-dev.txt`,
+		`install -D x.txt $$INSTALL_ROOT/usr/share/arm64-prod.txt`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("rendered BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
 	}
 }
 

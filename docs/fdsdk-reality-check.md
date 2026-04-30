@@ -197,11 +197,11 @@ fail on source-kind anymore. The next gap is "single-element load
 doesn't see transitive deps", which is a probe-shape limitation
 rather than a write-a gap.
 
-### 9. `(?):` conditional directive (81 elements) ✓ done — partial (cross-product follow-up)
+### 9. `(?):` conditional directive (81 elements) ✓ done
 
-Single-dispatch-variable lowering done end-to-end across PRs #45 / #49 / #51 / #52 / #53. target_arch lowers to `select()` over `@platforms//cpu:*`; project.conf-declared options lower to `config_setting` per `(option, value)` + `select()` over those config_settings. Static-fold survives for host facts (host_arch / build_arch).
+Full pipeline-handler lowering done across PRs #45 / #49 / #51 / #52 / #53 / #54. target_arch lowers to `select()` over `@platforms//cpu:*`; project.conf-declared options lower to `config_setting` per `(option, value)`; cross-product (target_arch × option) emits per-tuple `config_setting`s combining `constraint_values` + `flag_values`. Static-fold survives for host facts (host_arch / build_arch).
 
-Mixed dispatch (an element whose `(?):` branches reference both target_arch and an option-typed variable, e.g. FDSDK's `bootstrap/base-sdk/perl.bst`) is the remaining work: the cross-product handling either renders 6 × 5 = 30 select() arms or lifts shared state into a Starlark-level helper. Diagnosed empirically by the bootstrap subgraph probe.
+Diagnosed-via-probe but unfixed: when multiple deeply-nested `(@):` includes each declare their own `variables: (?):` block, the YAML composer's parent-wins merge drops all but one. FDSDK's bootstrap/base-sdk/perl.bst hits this — its flags.yml-derived `bootstrap_build_arch` branches get overridden by a higher-layer (?):). Fix is in the composer's `mergeMappings`: detect both-mapping-have-`(?):` and concatenate the branch lists rather than parent-wins. Separate follow-up.
 
 ### 9-original. `(?):` conditional directive (81 elements) — historical
 
