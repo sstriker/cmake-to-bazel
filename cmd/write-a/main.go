@@ -89,6 +89,11 @@ type bstFile struct {
 	// pipeline-kind handler runs phase commands through
 	// substituteCmd against the resolved map.
 	Variables map[string]string `yaml:"variables"`
+	// Environment is the per-element env-var map, layered on top of
+	// project.conf's project-level environment. Variable references
+	// (%{...}) resolve against the same scope as phase commands.
+	// Pipeline handlers emit `env = {...}` on the genrule attribute.
+	Environment map[string]string `yaml:"environment"`
 	// Conditionals are the per-arch (?): branches extracted from
 	// `variables:` before the YAML decode pass (yaml.v3 can't
 	// directly unmarshal the (?): shape into a string-map). Empty
@@ -278,6 +283,12 @@ type element struct {
 	// bstFile.Conditionals; together they feed the per-arch
 	// select() pipeline-handler emission.
 	ProjectConfConditionals []conditionalBranch
+	// ProjectConfEnvironment is the project-level environment-var
+	// map from project.conf. Element-level environment: blocks
+	// override per key; the pipeline handler composes them and
+	// resolves variable references before emitting on the
+	// genrule's env attribute.
+	ProjectConfEnvironment map[string]string
 }
 
 // graph is the loaded set of elements with cross-references resolved.
@@ -452,6 +463,7 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 		foldedVars, foldedConds := foldStaticConditionals(seeded, info.Conditionals, staticDispatchVars)
 		elem.ProjectConfVars = foldedVars
 		elem.ProjectConfConditionals = foldedConds
+		elem.ProjectConfEnvironment = info.Environment
 		g.ByName[elem.Name] = elem
 		g.Elements = append(g.Elements, elem)
 	}

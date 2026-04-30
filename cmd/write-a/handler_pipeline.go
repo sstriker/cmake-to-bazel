@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -77,9 +78,16 @@ type pipelineCfg struct {
 
 // pipelinePhases is a set of resolved phase command lists ready for
 // rendering. One per arch for conditional elements; one total
-// otherwise.
+// otherwise. Env carries the per-action environment-variable
+// bindings the cmd's prelude emits as `export K=V` lines —
+// project.conf-level + element-level environments composed and
+// variable-resolved (runtime sentinels mapped to their shell-var
+// form so `GOPATH: %{build-root}` becomes `export
+// GOPATH="$BUILD_ROOT"`, working under shell-time expansion the
+// same way phase commands do).
 type pipelinePhases struct {
 	Configure, Build, Install, Strip []string
+	Env                              [][2]string // ordered K, V pairs
 }
 
 func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
@@ -140,6 +148,15 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 		if err != nil {
 			return pipelinePhases{}, err
 		}
+		// Compose env: project.conf-level (defaults) + element-level
+		// (overrides). Substitute %{...} references against the
+		// resolved variable map. Result is ordered K-V pairs so the
+		// rendered `export K=V` lines are deterministic across runs.
+		composedEnv := composeEnvironment(elem.ProjectConfEnvironment, elem.Bst.Environment)
+		p.Env, err = substituteEnv(composedEnv, vars, elem.Name, h.kindName)
+		if err != nil {
+			return pipelinePhases{}, err
+		}
 		return p, nil
 	}
 
@@ -171,7 +188,7 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 			strings.Join(phases.Configure, "\x00"),
 			strings.Join(phases.Build, "\x00"),
 			strings.Join(phases.Install, "\x00"),
-			strings.Join(phases.Strip, "\x00"),
+			strings.Join(phases.Strip, "\x00") + "\x01" + envKey(phases.Env),
 		}
 		if idx, ok := groupIdx[key]; ok {
 			groups[idx].Arches = append(groups[idx].Arches, arch)
@@ -198,6 +215,58 @@ func archSuffix(arch string) string {
 		return ""
 	}
 	return " (arch=" + arch + ")"
+}
+
+// composeEnvironment merges project.conf-level env (defaults) and
+// element-level env (overrides), returning ordered K-V pairs sorted
+// by key for stable rendering.
+func composeEnvironment(projectEnv, elemEnv map[string]string) [][2]string {
+	merged := map[string]string{}
+	for k, v := range projectEnv {
+		merged[k] = v
+	}
+	for k, v := range elemEnv {
+		merged[k] = v
+	}
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([][2]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, [2]string{k, merged[k]})
+	}
+	return out
+}
+
+// substituteEnv runs each env value through substituteCmd against
+// the resolved variable map. Errors carry the env-key context so a
+// stray %{typo} surfaces with enough context to locate it.
+func substituteEnv(env [][2]string, vars map[string]string, elemName, kindName string) ([][2]string, error) {
+	out := make([][2]string, len(env))
+	for i, kv := range env {
+		v, err := substituteCmd(kv[1], vars)
+		if err != nil {
+			return nil, fmt.Errorf("element %q (kind:%s) environment[%q]: %w", elemName, kindName, kv[0], err)
+		}
+		out[i] = [2]string{kv[0], v}
+	}
+	return out, nil
+}
+
+// envKey is a stable string serialization of an env-pair list,
+// used by the per-arch dedup hash so two arches with identical env
+// + identical phases share a select() group.
+func envKey(env [][2]string) string {
+	var b strings.Builder
+	for _, kv := range env {
+		b.WriteString(kv[0])
+		b.WriteByte('=')
+		b.WriteString(kv[1])
+		b.WriteByte('\x00')
+	}
+	return b.String()
 }
 
 // archGroup is one branch of the per-arch select() the pipeline
@@ -359,12 +428,58 @@ func renderPipelineCmdBody(p pipelinePhases) string {
         #   $$BUILD_ROOT   — the staged source dir (set above).
         export INSTALL_ROOT="$$(mktemp -d)"
         export PATH=/usr/local/bin:/usr/bin:/bin
-
+%[2]s
 %[1]s
         # Tar the install tree as the element's primary output.
         cd "$$EXEC_ROOT"
         tar -cf "$(location install_tree.tar)" -C "$$INSTALL_ROOT" .
-    """`, renderPipelineCommands(p.Configure, p.Build, p.Install, p.Strip))
+    """`, renderPipelineCommands(p.Configure, p.Build, p.Install, p.Strip), renderEnvExports(p.Env))
+}
+
+// renderEnvExports emits one `export K=V` line per env entry,
+// indented to match the surrounding cmd-body lines. The values are
+// already variable-resolved (substituteCmd in resolveAt); we just
+// shell-quote them. Empty env yields the empty string so the
+// surrounding template doesn't get a stray blank line.
+func renderEnvExports(env [][2]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("        # Project- + element-level environment, sourced from\n")
+	b.WriteString("        # project.conf's `environment:` and the .bst's `environment:`\n")
+	b.WriteString("        # blocks. Element-level entries override project-level on\n")
+	b.WriteString("        # conflict; values are variable-resolved with runtime\n")
+	b.WriteString("        # sentinels (%%{install-root} → $$INSTALL_ROOT etc.) mapped\n")
+	b.WriteString("        # to their shell-var form so phase commands consume them\n")
+	b.WriteString("        # consistently.\n")
+	for _, kv := range env {
+		fmt.Fprintf(&b, "        export %s=%s\n", kv[0], shellQuote(kv[1]))
+	}
+	return b.String()
+}
+
+// shellQuote wraps a value in double quotes, escaping any
+// embedded $$ / " / \ so the resulting string is a valid
+// double-quoted shell literal. Specifically: $$ stays as $$
+// (Bazel's escape; the action runner sees $); a literal " becomes
+// \"; a literal \ becomes \\.
+func shellQuote(v string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch c {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // renderPipelineCommands flattens the four phase command lists into

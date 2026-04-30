@@ -327,10 +327,9 @@ Other follow-ups (none on the critical path for `write-a render`):
   (SHA of kind+url+ref) under the cache directory stage as if
   they were kind:local. Callers populate the cache via the
   orchestrator's source-checkout layer or by hand. The actual
-  fetcher (a small tool that reads .bst metadata and populates
-  the cache) is the next architectural step; could live in
-  write-a or as a sibling cmd. write-a itself stays
-  network-free.
+  fetcher reshapes into a `module_extension` per the design in
+  `docs/sources-design.md`; aliases + environment now parsed so
+  the data is ready when the extension lands.
 - **`(?):` outside variables:** — write-a's extractor only
   handles conditional blocks at the `variables:` level (the
   dominant FDSDK pattern). Per-arch `config:` blocks would need

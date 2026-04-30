@@ -30,9 +30,9 @@ import (
 )
 
 // projectConf is the slice of the project.conf surface write-a
-// currently consumes. Other keys (name, plugins, aliases, options,
-// …) are ignored at unmarshal time so we don't have to track
-// BuildStream's full schema.
+// currently consumes. Other keys (name, plugins, options,
+// fatal-warnings, …) are ignored at unmarshal time so we don't
+// have to track BuildStream's full schema.
 type projectConf struct {
 	Variables   map[string]string `yaml:"variables"`
 	ElementPath string            `yaml:"element-path"`
@@ -44,6 +44,23 @@ type projectConf struct {
 	// declares (?): branches setting %{snap_arch} / %{go-arch}
 	// / etc.).
 	Conditionals []conditionalBranch `yaml:"-"`
+	// Aliases maps URL-prefix aliases to their full URL. FDSDK's
+	// project.conf composes include/_private/aliases.yml, which
+	// declares 50+ entries like `github: https://github.com/`,
+	// `sourceware: https://sourceware.org/git/`, etc. kind:git_repo
+	// / kind:tar / kind:remote_asset URLs use the `<alias>:<path>`
+	// syntax and the alias-resolver translates that to a full URL.
+	// Consumed by the source-fetcher (deferred) — parsed and
+	// recorded here so the data is ready when the fetcher lands.
+	Aliases map[string]string `yaml:"aliases"`
+	// Environment is the project-level environment-variable map
+	// applied to every element's build / install / strip actions.
+	// Element-level `environment:` blocks override per key.
+	// Composes via (@): includes; FDSDK declares ~10 keys here
+	// (LC_ALL, SOURCE_DATE_EPOCH, OMP_NUM_THREADS, ...). Pipeline
+	// handlers emit `env = {...}` on the genrule attribute,
+	// variable-resolved.
+	Environment map[string]string `yaml:"environment"`
 }
 
 // projectInfo is the resolved view of the project.conf write-a
@@ -70,6 +87,10 @@ type projectInfo struct {
 	// per-arch variable overrides). Empty slice when no
 	// project.conf was found.
 	Conditionals []conditionalBranch
+	// Aliases is the project-level URL-alias map (see projectConf.Aliases).
+	Aliases map[string]string
+	// Environment is the project-level env-var map (see projectConf.Environment).
+	Environment map[string]string
 }
 
 // findProjectConf walks up from startDir looking for a project.conf
@@ -159,5 +180,45 @@ func loadProjectInfoFromBst(bstPath string) (projectInfo, error) {
 		ElementRoot:  elementRoot,
 		Variables:    pc.Variables,
 		Conditionals: pc.Conditionals,
+		Aliases:      pc.Aliases,
+		Environment:  pc.Environment,
 	}, nil
+}
+
+// resolveAliasURL translates a BuildStream alias-prefixed URL
+// (`<alias>:<path>`) to a full URL using the aliases map. The
+// prefix matches the substring before the first colon; the
+// remainder gets appended verbatim to the alias's URL. URLs
+// without a registered alias prefix are returned unchanged
+// (preserves http://, https://, file:// shapes etc.).
+//
+// Used by the source-fetcher (deferred) when materializing
+// kind:git_repo / kind:tar / kind:remote sources whose URL
+// declarations follow FDSDK's `github:org/repo.git` shorthand.
+func resolveAliasURL(url string, aliases map[string]string) string {
+	if aliases == nil {
+		return url
+	}
+	colon := indexByte(url, ':')
+	if colon <= 0 {
+		return url
+	}
+	alias := url[:colon]
+	prefix, ok := aliases[alias]
+	if !ok {
+		return url
+	}
+	return prefix + url[colon+1:]
+}
+
+// indexByte is a tiny inline helper to keep the alias resolver
+// dependency-free at this layer (avoids pulling strings into a
+// file that otherwise doesn't need it).
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
 }
