@@ -1,7 +1,7 @@
 # Meta-project test fixtures
 
 End-to-end fixtures for the Bazel-as-orchestrator shape described
-in `docs/whole-project-plan.md`. Five fixtures so far:
+in `docs/whole-project-plan.md`. Eight fixtures so far:
 
 - **`hello-world.bst`** + **`sources/hello-world/`** — single cmake
   element. Phase 1 acceptance gate (`make e2e-meta-hello`).
@@ -21,6 +21,23 @@ in `docs/whole-project-plan.md`. Five fixtures so far:
   `/opt/freedesktop-sdk`, and a custom `%{greeting-dir}` composes
   onto derived defaults. Variable-resolver acceptance gate
   (`make e2e-meta-vars`).
+- **`compose-greet/`** — multi-element graph: two `kind: cmake`
+  elements (`greet-a`, `greet-b`) plus one `kind: compose`
+  (`bundle.bst`) bundling them. Phase 2 sibling-kind acceptance
+  gate (`make e2e-meta-compose`); rendering-equivalent to
+  `two-libs/`'s stack but using `kind: compose`.
+- **`filter-greet/`** — multi-element graph: 1 `kind: cmake` parent
+  (`greet`) + 1 `kind: filter` (`greet-headers.bst`) intending to
+  keep only the `public-headers` domain. Domain-based slicing is
+  deferred (the filter currently passes the parent through); the
+  `.bst`'s `config: include / exclude / include-orphans` is
+  recorded as comments in the rendered BUILD. Phase 2 acceptance
+  gate (`make e2e-meta-filter`).
+- **`import-greet/`** — single `kind: import` element with a
+  `kind: local` source tree of two files (`greeting.txt`,
+  `manifest.json`). write-a stages the tree verbatim into project
+  B and renders a filegroup over `glob(["**/*"])`. Phase 2
+  acceptance gate (`make e2e-meta-import`).
 
 Each fixture that uses the variable resolver also ships a tiny
 `project.conf` overriding `prefix=/usr` (matches FDSDK's
