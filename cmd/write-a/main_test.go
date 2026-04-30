@@ -303,6 +303,99 @@ func TestWriter_StackElementShape(t *testing.T) {
 	}
 }
 
+// TestWriter_FilterElementShape covers kind:filter — single-dep
+// validation, `config:` parsing of include / exclude / include-
+// orphans recorded as comments in the rendered BUILD, and the
+// pass-through filegroup-over-one-dep shape.
+func TestWriter_FilterElementShape(t *testing.T) {
+	tmp := t.TempDir()
+	parent := makeCmakeBst(t, tmp, "lib")
+	filter := filepath.Join(tmp, "lib-headers.bst")
+	body := `kind: filter
+
+depends:
+- lib
+
+config:
+  include:
+  - public-headers
+  exclude:
+  - runtime
+  include-orphans: false
+`
+	if err := os.WriteFile(filter, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{parent, filter})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	filterA, err := os.ReadFile(filepath.Join(outA, "elements/lib-headers/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"genrule(", "filegroup(", "cc_library("} {
+		if strings.Contains(string(filterA), banned) {
+			t.Errorf("project A filter BUILD should declare no targets, got %q in:\n%s", banned, filterA)
+		}
+	}
+
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	filterB, err := os.ReadFile(filepath.Join(outB, "elements/lib-headers/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`name = "lib-headers"`,
+		`"//elements/lib:lib"`,
+		`kind:filter`,
+		`# include domains: [public-headers]`,
+		`# exclude domains: [runtime]`,
+		`# include-orphans: false`,
+	} {
+		if !strings.Contains(string(filterB), marker) {
+			t.Errorf("project B filter BUILD missing %q\n--body--\n%s", marker, filterB)
+		}
+	}
+}
+
+// TestWriter_FilterRejectsMultipleDeps covers the single-dep
+// invariant kind:filter enforces — filter is a slice of exactly one
+// parent's install tree, so multi-dep filters surface as an error
+// from the handler at render time.
+func TestWriter_FilterRejectsMultipleDeps(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := makeCmakeBst(t, tmp, "b")
+	bad := filepath.Join(tmp, "bad.bst")
+	if err := os.WriteFile(bad,
+		[]byte("kind: filter\ndepends:\n- a\n- b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{a, b, bad})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	err = writeProjectA(g, outA, binPath)
+	if err == nil {
+		t.Fatal("expected error for filter with 2 deps, got nil")
+	}
+	if !strings.Contains(err.Error(), "expected exactly 1 dep") {
+		t.Errorf("error should name the single-dep invariant; got: %v", err)
+	}
+}
+
 // TestWriter_ComposeElementShape covers kind:compose. Compose is
 // rendering-shape-equivalent to kind:stack — the difference is the
 // kind: marker and the BUILD comment, both validated below.
