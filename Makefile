@@ -1,6 +1,6 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
-        e2e-meta-hello e2e-meta-stack e2e-meta-manual e2e-meta-make \
+        e2e-meta-hello e2e-meta-stack e2e-meta-manual e2e-meta-make e2e-meta-vars \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -131,6 +131,17 @@ e2e-meta-manual: check-tools converter
 # resolve correctly without an explicit config: in the .bst.
 e2e-meta-make: check-tools converter
 	scripts/meta-make.sh
+
+# Variable-resolver acceptance gate. Single kind:manual element
+# (testdata/meta-project/vars-greet/) whose .bst overrides %{prefix}
+# and defines a fresh %{greeting-dir} composing onto %{datadir} —
+# exercises the project-default + element-override + custom-variable
+# layers of variables.go's resolver. Asserts the rendered cmd carries
+# the resolved path, no %{...} leaks through, and (when bazel >= 7
+# is present) the install tarball lands the file at the overridden
+# prefix.
+e2e-meta-vars: check-tools converter
+	scripts/meta-vars.sh
 
 # M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
 # in addition to the standard cmake/ninja/bwrap; if absent the test
