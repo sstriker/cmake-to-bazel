@@ -156,14 +156,44 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 	}
 }
 
-func TestWriter_RejectsNonLocalSource(t *testing.T) {
+// TestWriter_AcceptsNonLocalSourceMetadata covers the source-kind
+// dispatch story: non-kind:local sources (kind:tar, kind:git_repo,
+// etc.) parse cleanly, their URL/Ref/Track metadata is recorded on
+// the resolvedSource entry, and staging skips them gracefully.
+// Real source-fetch integration with orchestrator/sourcecheckout
+// is deferred — render-time succeeds against any source kind, but
+// bazel-build of the resulting BUILD would fail without real bytes.
+func TestWriter_AcceptsNonLocalSourceMetadata(t *testing.T) {
 	tmp := t.TempDir()
 	bstPath := filepath.Join(tmp, "x.bst")
-	if err := os.WriteFile(bstPath, []byte("kind: cmake\nsources:\n- kind: tar\n  url: foo\n"), 0o644); err != nil {
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: a1b2c3
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadGraph([]string{bstPath}); err == nil {
-		t.Errorf("expected error for non-local source, got nil")
+	g, err := loadGraph([]string{bstPath})
+	if err != nil {
+		t.Fatalf("loadGraph: %v (non-local sources should parse)", err)
+	}
+	if len(g.Elements[0].Sources) != 1 {
+		t.Fatalf("Sources len = %d, want 1", len(g.Elements[0].Sources))
+	}
+	src := g.Elements[0].Sources[0]
+	if src.Kind != "tar" {
+		t.Errorf("Sources[0].Kind: got %q, want %q", src.Kind, "tar")
+	}
+	if src.URL != "https://example.org/foo.tar.gz" {
+		t.Errorf("Sources[0].URL: got %q, want %q", src.URL, "https://example.org/foo.tar.gz")
+	}
+	if src.Ref != "a1b2c3" {
+		t.Errorf("Sources[0].Ref: got %q, want %q", src.Ref, "a1b2c3")
+	}
+	if src.AbsPath != "" {
+		t.Errorf("Sources[0].AbsPath should be empty for non-kind:local; got %q", src.AbsPath)
 	}
 }
 
@@ -1197,6 +1227,110 @@ public:
 	}
 	if g.Elements[0].Bst.Public.IsZero() {
 		t.Errorf("public: block should round-trip onto bstFile.Public; got zero node")
+	}
+}
+
+// TestWriter_NonLocalSourceSkippedInStaging covers
+// stageAllSources's skip-non-local behavior: an element with one
+// kind:local + one kind:git_repo source stages the kind:local
+// content into project B but leaves nothing on disk for the
+// kind:git_repo entry. Render-time succeeds; bazel-build would
+// require the source-fetch integration that's deferred.
+func TestWriter_NonLocalSourceSkippedInStaging(t *testing.T) {
+	tmp := t.TempDir()
+	srcLocal := filepath.Join(tmp, "src-local")
+	if err := os.MkdirAll(srcLocal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcLocal, "data.txt"), []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "imp.bst")
+	body := `kind: import
+
+sources:
+- kind: local
+  path: ` + srcLocal + `
+- kind: git_repo
+  url: somealias:repo.git
+  ref: deadbeef
+  track: master
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if len(g.Elements[0].Sources) != 2 {
+		t.Fatalf("Sources len = %d, want 2", len(g.Elements[0].Sources))
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outB := filepath.Join(tmp, "B")
+	if err := os.MkdirAll(outB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProjectA(g, filepath.Join(tmp, "A"), binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	// kind:local content was staged.
+	if _, err := os.Stat(filepath.Join(outB, "elements/imp/data.txt")); err != nil {
+		t.Errorf("kind:local source should be staged: %v", err)
+	}
+	// kind:git_repo metadata is on the resolvedSource entry; nothing
+	// to assert in the staged tree (no bytes available without real
+	// fetch).
+	gitSrc := g.Elements[0].Sources[1]
+	if gitSrc.Kind != "git_repo" {
+		t.Errorf("Sources[1].Kind: got %q, want git_repo", gitSrc.Kind)
+	}
+	if gitSrc.URL != "somealias:repo.git" {
+		t.Errorf("Sources[1].URL: got %q, want somealias:repo.git", gitSrc.URL)
+	}
+	if gitSrc.Ref != "deadbeef" || gitSrc.Track != "master" {
+		t.Errorf("Sources[1] ref/track not recorded: %+v", gitSrc)
+	}
+}
+
+// TestWriter_AllNonLocalSourcesRendersBuild covers the all-non-local
+// case: an element whose every source is kind:git_repo / kind:patch
+// / etc. still renders a BUILD (the genrule's source set will be
+// empty, but write-a's render layer succeeds). Useful for the
+// reality check, where most FDSDK elements declare kind:git_repo.
+func TestWriter_AllNonLocalSourcesRendersBuild(t *testing.T) {
+	tmp := t.TempDir()
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: manual
+
+sources:
+- kind: git_repo
+  url: somealias:repo.git
+  ref: aabbccdd
+- kind: patch
+  path: patches/0001.patch
+
+config:
+  install-commands:
+  - echo done
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v (all-non-local sources should parse)", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v (all-non-local sources should render)", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "elements/elem/BUILD.bazel")); err != nil {
+		t.Errorf("BUILD.bazel should render even when no sources stage: %v", err)
 	}
 }
 

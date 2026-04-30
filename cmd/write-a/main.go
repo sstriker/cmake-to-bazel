@@ -154,14 +154,32 @@ type bstSource struct {
 	// commonly to keep separately-fetched component sources from
 	// colliding with the primary source tree).
 	Directory string `yaml:"directory"`
+	// URL / Ref / Track are non-kind:local source metadata (kind:git_repo
+	// / kind:tar / kind:remote / kind:patch_queue / etc.). For v1
+	// write-a parses and records them on resolvedSource so the
+	// element's bstFile + Sources fully describe what was declared,
+	// but doesn't fetch — actual checkout is deferred to a later
+	// integration with the existing orchestrator/sourcecheckout
+	// layer. Unknown source kinds get the same record-and-skip
+	// treatment so write-a's render pass succeeds against full FDSDK
+	// content even where bazel-build wouldn't (yet) compile.
+	URL   string `yaml:"url"`
+	Ref   string `yaml:"ref"`
+	Track string `yaml:"track"`
 }
 
-// resolvedSource is one entry in element.Sources: a kind:local
-// source path (resolved to an absolute on-disk location) plus the
-// staging-subpath the handler should mount it under.
+// resolvedSource is one entry in element.Sources: a per-source
+// record with everything write-a's render layer needs. Kind:local
+// sources carry the resolved AbsPath; non-kind:local sources carry
+// their URL/Ref metadata (parsed for completeness, ignored at
+// staging time pending real source-fetch integration).
 type resolvedSource struct {
-	AbsPath   string
+	Kind      string
+	AbsPath   string // populated only for kind:local
 	Directory string
+	URL       string
+	Ref       string
+	Track     string
 }
 
 type element struct {
@@ -474,25 +492,33 @@ func loadElement(bstPath, includeBase string) (*element, error) {
 			return nil, fmt.Errorf("%s: kind %q requires at least one source; .bst declares none", bstPath, f.Kind)
 		}
 		bstDir := filepath.Dir(bstPath)
-		for i, src := range f.Sources {
-			if src.Kind != "local" {
-				return nil, fmt.Errorf("%s: source[%d]: write-a supports only kind:local sources; got %q (kind:git_repo / kind:patch / etc. arrive with source-kind dispatch)", bstPath, i, src.Kind)
-			}
-			// kind:local path is interpreted relative to the .bst
-			// dir if it isn't already absolute (matches BuildStream
-			// semantics).
-			resolved := src.Path
-			if !filepath.IsAbs(resolved) {
-				resolved = filepath.Join(bstDir, resolved)
-			}
-			abs, err := filepath.Abs(resolved)
-			if err != nil {
-				return nil, err
-			}
-			elem.Sources = append(elem.Sources, resolvedSource{
-				AbsPath:   abs,
+		for _, src := range f.Sources {
+			rs := resolvedSource{
+				Kind:      src.Kind,
 				Directory: src.Directory,
-			})
+				URL:       src.URL,
+				Ref:       src.Ref,
+				Track:     src.Track,
+			}
+			if src.Kind == "local" {
+				// kind:local path is interpreted relative to the .bst
+				// dir if it isn't already absolute (matches BuildStream
+				// semantics). Project-root-relative resolution for
+				// kind:local — the FDSDK shape — is punch list #11.
+				resolved := src.Path
+				if !filepath.IsAbs(resolved) {
+					resolved = filepath.Join(bstDir, resolved)
+				}
+				abs, err := filepath.Abs(resolved)
+				if err != nil {
+					return nil, err
+				}
+				rs.AbsPath = abs
+			}
+			// Non-kind:local sources: record metadata; staging will
+			// skip them (with a traceable comment) until the
+			// orchestrator/sourcecheckout integration lands.
+			elem.Sources = append(elem.Sources, rs)
 		}
 	}
 	return elem, nil
@@ -697,20 +723,27 @@ func copyTree(src, dst string) error {
 	})
 }
 
-// stageAllSources copies every source in elem.Sources into dstRoot,
-// honoring each entry's Directory subpath. Used by handlers whose
-// staging is "all sources, flat or under their declared subdir":
-// kind:cmake's project-B copy, kind:import's filegroup root, the
-// pipeline-handler's project-A source mount.
+// stageAllSources copies every kind:local source in elem.Sources
+// into dstRoot, honoring each entry's Directory subpath. Used by
+// handlers whose staging is "all sources, flat or under their
+// declared subdir": kind:cmake's project-B copy, kind:import's
+// filegroup root, the pipeline-handler's project-A source mount.
 //
-// Single-source elements (Directory=="") get a flat copyTree, same
-// as the pre-multi-source code path. Multi-source elements stage
-// each entry rooted at dstRoot/<Directory>; collisions between
-// sources are caller's responsibility (BuildStream's behavior is to
-// merge, with later sources winning — copyTree's last-writer-wins
-// matches that).
+// Non-kind:local sources (kind:git_repo / kind:tar / kind:patch /
+// kind:remote / etc.) are accepted at parse time and recorded on
+// the resolvedSource entry, but skipped here — they need real
+// source-fetch integration (an extension of
+// orchestrator/internal/sourcecheckout/) before write-a can hand
+// real bytes to bazel. Until that lands, render-time succeeds
+// against any source kind, but bazel-build of the resulting BUILD
+// would fail at action-input merkle time on elements with
+// non-kind:local sources. Document those skips inline so a reader
+// of the rendered tree sees what was deferred.
 func stageAllSources(elem *element, dstRoot string) error {
 	for i, src := range elem.Sources {
+		if src.Kind != "local" {
+			continue
+		}
 		dst := dstRoot
 		if src.Directory != "" {
 			dst = filepath.Join(dstRoot, src.Directory)
@@ -723,4 +756,17 @@ func stageAllSources(elem *element, dstRoot string) error {
 		}
 	}
 	return nil
+}
+
+// hasNonLocalSources reports whether any of elem.Sources is not
+// kind:local. Handlers that need actual source bytes at render
+// time (kind:cmake's narrowing) check this and either error out
+// or fall back to a no-narrowing path.
+func hasNonLocalSources(elem *element) bool {
+	for _, s := range elem.Sources {
+		if s.Kind != "local" {
+			return true
+		}
+	}
+	return false
 }

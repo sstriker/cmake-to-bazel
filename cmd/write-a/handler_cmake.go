@@ -63,14 +63,20 @@ func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 
 // cmakeMultiSource reports whether this cmake element's sources are
 // in any shape that prevents the single-source-tree narrowing path:
-// either >1 source declared, or the lone source has a non-empty
-// Directory subpath. Both shapes flow through stageAllSources without
-// path-narrowing.
+// >1 source declared, the lone source has a non-empty Directory
+// subpath, or any source is non-kind:local (no on-disk tree to
+// narrow against). All these shapes flow through stageAllSources
+// without path-narrowing — kind:local sources stage normally;
+// non-kind:local sources skip until real source-fetch integration
+// lands.
 func cmakeMultiSource(elem *element) bool {
 	if len(elem.Sources) != 1 {
 		return true
 	}
-	return elem.Sources[0].Directory != ""
+	if elem.Sources[0].Directory != "" {
+		return true
+	}
+	return elem.Sources[0].Kind != "local"
 }
 
 func (cmakeHandler) RenderB(elem *element, elemPkg string) error {
