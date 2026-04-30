@@ -68,7 +68,7 @@ func TestFoldStaticConditionals(t *testing.T) {
 	branches[2].Overrides = mappingNode("build_arch_flags", "-march=armv8-a")
 	staticVars := map[string]string{"bootstrap_build_arch": "x86_64"}
 	vars := map[string]string{"prefix": "/usr"}
-	out, remaining := foldStaticConditionals(vars, branches, staticVars)
+	out, remaining := foldStaticConditionals(vars, branches, staticVars, nil)
 	if got := out["build_arch_flags"]; got != "-msse4.2" {
 		t.Errorf("matching branch override should fold; got %q", got)
 	}
