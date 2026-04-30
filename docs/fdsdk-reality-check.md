@@ -302,10 +302,12 @@ transitive-dep walking:
 
 Two real gaps remain:
 
-- **`kind: script` plugin (53 elements)** — the next missing
-  pipeline-kind handler. Mirrors the `pipelineHandler`
-  registration shape every other coarse kind uses; small
-  follow-up. Five of six subgraph probes hit this.
+- ~~**`kind: script` plugin (53 elements)**~~ — closed.
+  `pipelineHandler` registration; `pipelineCfg` gains a `Commands`
+  field that maps onto the install-commands slot when set
+  (kind:script's flat `config: commands:` list). Subgraph probes
+  now advance past kind:script to the next gap (`kind:collect_manifest`,
+  18 elements; FDSDK-specific manifest-collector).
 - **Project.conf-supplied per-host variables** — `bootstrap_build_arch`,
   `host_triplet`, `gcc_triplet`, ... defined in FDSDK's
   `include/_private/arch.yml` but only inside `(?):` branches

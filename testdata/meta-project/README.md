@@ -1,7 +1,7 @@
 # Meta-project test fixtures
 
 End-to-end fixtures for the Bazel-as-orchestrator shape described
-in `docs/whole-project-plan.md`. Ten fixtures so far:
+in `docs/whole-project-plan.md`. Eleven fixtures so far:
 
 - **`hello-world.bst`** + **`sources/hello-world/`** — single cmake
   element. Phase 1 acceptance gate (`make e2e-meta-hello`).
@@ -44,6 +44,10 @@ in `docs/whole-project-plan.md`. Ten fixtures so far:
   `@platforms//cpu:*`; the conditional-lowering acceptance gate
   (`make e2e-meta-conditional`) asserts the per-arch resolved
   paths flow through.
+- **`script-greet/`** — single `kind: script` element with a flat
+  `config: commands:` list. write-a maps the list onto the
+  pipelineHandler's install-commands slot at render time.
+  Acceptance gate (`make e2e-meta-script`).
 - **`autotools-greet/`** — single `kind: autotools` element with a
   minimal `./configure` script (honors `--prefix`, accepts and
   ignores the rest of the canonical autoconf flag set), a
