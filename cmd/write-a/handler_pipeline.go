@@ -84,12 +84,12 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	install := mergeWithDefault(cfg.InstallCommands, h.defaults.Install)
 	strip := mergeWithDefault(cfg.StripCommands, h.defaults.Strip)
 
-	// Compose the variable scope (project defaults < kind defaults
-	// < per-element overrides), expand recursively, and apply to
-	// each phase command. References to undefined variables (typo
-	// in a .bst) error out here rather than silently emitting a
-	// literal %{misspelled} into the genrule cmd.
-	vars, err := resolveVars(h.defaultVars, elem.Bst.Variables)
+	// Compose the variable scope (BuildStream stock < project.conf
+	// < kind defaults < per-element overrides), expand recursively,
+	// and apply to each phase command. References to undefined
+	// variables (typo in a .bst) error out here rather than silently
+	// emitting a literal %{misspelled} into the genrule cmd.
+	vars, err := resolveVars(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
 	if err != nil {
 		return fmt.Errorf("element %q (kind:%s): resolve variables: %w", elem.Name, h.kindName, err)
 	}

@@ -108,6 +108,13 @@ type element struct {
 	// handed to the zero_files starlark rule.
 	RealPaths []string
 	ZeroPaths []string
+
+	// ProjectConfVars is the project-level variable override layer
+	// loaded from the meta-project's project.conf (see
+	// project_conf.go). Same map across every element resolved from
+	// the same project.conf; nil when no project.conf was found
+	// walking up from the .bst file's directory.
+	ProjectConfVars map[string]string
 }
 
 // graph is the loaded set of elements with cross-references resolved.
@@ -192,8 +199,21 @@ func main() {
 // `depends:` references to produce a topologically-sorted element
 // list. Dep resolution matches by element name (filename basename
 // without .bst); unresolved deps are an error so typos surface early.
+//
+// Project.conf is loaded once per invocation, walking up from the
+// first .bst's directory. Multi-junction graphs (where different
+// .bsts root different project.confs) aren't supported — they'd
+// need a per-junction scope on top of this single-project shape.
 func loadGraph(bstPaths []string) (*graph, error) {
 	g := &graph{ByName: map[string]*element{}}
+	var projectConfVars map[string]string
+	if len(bstPaths) > 0 {
+		var err error
+		projectConfVars, err = loadProjectConfFromBst(bstPaths[0])
+		if err != nil {
+			return nil, fmt.Errorf("load project.conf: %w", err)
+		}
+	}
 	for _, p := range bstPaths {
 		elem, err := loadElement(p)
 		if err != nil {
@@ -203,6 +223,7 @@ func loadGraph(bstPaths []string) (*graph, error) {
 			return nil, fmt.Errorf("element %q declared twice (%s and %s)",
 				elem.Name, existing.Name, p)
 		}
+		elem.ProjectConfVars = projectConfVars
 		g.ByName[elem.Name] = elem
 		g.Elements = append(g.Elements, elem)
 	}
