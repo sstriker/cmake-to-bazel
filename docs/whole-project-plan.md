@@ -343,21 +343,36 @@ Together with cmake this covers ~70 % of FDSDK by element count.
 The first cut delivers `kind: manual` — the simplest of the
 coarse-grained kinds — gated by `make e2e-meta-manual` against
 `testdata/meta-project/manual-greet/`. Validates the per-element
-genrule shape, the four phase command lists (configure / build /
-install / strip), and the initial variable-substitution surface
-(`%{install-root}` and `%{prefix}`).
+genrule shape and the four phase command lists (configure / build /
+install / strip).
 
 A shared `pipelineHandler` shape extracted from kind:manual lets
 sibling coarse-grained kinds register as small `init()` blocks
-with their default phase commands. `kind: make` ships next, with
-the BuildStream `make` plugin's `make` / `make install` defaults
-inlined; gated by `make e2e-meta-make` against
-`testdata/meta-project/make-greet/` (a Makefile-driven binary
-build that exercises the default-commands path end-to-end).
-`autotools`, `pyproject`, `makemaker`, `modulebuild`, and `script`
-are similar small additions once the variable parser lands and
-unblocks their richer default command sets. `meson` is a separate
-fine-grained track.
+with their default phase commands. `kind: make` follows, with
+BuildStream's `make` plugin defaults declared via per-kind
+variable bindings (`%{make-args}` / `%{make-install-args}`); gated
+by `make e2e-meta-make` against `testdata/meta-project/make-greet/`
+(a Makefile-driven binary build that exercises the default-commands
+path end-to-end).
+
+The variable resolver (`cmd/write-a/variables.go`) layers project
+defaults (matching BuildStream's `projectconfig.yaml` plus FDSDK's
+`prefix=/usr` overlay) under per-kind defaults under per-element
+`variables:`, expands `%{name}` references recursively with cycle
+detection, and treats `%{install-root}` / `%{build-root}` as
+runtime sentinels mapped to the genrule cmd's exported shell vars.
+Gated by `make e2e-meta-vars` against
+`testdata/meta-project/vars-greet/` (a `.bst` overriding `%{prefix}`
+plus a custom `%{greeting-dir}` composing onto derived defaults).
+With the resolver in place, `autotools`, `pyproject`, `makemaker`,
+`modulebuild`, and `script` collapse to small per-kind registration
+files — each declaring its plugin's default variables and command
+templates. `meson` is a separate fine-grained track.
+
+Project-conf parsing — sourcing the project-level variable
+defaults from the meta-project's `project.conf` rather than
+hardcoded values — is a follow-up; FDSDK's `prefix=/usr` overlay
+is currently baked into `projectVars` in `variables.go`.
 
 **Phase 4 — FDSDK acceptance.** Run the full pipeline over the
 FDSDK kind set the survey covers. `bazel build //...` against
