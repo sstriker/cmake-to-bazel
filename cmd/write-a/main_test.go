@@ -1230,6 +1230,68 @@ public:
 	}
 }
 
+// TestWriter_KindLocalPathProjectRootRelative covers the FDSDK
+// shape: a kind:local source's `path:` resolves against the
+// project root (the directory containing project.conf), not
+// against the .bst's own directory. boot-keys-prod.bst at
+// elements/components/boot-keys-prod.bst declaring
+// `path: files/boot-keys/PK.key` resolves to
+// <project>/files/boot-keys/PK.key, not
+// <project>/elements/components/files/boot-keys/PK.key.
+func TestWriter_KindLocalPathProjectRootRelative(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte("element-path: elements\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Stage source file at project-root-relative path.
+	if err := os.MkdirAll(filepath.Join(tmp, "files/data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "files/data/secret.txt"),
+		[]byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Element lives in a deeper subdirectory than the source it
+	// references — making the bst-dir-relative-vs-project-root
+	// distinction observable.
+	if err := os.MkdirAll(filepath.Join(tmp, "elements/components"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elements/components/elem.bst")
+	if err := os.WriteFile(bst, []byte(`kind: import
+sources:
+- kind: local
+  path: files/data
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	want := filepath.Join(tmp, "files/data")
+	if got := g.Elements[0].Sources[0].AbsPath; got != want {
+		t.Errorf("kind:local path didn't resolve project-root-relative\n got: %q\nwant: %q", got, want)
+	}
+	// And the staged content actually appears in project B at the
+	// element root.
+	binPath := fakeConvertBin(t, tmp)
+	outB := filepath.Join(tmp, "B")
+	if err := os.MkdirAll(outB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProjectA(g, filepath.Join(tmp, "A"), binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outB, "elements/components/elem/secret.txt")); err != nil {
+		t.Errorf("project-root-relative source didn't stage into project B: %v", err)
+	}
+}
+
 // TestWriter_NonLocalSourceSkippedInStaging covers
 // stageAllSources's skip-non-local behavior: an element with one
 // kind:local + one kind:git_repo source stages the kind:local
