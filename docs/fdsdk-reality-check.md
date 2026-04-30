@@ -24,32 +24,38 @@ alongside) so the per-element gap surfaces directly. As gaps
 close, the probes progress to later failure points:
 
 **In-place probes** (write-a runs against the real FDSDK tree —
-project.conf parsing, `(@):` composition, and path-qualified
-element resolution all engage):
+project.conf parsing, `(@):` composition, source-kind dispatch,
+and path-qualified element resolution all engage):
 
 | Element | Kind | First failure | Punch list |
 |---|---|---|---|
-| `components/bzip2.bst` | stack | dep `public-stacks/runtime-minimal` not in graph (single-element load — needs all deps loaded together) | resolution works |
-| `components/boot-keys-prod.bst` | import | kind:local path resolves bst-dir-relative; FDSDK declares them project-root-relative | new gap (kind:local resolution) |
-| `components/expat.bst` | cmake | unsupported source kind `git_repo` | #8 |
-| `components/aom.bst` | cmake | unsupported source kind `git_repo` | #8 |
-| `bootstrap/bzip2.bst` | manual | unsupported source kind `git_repo` | #8 |
-| `components/tar.bst` | autotools | unsupported source kind `tar` | #8 |
+| `components/bzip2.bst` | stack | dep `public-stacks/runtime-minimal` not in graph | single-element-load |
+| `components/boot-keys-prod.bst` | import | kind:local path resolves bst-dir-relative; FDSDK declares them project-root-relative | #11 |
+| `components/expat.bst` | cmake | dep `public-stacks/runtime-minimal` not in graph | single-element-load |
+| `components/aom.bst` | cmake | dep `public-stacks/runtime-minimal` not in graph | single-element-load |
+| `bootstrap/bzip2.bst` | manual | dep `bootstrap/gnu-config` not in graph | single-element-load |
+| `components/tar.bst` | autotools | dep `bootstrap/bash` not in graph | single-element-load |
 | (synthetic multi-element probe) | mixed | — | **OK** |
 
-`kind:git_repo` source dispatch (#8) is the single forcing function
-for five of six in-place probes — closing it would unblock
-parsing for every kind:cmake / kind:autotools / kind:manual / kind:meson
-element that uses `kind:git_repo` (519 elements, 48 % of FDSDK).
+After #8, every kind:cmake / kind:autotools / kind:manual element
+in the curated set parses + accepts its source list + resolves its
+project-rooted element name. The remaining first-failure for those
+five is uniformly "dep X not in graph" — the probe loads only
+the named .bst, not its transitive dep tree, so single-element
+loads naturally surface this. That's a probe-shape limitation
+rather than a write-a gap: a multi-element probe that loads all of
+FDSDK at once would expose what's actually next.
 
-The remaining gap surfaced by `boot-keys-prod` (kind:local paths
-resolving project-root-relative rather than bst-dir-relative) is a
-separate small fix — adds to the punch list as #11.
+The single remaining write-a gap surfaced by `boot-keys-prod` is
+#11 (kind:local paths resolve bst-dir-relative, but FDSDK declares
+them project-root-relative). Small fix, separate PR.
 
 The synthetic probe exercises every closed punch-list item
 end-to-end: path-qualified deps, build-depends + runtime-depends,
 multi-source elements with `directory:` flag, `public:` block
-tolerance, and `(@):` composition. It passes today.
+tolerance, `(@):` composition, and source-kind dispatch (a
+kind:git_repo source's metadata flows onto the resolvedSource
+entry; staging skips it gracefully). It passes today.
 
 1. **Loader gaps** — write-a's `.bst` / `project.conf` parsing surface
    doesn't match what real `.bst` files declare. These are mechanical
@@ -170,17 +176,26 @@ recorded on the `bstDep` entry but inert. Acting on them lands
 once junction support proper (#10's separate junction
 infrastructure) arrives.
 
-### 8. kind:git_repo / kind:patch source kinds (519 + 55 elements)
+### 8. kind:git_repo / kind:patch / kind:tar / etc. source kinds ✓ done
 
-write-a only supports `kind: local`. kind:git_repo dominates real
-sourcing (mirrors a git repo with URL aliases); kind:patch overlays
-patches onto an existing source tree.
+`bstSource` accepts arbitrary source kinds. `loadElement`
+populates a `resolvedSource` entry per source: kind:local sources
+carry the resolved AbsPath; non-kind:local sources (kind:git_repo,
+kind:tar, kind:patch, kind:remote, ...) carry their URL/Ref/Track
+metadata. `stageAllSources` stages kind:local entries normally and
+skips non-kind:local ones — render-time succeeds against any
+source kind, but bazel-build of the resulting BUILD would fail at
+action-input merkle time on elements with non-kind:local sources
+until real source-fetch integration with
+`orchestrator/internal/sourcecheckout` lands.
 
-Fix shape: source-kind dispatch (mirrors element-kind dispatch).
-For the reality-check survey, a stub `kind: git_repo` source that
-records the URL but doesn't fetch unblocks rendering of every
-element that currently declares git_repo. Real fetching wires into
-`orchestrator/internal/sourcecheckout`.
+For the reality-check goal — confirming the loader / resolver
+pipeline parses real FDSDK content end-to-end — this is enough.
+After this PR, every kind:cmake / kind:autotools / kind:manual /
+kind:meson element in FDSDK reaches the dep-resolution phase; none
+fail on source-kind anymore. The next gap is "single-element load
+doesn't see transitive deps", which is a probe-shape limitation
+rather than a write-a gap.
 
 ### 9. `(?):` conditional directive (81 elements)
 
@@ -261,28 +276,32 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-Items #1, #2, #3, #4, #5, #6, and #7 are closed. The synthetic
-multi-element probe exercises every closed item end-to-end and
-passes today. The in-place probes (write-a against the real FDSDK
-tree) have moved past project.conf parsing, `(@):` composition,
-and path-qualified element resolution; five of six now fail on a
-single shared gap.
+Items #1, #2, #3, #4, #5, #6, #7, and #8 are closed. The synthetic
+multi-element probe exercises every closed item end-to-end (the
+new addition: kind:git_repo source metadata flowing through the
+resolver) and passes today. The in-place probes have moved past
+every parse-/resolution-/source-kind-side gap; five of six now
+fail at "dep X not in graph", which is a probe-shape limitation
+(single-element load) rather than a write-a gap.
 
-The next forcing function is **`kind:git_repo` / `kind:patch`
-source dispatch (#8)**. Five of six in-place curated probes hit
-it; closing it would unblock parsing for the 519 + 55 elements
-(48 % + 5 % of FDSDK) that declare those source kinds. Mirrors
-the existing element-kind dispatch — likely a small per-source-
-kind handler interface plus stub implementations that record the
-URL/ref but defer fetching.
-
-After source dispatch:
+The remaining write-a gaps are:
 
 - **kind:local path resolution (#11)** — project-root-relative
-  paths (revealed by boot-keys-prod.bst). Small fix.
+  paths. Surfaced empirically by `boot-keys-prod.bst`; FDSDK
+  declares many kind:local sources with project-root-relative
+  paths but write-a resolves them bst-dir-relative. Small fix.
+- **multi-element load** — the probe shape is the obstacle, not
+  write-a. Loading a real FDSDK subgraph (e.g. all elements in a
+  given dep closure) is the next natural reality-check step;
+  doesn't need a code change to write-a to exercise.
 - **`(?):` conditional → project-B `select()`** (#9) — the
   architectural piece. Lowers per-arch variable overrides into
   Bazel-native multi-arch resolution rather than baking write-a's
   host arch into the rendered cmd. Today the composer strips the
   blocks; a real FDSDK build with arch-specific variables won't
   reflect those overrides until this lands.
+- **real source-fetch integration** — write-a now records
+  kind:git_repo / kind:tar / etc. metadata on `resolvedSource`,
+  but skips them at staging time. A bazel-build of those elements
+  needs the existing `orchestrator/internal/sourcecheckout` layer
+  (or its successor) to actually fetch sources and feed them in.

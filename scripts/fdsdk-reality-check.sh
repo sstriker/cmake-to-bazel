@@ -175,8 +175,9 @@ sources:
 - kind: local
   path: $synth_dir/src-bar
 EOF
-# Multi-source kind:import exercising the source `directory:` flag
-# plus a public: block (real FDSDK declares both heavily).
+# Multi-source kind:import exercising the source `directory:` flag,
+# kind:git_repo source metadata (recorded but skipped at staging),
+# plus a public: block (real FDSDK declares all three heavily).
 cat > "$synth_dir/elements/components/data.bst" <<EOF
 kind: import
 sources:
@@ -185,6 +186,10 @@ sources:
 - kind: local
   path: $synth_dir/src-extra
   directory: extras
+- kind: git_repo
+  url: alias:repo.git
+  ref: deadbeef
+  track: master
 public:
   bst:
     split-rules:
