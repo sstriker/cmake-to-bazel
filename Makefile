@@ -1,6 +1,6 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
-        e2e-meta-hello e2e-meta-stack e2e-meta-manual \
+        e2e-meta-hello e2e-meta-stack e2e-meta-manual e2e-meta-make \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -121,6 +121,16 @@ e2e-meta-stack: check-tools converter
 # e2e-meta-hello / e2e-meta-stack.
 e2e-meta-manual: check-tools converter
 	scripts/meta-manual.sh
+
+# Phase 3 sibling acceptance gate. Single kind:make element
+# (testdata/meta-project/make-greet/) with a Makefile that builds
+# a tiny `greet` binary and installs it. Drives bazel build A →
+# extracts the resulting install_tree.tar → asserts usr/bin/greet
+# exists, runs, and prints the expected message. Validates that
+# kind:make's pipelineHandler defaults (`make` / `make install`)
+# resolve correctly without an explicit config: in the .bst.
+e2e-meta-make: check-tools converter
+	scripts/meta-make.sh
 
 # M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
 # in addition to the standard cmake/ninja/bwrap; if absent the test
