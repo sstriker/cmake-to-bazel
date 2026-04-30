@@ -66,6 +66,13 @@ type bstFile struct {
 	Kind    string      `yaml:"kind"`
 	Sources []bstSource `yaml:"sources"`
 	Depends []string    `yaml:"depends"`
+	// Config is the per-kind freeform configuration block. Each
+	// handler picks the keys it cares about (kind:manual reads
+	// build-commands / install-commands / etc.; kind:cmake currently
+	// uses none). yaml.v3 represents arbitrary YAML as a Node tree;
+	// using a Node here lets handlers re-extract specific shapes
+	// without forcing every kind to share one struct.
+	Config yaml.Node `yaml:"config"`
 }
 
 type bstSource struct {

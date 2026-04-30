@@ -303,6 +303,86 @@ func TestWriter_StackElementShape(t *testing.T) {
 	}
 }
 
+func TestWriter_ManualElementShape(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Trivial source tree the manual element references in its
+	// install commands.
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "greeting.txt"),
+		[]byte("Hello from kind:manual!\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "greet.bst")
+	bstBody := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+config:
+  install-commands:
+  - install -D greeting.txt %{install-root}%{prefix}/share/greeting.txt
+`
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if len(g.Elements) != 1 || g.Elements[0].Bst.Kind != "manual" {
+		t.Fatalf("Elements = %+v, want one kind:manual", g.Elements)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/greet/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, marker := range []string{
+		`name = "greet_install"`,
+		`outs = ["install_tree.tar"]`,
+		// %{install-root} / %{prefix} substituted to shell vars.
+		`$$INSTALL_ROOT$$PREFIX/share/greeting.txt`,
+		// Source-staging shadow merge same as cmake handler.
+		`for src in $(SRCS)`,
+		// install-commands phase header rendered.
+		`# === install ===`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("manual element BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// Source file copied into the project-A package.
+	if _, err := os.Stat(filepath.Join(outA, "elements/greet/sources/greeting.txt")); err != nil {
+		t.Errorf("sources/greeting.txt not staged: %v", err)
+	}
+
+	// Project B: placeholder until the driver post-processes the
+	// install tarball into a real wrapper.
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	bBuild, err := os.ReadFile(filepath.Join(outB, "elements/greet/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bBuild), "BUILD_NOT_YET_STAGED") {
+		t.Errorf("project B kind:manual BUILD missing placeholder marker:\n%s", bBuild)
+	}
+}
+
 // appendDepends adds a depends: list to an existing .bst file.
 func appendDepends(bstPath string, deps []string) error {
 	body, err := os.ReadFile(bstPath)

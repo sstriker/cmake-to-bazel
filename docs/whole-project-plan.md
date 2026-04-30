@@ -334,11 +334,21 @@ stack's filegroup). Remaining kinds in this bucket land in
 follow-up PRs once their cross-element semantics need real
 install-tree producers (see Phase 3).
 
-**Phase 3 — buildsystem-variant kinds.** meson, autotools, make,
-manual, pyproject, makemaker, modulebuild, script. The fine-
-grained meson translator is its own genrule shape; the coarse
-ones share the install-pipeline pattern. Together with cmake
-this covers ~70 % of FDSDK by element count.
+**Phase 3 — buildsystem-variant kinds.** *(in progress)* meson,
+autotools, make, manual, pyproject, makemaker, modulebuild,
+script. The fine-grained meson translator is its own genrule
+shape; the coarse ones share the install-pipeline pattern.
+Together with cmake this covers ~70 % of FDSDK by element count.
+
+The first cut delivers `kind: manual` — the simplest of the
+coarse-grained kinds — gated by `make e2e-meta-manual` against
+`testdata/meta-project/manual-greet/`. Validates the per-element
+genrule shape, the four phase command lists (configure / build /
+install / strip), and the initial variable-substitution surface
+(`%{install-root}` and `%{prefix}`). Sibling kinds (`make`,
+`autotools`, `pyproject`, ...) layer on top of the manual handler
+once the variable parser lands; `meson` is a separate fine-
+grained track.
 
 **Phase 4 — FDSDK acceptance.** Run the full pipeline over the
 FDSDK kind set the survey covers. `bazel build //...` against
