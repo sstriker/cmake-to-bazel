@@ -65,7 +65,17 @@ var zeroFilesBzl string
 type bstFile struct {
 	Kind    string      `yaml:"kind"`
 	Sources []bstSource `yaml:"sources"`
-	Depends []string    `yaml:"depends"`
+	// Depends / BuildDepends / RuntimeDepends are the three
+	// dependency categories BuildStream defines. `depends` covers
+	// both build- and run-time; `build-depends` is build-only;
+	// `runtime-depends` is runtime-only. write-a (v1) merges all
+	// three into a single dep edge set in element.Deps — the build-
+	// vs-runtime distinction matters once the typed-filegroup
+	// wrapper for pipeline-kind outputs lets consumers reference
+	// runtime-only labels separately, which lands later.
+	Depends        []bstDep `yaml:"depends"`
+	BuildDepends   []bstDep `yaml:"build-depends"`
+	RuntimeDepends []bstDep `yaml:"runtime-depends"`
 	// Config is the per-kind freeform configuration block. Each
 	// handler picks the keys it cares about (kind:manual reads
 	// build-commands / install-commands / etc.; kind:cmake currently
@@ -79,6 +89,52 @@ type bstFile struct {
 	// pipeline-kind handler runs phase commands through
 	// substituteCmd against the resolved map.
 	Variables map[string]string `yaml:"variables"`
+}
+
+// bstDep is one entry inside a depends / build-depends / runtime-
+// depends list. Real .bst files declare deps in two shapes:
+//
+//   - String shape:  "- foo.bst"
+//   - Map shape:     "- filename: foo.bst, junction: jx.bst, config: {...}"
+//
+// The map shape carries junction-targeting and per-dep config (e.g.
+// kind:filter overriding parent's domain choice). For v1 we only
+// consume Filename — junction and config get parsed and recorded
+// (so the unmarshal doesn't reject map-form entries) but aren't
+// yet acted on.
+type bstDep struct {
+	Filename string
+	Junction string
+	Config   yaml.Node
+}
+
+// UnmarshalYAML accepts either a scalar (string-form dep) or a
+// mapping (map-form dep). yaml.v3 picks per-entry shape via the
+// Node's Kind, so a single list can mix both shapes.
+func (d *bstDep) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		d.Filename = node.Value
+		return nil
+	case yaml.MappingNode:
+		var raw struct {
+			Filename string    `yaml:"filename"`
+			Junction string    `yaml:"junction"`
+			Config   yaml.Node `yaml:"config"`
+		}
+		if err := node.Decode(&raw); err != nil {
+			return err
+		}
+		if raw.Filename == "" {
+			return fmt.Errorf("dep: map-form entry must have a `filename:` key")
+		}
+		d.Filename = raw.Filename
+		d.Junction = raw.Junction
+		d.Config = raw.Config
+		return nil
+	default:
+		return fmt.Errorf("dep: expected scalar or mapping, got yaml node kind %d", node.Kind)
+	}
 }
 
 type bstSource struct {
@@ -227,17 +283,31 @@ func loadGraph(bstPaths []string) (*graph, error) {
 		g.ByName[elem.Name] = elem
 		g.Elements = append(g.Elements, elem)
 	}
-	// Resolve depends:.
+	// Resolve dependencies. All three lists (depends, build-depends,
+	// runtime-depends) merge into element.Deps for v1 — write-a
+	// doesn't yet distinguish build-only from runtime-only edges.
+	// Duplicates (a dep listed in both `depends:` and
+	// `build-depends:`, say) are tolerated: the dep's *element
+	// pointer dedupes downstream (topo sort doesn't care about edge
+	// multiplicity).
 	for _, elem := range g.Elements {
-		for _, depName := range elem.Bst.Depends {
+		seen := map[*element]bool{}
+		allDeps := append([]bstDep{}, elem.Bst.Depends...)
+		allDeps = append(allDeps, elem.Bst.BuildDepends...)
+		allDeps = append(allDeps, elem.Bst.RuntimeDepends...)
+		for _, dep := range allDeps {
 			// Tolerate `depends: [- foo.bst]` style by stripping the
 			// .bst suffix; also accept bare element names.
-			depName = strings.TrimSuffix(depName, ".bst")
-			dep, ok := g.ByName[depName]
+			depName := strings.TrimSuffix(dep.Filename, ".bst")
+			depElem, ok := g.ByName[depName]
 			if !ok {
 				return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
 			}
-			elem.Deps = append(elem.Deps, dep)
+			if seen[depElem] {
+				continue
+			}
+			seen[depElem] = true
+			elem.Deps = append(elem.Deps, depElem)
 		}
 	}
 	// Topological sort (Kahn's algorithm). Stable secondary order on
