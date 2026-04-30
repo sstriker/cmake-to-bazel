@@ -1,0 +1,16 @@
+PREFIX = @PREFIX@
+CC ?= cc
+CFLAGS ?= -O2
+
+all: greet
+
+greet: greet.c
+	$(CC) $(CFLAGS) -o greet greet.c
+
+install: greet
+	install -D -m 0755 greet $(DESTDIR)$(PREFIX)/bin/greet
+
+clean:
+	rm -f greet
+
+.PHONY: all install clean
