@@ -105,27 +105,42 @@ done <<EOF
 $probes
 EOF
 
-# Separately probe the project.conf parser against FDSDK's actual
-# project.conf. This is its own gap — the (@): composition
-# directive appears at the project-conf level too — and it gates
-# every in-place run against a real FDSDK checkout.
-project_conf_err=""
-if [ -f "$FDSDK_DIR/project.conf" ]; then
-    project_test_dir="$work_dir/project-conf-probe"
-    mkdir -p "$project_test_dir"
-    cp "$FDSDK_DIR/project.conf" "$project_test_dir/project.conf"
-    cat > "$project_test_dir/probe.bst" <<'BST_EOF'
-kind: import
-sources:
-- kind: local
-  path: ./
-BST_EOF
-    project_conf_err=$("$bin_dir/write-a" \
-        --bst "$project_test_dir/probe.bst" \
-        --out "$project_test_dir/A" \
-        --out-b "$project_test_dir/B" \
+# In-place probes — same curated set as above, but run against the
+# real FDSDK tree (no isolation), so write-a's project.conf parser,
+# (@): composer, and path-qualified element resolver all engage
+# against actual content. The first failure each one hits is the
+# deepest gap real-FDSDK hits today.
+in_place_report=""
+in_place_ok=0
+in_place_fail=0
+while IFS='|' read -r path desc; do
+    path=$(echo "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    desc=$(echo "$desc" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -z "$path" ] && continue
+    src="$FDSDK_DIR/$path"
+    if [ ! -f "$src" ]; then
+        in_place_report="$in_place_report\n  SKIP    $path"
+        continue
+    fi
+    out_a="$work_dir/inplace-A-$(basename "$path" .bst)"
+    out_b="$work_dir/inplace-B-$(basename "$path" .bst)"
+    err=$("$bin_dir/write-a" \
+        --bst "$src" \
+        --out "$out_a" \
+        --out-b "$out_b" \
         --convert-element "$bin_dir/convert-element" 2>&1 >/dev/null) || true
-fi
+    if [ -z "$err" ]; then
+        in_place_ok=$((in_place_ok+1))
+        in_place_report="$in_place_report\n  OK      $path"
+    else
+        in_place_fail=$((in_place_fail+1))
+        first_err=$(echo "$err" | head -1)
+        in_place_report="$in_place_report\n  FAIL    $path"
+        in_place_report="$in_place_report\n          → $first_err"
+    fi
+done <<EOF
+$probes
+EOF
 
 # Synthesized multi-element FDSDK-shape probe. Renders a tiny
 # project (synthetic project.conf + element-path: elements +
@@ -204,14 +219,9 @@ total=$((ok+fail))
 printf "fdsdk-reality-check: %d/%d isolated-element probes succeeded\n\n" "$ok" "$total"
 printf "%b\n" "$report"
 echo
-echo "Project.conf probe (in-place against FDSDK's real project.conf):"
-if [ -z "$project_conf_err" ]; then
-    echo "  OK      project.conf"
-else
-    first_err=$(echo "$project_conf_err" | head -1)
-    echo "  FAIL    project.conf"
-    echo "          → $first_err"
-fi
+in_place_total=$((in_place_ok+in_place_fail))
+printf "In-place probes (real FDSDK tree, real project.conf): %d/%d succeeded\n" "$in_place_ok" "$in_place_total"
+printf "%b\n" "$in_place_report"
 echo
 echo "Synthetic multi-element probe (FDSDK-shape: kind:cmake + kind:import"
 echo "+ kind:stack with path-qualified deps, build-depends + runtime-depends,"

@@ -23,21 +23,33 @@ The probe runs each element in isolation (no FDSDK project.conf
 alongside) so the per-element gap surfaces directly. As gaps
 close, the probes progress to later failure points:
 
+**In-place probes** (write-a runs against the real FDSDK tree —
+project.conf parsing, `(@):` composition, and path-qualified
+element resolution all engage):
+
 | Element | Kind | First failure | Punch list |
 |---|---|---|---|
-| `components/bzip2.bst` | stack | path-qualified dep `public-stacks/runtime-minimal` not in graph (single-element isolation; the dep elements simply aren't loaded) | resolution works; needs full graph load |
-| `components/boot-keys-prod.bst` | import | source-stage failure: kind:local source path missing in probe sandbox | parses; needs FDSDK source files |
+| `components/bzip2.bst` | stack | dep `public-stacks/runtime-minimal` not in graph (single-element load — needs all deps loaded together) | resolution works |
+| `components/boot-keys-prod.bst` | import | kind:local path resolves bst-dir-relative; FDSDK declares them project-root-relative | new gap (kind:local resolution) |
 | `components/expat.bst` | cmake | unsupported source kind `git_repo` | #8 |
-| `components/aom.bst` | cmake | yaml unmarshal: `(?):` block (line 15) | #9 |
+| `components/aom.bst` | cmake | unsupported source kind `git_repo` | #8 |
 | `bootstrap/bzip2.bst` | manual | unsupported source kind `git_repo` | #8 |
-| `components/tar.bst` | autotools | "requires at least one source; .bst declares none" (sources live in element-level `(@):` include) | #6 |
-| (project.conf in-place) | — | yaml unmarshal: `(@):` in `variables:` | #6 |
+| `components/tar.bst` | autotools | unsupported source kind `tar` | #8 |
 | (synthetic multi-element probe) | mixed | — | **OK** |
 
-The synthetic probe exercises every closed punch-list item end-to-end:
-path-qualified deps, build-depends + runtime-depends, multi-source
-elements with `directory:` flag, and `public:` block tolerance. It
-passes today.
+`kind:git_repo` source dispatch (#8) is the single forcing function
+for five of six in-place probes — closing it would unblock
+parsing for every kind:cmake / kind:autotools / kind:manual / kind:meson
+element that uses `kind:git_repo` (519 elements, 48 % of FDSDK).
+
+The remaining gap surfaced by `boot-keys-prod` (kind:local paths
+resolving project-root-relative rather than bst-dir-relative) is a
+separate small fix — adds to the punch list as #11.
+
+The synthetic probe exercises every closed punch-list item
+end-to-end: path-qualified deps, build-depends + runtime-depends,
+multi-source elements with `directory:` flag, `public:` block
+tolerance, and `(@):` composition. It passes today.
 
 1. **Loader gaps** — write-a's `.bst` / `project.conf` parsing surface
    doesn't match what real `.bst` files declare. These are mechanical
@@ -118,25 +130,35 @@ the bstFile so handlers can read it later. kind:filter's domain
 enforcement (which consumes `public.bst.split-rules`) lands
 alongside the typed-filegroup wrapper for pipeline-kind outputs.
 
-### 6. `(@):` composition directive (project.conf + 202 elements)
+### 6. `(@):` composition directive (project.conf + 202 elements) ✓ done
 
-The very first loader call against FDSDK fails at `project.conf`'s
-top-level `variables:` block: it carries a `(@):` list directing
-BuildStream to load and merge `include/_private/arch.yml` and
-`include/repo_branches.yml` into the surrounding map. Our YAML
-unmarshal sees the unmerged shape and errors: `cannot unmarshal
-!!seq into string`.
+`cmd/write-a/yaml_compose.go` is the BuildStream-shape YAML
+pre-processor: `loadAndComposeYAML` parses a file into a yaml.Node
+tree, walks the tree resolving every `(@):` directive (with
+include-cycle detection), then strips other unhandled BuildStream
+directives (`(?):` / `(>):` / `(<):` / `(=):`) before the struct-
+decode pass.
 
-202 elements (18 %) use the same directive at the element level
-(typically `(@): - elements/include/some-include.yml` to share
-per-target variables across many elements).
+Composition is parent-wins-on-conflict for both scalars and nested
+mappings (matches BuildStream's left-to-right composition where
+the local document's keys override the included content). Include
+paths resolve project-root-relative — a `runtime.yml` at
+`<project>/include/` declaring `(@): - include/flags.yml` resolves
+the include to `<project>/include/flags.yml` (sibling), not
+`<project>/include/include/...`. That's BuildStream's contract;
+file-relative resolution would have broken FDSDK's recursive
+includes.
 
-Fix shape: a YAML pre-processor that runs `(@):` resolution before
-unmarshal — read the file path(s), parse them, deep-merge into the
-parent map. BuildStream's actual semantics include `(>):`
-list-append, `(<):` list-prepend, `(=):` overwrite, and merging
-rules; for v1 a basic deep-merge of mappings + list concatenation
-covers what we observe in FDSDK.
+`loadProjectConf` and `loadElement` both run the composer before
+the struct-decode pass. Test coverage: simple include, parent-wins
+on conflict, deep-merge of nested mappings, project-root-relative
+nested-include resolution, `(?):` strip, include cycle detection,
+missing-include error, scalar-form `(@): "file.yml"`.
+
+`(?):` blocks are stripped today — write-a's host-arch isn't a
+faithful proxy for cross-compile target arch, so baking branches
+in at codegen time would be wrong. Lowering to project-B
+`select()` (#9) is the architectural follow-up.
 
 ### 7. Junction-targeted deps (62 elements) ✓ done
 
@@ -184,6 +206,22 @@ resolver, and emit per-arch values into the rendered project-B
 BUILD via `select(...)`. The genrule cmd references the selected
 value through a make-var bound to the select.
 
+### 11. kind:local path resolution (project-root vs bst-dir relative)
+
+`bstSource.Path` for `kind: local` is currently resolved relative
+to the .bst file's directory. Real BuildStream resolves them
+project-root-relative — boot-keys-prod.bst at
+`elements/components/boot-keys-prod.bst` declares
+`path: files/boot-keys/PK.key`, which BuildStream resolves to
+`<project-root>/files/boot-keys/PK.key`, not
+`<project-root>/elements/components/files/boot-keys/PK.key`.
+
+Fix shape: when a project.conf is found, resolve kind:local paths
+against `info.ProjectRoot` rather than `bstDir`. When no
+project.conf is found, fall back to bst-dir-relative (the
+existing-fixture shape). Surfaced empirically by the in-place
+boot-keys-prod probe.
+
 ### 10. project.conf `name`, `element-path`, `aliases:` handling
 
 `project.conf` parsing currently consumes `variables:` only.
@@ -223,27 +261,28 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-Items #1, #2, #3, #4, #5, and #7 are closed. The synthetic
+Items #1, #2, #3, #4, #5, #6, and #7 are closed. The synthetic
 multi-element probe exercises every closed item end-to-end and
-passes today. The curated isolated-element probes have moved
-forward — `boot-keys-prod.bst`, `bootstrap/bzip2.bst`, and
-`tar.bst` no longer trip on multi-source; their first-failures now
-point at the next gaps (`kind:git_repo` source dispatch, `(@):`
-composition).
+passes today. The in-place probes (write-a against the real FDSDK
+tree) have moved past project.conf parsing, `(@):` composition,
+and path-qualified element resolution; five of six now fail on a
+single shared gap.
 
-The next forcing function is **`(@):` composition** (#6): the
-project.conf probe and the `tar.bst` probe both gate on it, and
-no curated FDSDK element runs in-place against the real
-project.conf without it. That's the first non-mechanical change
-on the list — it requires a YAML pre-processor at write-a's
-loader that resolves include directives + does shape merging
-before unmarshal. After that:
+The next forcing function is **`kind:git_repo` / `kind:patch`
+source dispatch (#8)**. Five of six in-place curated probes hit
+it; closing it would unblock parsing for the 519 + 55 elements
+(48 % + 5 % of FDSDK) that declare those source kinds. Mirrors
+the existing element-kind dispatch — likely a small per-source-
+kind handler interface plus stub implementations that record the
+URL/ref but defer fetching.
 
-- **`kind: git_repo` / `kind: patch` source dispatch** (#8) —
-  unblocks `expat.bst`, `bootstrap/bzip2.bst`, and 519 / 55 other
-  elements. Source-kind dispatch mirrors the existing element-kind
-  dispatch.
+After source dispatch:
+
+- **kind:local path resolution (#11)** — project-root-relative
+  paths (revealed by boot-keys-prod.bst). Small fix.
 - **`(?):` conditional → project-B `select()`** (#9) — the
   architectural piece. Lowers per-arch variable overrides into
   Bazel-native multi-arch resolution rather than baking write-a's
-  host arch into the rendered cmd.
+  host arch into the rendered cmd. Today the composer strips the
+  blocks; a real FDSDK build with arch-specific variables won't
+  reflect those overrides until this lands.
