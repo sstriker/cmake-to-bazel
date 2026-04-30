@@ -1,7 +1,7 @@
 # Meta-project test fixtures
 
 End-to-end fixtures for the Bazel-as-orchestrator shape described
-in `docs/whole-project-plan.md`. Eight fixtures so far:
+in `docs/whole-project-plan.md`. Nine fixtures so far:
 
 - **`hello-world.bst`** + **`sources/hello-world/`** — single cmake
   element. Phase 1 acceptance gate (`make e2e-meta-hello`).
@@ -38,6 +38,14 @@ in `docs/whole-project-plan.md`. Eight fixtures so far:
   `manifest.json`). write-a stages the tree verbatim into project
   B and renders a filegroup over `glob(["**/*"])`. Phase 2
   acceptance gate (`make e2e-meta-import`).
+- **`autotools-greet/`** — single `kind: autotools` element with a
+  minimal `./configure` script (honors `--prefix`, accepts and
+  ignores the rest of the canonical autoconf flag set), a
+  `Makefile.in` template, and a `greet.c` source. Exercises the
+  BuildStream autotools plugin's `%{autogen}` / `%{configure}` /
+  `%{make}` / `%{make-install}` chain end-to-end under the
+  project.conf prefix override. Phase 3 sibling-kind acceptance
+  gate (`make e2e-meta-autotools`).
 
 Each fixture that uses the variable resolver also ships a tiny
 `project.conf` overriding `prefix=/usr` (matches FDSDK's

@@ -387,10 +387,30 @@ exported shell vars. Gated by `make e2e-meta-vars` against
 project.conf, then `prefix=/opt/freedesktop-sdk` from element
 variables — exercising the precedence chain end-to-end).
 
-With the resolver in place, `autotools`, `pyproject`, `makemaker`,
-`modulebuild`, and `script` collapse to small per-kind registration
-files — each declaring its plugin's default variables and command
-templates. `meson` is a separate fine-grained track.
+With the resolver in place, the sibling pipeline kinds collapse to
+small per-kind registration files — each declaring its plugin's
+default variables and command templates. `kind: autotools` lands
+this way: a pipelineHandler registration with BuildStream's
+canonical `%{autogen}` / `%{configure}` / `%{make}` /
+`%{make-install}` chain (autogen detects autogen / autogen.sh /
+bootstrap / autoreconf, then `./configure` runs with the canonical
+`--prefix` / `--bindir` / `--libdir` / ... flag set sourced from
+the resolved variable scope). Gated by `make e2e-meta-autotools`
+against `testdata/meta-project/autotools-greet/` (a minimal
+`./configure` script plus `Makefile.in` template plus C source —
+exercises the configure → make → install phase chain end-to-end
+under the project.conf prefix override). `pyproject`, `makemaker`,
+`modulebuild`, and `script` follow the same shape; each is a small
+follow-up. `meson` is a separate fine-grained track.
+
+cc_toolchain integration deferred. `kind: autotools` (and every
+other pipeline kind today) inherits whatever C compiler is on the
+exec sandbox's PATH. Routing `%{cc}` / `%{cflags}` / `%{ldflags}` /
+`%{strip}` through Bazel's `cc_toolchain` (via `toolchains = [...]`
++ `$(CC)` make-vars piped into the genrule cmd's exported `CC` /
+`CFLAGS`) is shared work for every pipeline kind, not autotools-
+specific; lands once host-toolchain inheritance stops being
+sufficient for FDSDK reality-check.
 
 **Phase 4 — FDSDK acceptance.** Run the full pipeline over the
 FDSDK kind set the survey covers. `bazel build //...` against
