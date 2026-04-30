@@ -301,6 +301,7 @@ func main() {
 	outB := flag.String("out-b", "", "optional: output directory for project B (the consumer workspace built against project A's outputs). When unset, only project A is rendered.")
 	convertBin := flag.String("convert-element", "", "path to the convert-element binary (will be referenced from project-A's tools/)")
 	readPathsFeedback := flag.String("read-paths-feedback", "", "optional: path to a prior run's read_paths.json. When set, narrows kind:cmake elements' source-tree staging to that set + CMakeLists.txt files; everything else becomes a zero_files stub. Currently single-element only — multi-element feedback gets a per-element flag in a follow-up.")
+	sourceCache := flag.String("source-cache", "", "optional: directory of pre-fetched source trees, indexed by source-key. Non-kind:local sources whose key (SHA of kind+url+ref) hits a directory under this cache stage as if they were kind:local at that path. Callers populate the cache via the orchestrator's source-checkout layer or by hand for tests; write-a itself doesn't fetch.")
 	flag.Parse()
 
 	if len(bstPaths) == 0 || *outA == "" || *convertBin == "" {
@@ -308,7 +309,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	g, err := loadGraph(bstPaths)
+	g, err := loadGraph(bstPaths, *sourceCache)
 	if err != nil {
 		log.Fatalf("load graph: %v", err)
 	}
@@ -380,7 +381,13 @@ func main() {
 // first .bst's directory. Multi-junction graphs (where different
 // .bsts root different project.confs) aren't supported — they'd
 // need a per-junction scope on top of this single-project shape.
-func loadGraph(bstPaths []string) (*graph, error) {
+//
+// sourceCache is the pre-fetched-source-tree directory: when
+// non-empty, non-kind:local sources whose source-key hits an
+// entry under it stage as if they were kind:local at that path.
+// Empty (the test-callsite default) leaves non-kind:local
+// sources skipped at staging time.
+func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 	g := &graph{ByName: map[string]*element{}}
 	var info projectInfo
 	if len(bstPaths) > 0 {
@@ -399,7 +406,7 @@ func loadGraph(bstPaths []string) (*graph, error) {
 		if includeBase == "" {
 			includeBase = filepath.Dir(p)
 		}
-		elem, err := loadElement(p, includeBase)
+		elem, err := loadElement(p, includeBase, sourceCache)
 		if err != nil {
 			return nil, err
 		}
@@ -535,7 +542,7 @@ func loadReadPaths(path string) ([]string, error) {
 // for this graph, callers pass filepath.Dir(bstPath) as a fallback
 // — covers the existing self-contained fixtures that don't declare
 // a project.
-func loadElement(bstPath, includeBase string) (*element, error) {
+func loadElement(bstPath, includeBase, sourceCache string) (*element, error) {
 	doc, err := loadAndComposeYAML(bstPath, includeBase, map[string]bool{})
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", bstPath, err)
@@ -591,10 +598,16 @@ func loadElement(bstPath, includeBase string) (*element, error) {
 					return nil, err
 				}
 				rs.AbsPath = abs
+			} else {
+				// Non-kind:local source: try the cache. A hit
+				// populates AbsPath so staging treats the entry as
+				// kind:local-equivalent. A miss leaves AbsPath
+				// empty; staging skips it (the BUILD still
+				// renders, but bazel-build of the resulting
+				// genrule would fail until the cache is
+				// populated).
+				resolveFromCache(sourceCache, &rs)
 			}
-			// Non-kind:local sources: record metadata; staging will
-			// skip them (with a traceable comment) until the
-			// orchestrator/sourcecheckout integration lands.
 			elem.Sources = append(elem.Sources, rs)
 		}
 	}
@@ -806,19 +819,23 @@ func copyTree(src, dst string) error {
 // declared subdir": kind:cmake's project-B copy, kind:import's
 // filegroup root, the pipeline-handler's project-A source mount.
 //
-// Non-kind:local sources (kind:git_repo / kind:tar / kind:patch /
-// kind:remote / etc.) are accepted at parse time and recorded on
-// the resolvedSource entry, but skipped here — they need real
-// source-fetch integration (an extension of
-// orchestrator/internal/sourcecheckout/) before write-a can hand
-// real bytes to bazel. Until that lands, render-time succeeds
-// against any source kind, but bazel-build of the resulting BUILD
-// would fail at action-input merkle time on elements with
-// non-kind:local sources. Document those skips inline so a reader
-// of the rendered tree sees what was deferred.
+// Non-kind:local sources (kind:git_repo / kind:tar / kind:patch
+// / kind:remote / etc.) hit one of two paths during loadElement:
+//
+//   - --source-cache hit: AbsPath got populated from the
+//     pre-fetched cache directory; staging treats them
+//     identically to kind:local.
+//   - cache miss (or no --source-cache): AbsPath stays empty;
+//     staging skips them. The rendered BUILD still includes the
+//     element's package, but its source set is incomplete —
+//     bazel-build would fail at action-input merkle time until
+//     the cache gets populated.
+//
+// AbsPath != "" is the canonical "stageable" predicate; the kind
+// itself isn't checked here.
 func stageAllSources(elem *element, dstRoot string) error {
 	for i, src := range elem.Sources {
-		if src.Kind != "local" {
+		if src.AbsPath == "" {
 			continue
 		}
 		dst := dstRoot
