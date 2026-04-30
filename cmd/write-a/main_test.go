@@ -303,6 +303,124 @@ func TestWriter_StackElementShape(t *testing.T) {
 	}
 }
 
+// TestWriter_AutotoolsElementShape covers kind:autotools: the
+// pipelineHandler defaults expand BuildStream's canonical %{autogen}
+// / %{configure} / %{make} / %{make-install} chain. Without an
+// element-level override the rendered cmd carries the canonical
+// autoconf flag set substituted from the project-default (or
+// project.conf-overridden) %{prefix} chain.
+func TestWriter_AutotoolsElementShape(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "configure"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile.in"),
+		[]byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "auto.bst")
+	bstBody := "kind: autotools\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Bst.Kind != "autotools" {
+		t.Fatalf("Kind = %q, want autotools", g.Elements[0].Bst.Kind)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/auto/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, marker := range []string{
+		// Pipeline shape inherited from pipelineHandler.
+		`name = "auto_install"`,
+		`outs = ["install_tree.tar"]`,
+		// All three phase headers render (autotools defaults supply
+		// commands for configure / build / install).
+		"# === configure ===",
+		"# === build ===",
+		"# === install ===",
+		// Autogen branch detects ./configure and skips regeneration.
+		"export NOCONFIGURE=1",
+		"if [ -x ./configure ]; then",
+		// Canonical autoconf flag set; %{prefix} is the BuildStream
+		// stock /usr/local since this test doesn't ship a project.conf.
+		"./configure --prefix=/usr/local",
+		"--bindir=/usr/local/bin",
+		"--libdir=/usr/local/lib",
+		// Make + make-install with the runtime sentinel for
+		// %{install-root}.
+		`make -j1 DESTDIR="$$INSTALL_ROOT" install`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("autotools BUILD missing %q\n--body--\n%s", marker, got)
+		}
+	}
+}
+
+// TestWriter_AutotoolsElementHonorsConfLocal covers the per-element
+// override path BuildStream documents: `variables: conf-local: ...`
+// appends extra flags to ./configure without re-stating the
+// surrounding %{conf-args} shape.
+func TestWriter_AutotoolsElementHonorsConfLocal(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "configure"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile.in"),
+		[]byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "auto.bst")
+	bstBody := `kind: autotools
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+variables:
+  conf-local: --enable-static --disable-shared
+`
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/auto/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "--enable-static --disable-shared") {
+		t.Errorf("conf-local override didn't reach rendered cmd:\n%s", body)
+	}
+}
+
 // TestWriter_ImportElementShape covers kind:import: project-A
 // no-target marker; project-B source tree staged verbatim plus a
 // filegroup over glob("**/*", exclude=["BUILD.bazel"]).
