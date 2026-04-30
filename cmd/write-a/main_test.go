@@ -303,6 +303,83 @@ func TestWriter_StackElementShape(t *testing.T) {
 	}
 }
 
+// TestWriter_ImportElementShape covers kind:import: project-A
+// no-target marker; project-B source tree staged verbatim plus a
+// filegroup over glob("**/*", exclude=["BUILD.bazel"]).
+func TestWriter_ImportElementShape(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "top.txt"), []byte("top\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "sub", "nested.txt"), []byte("nested\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "imp.bst")
+	bstBody := "kind: import\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Bst.Kind != "import" {
+		t.Fatalf("Kind = %q, want import", g.Elements[0].Bst.Kind)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	importA, err := os.ReadFile(filepath.Join(outA, "elements/imp/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"genrule(", "filegroup(", "cc_library("} {
+		if strings.Contains(string(importA), banned) {
+			t.Errorf("project A import BUILD should declare no targets, got %q in:\n%s", banned, importA)
+		}
+	}
+
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	// Source tree staged verbatim into project B's element package.
+	for _, rel := range []string{"top.txt", "sub/nested.txt"} {
+		got, err := os.ReadFile(filepath.Join(outB, "elements/imp", rel))
+		if err != nil {
+			t.Errorf("staged file %q: %v", rel, err)
+			continue
+		}
+		want, err := os.ReadFile(filepath.Join(srcDir, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("staged %q content differs from fixture", rel)
+		}
+	}
+	importB, err := os.ReadFile(filepath.Join(outB, "elements/imp/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`name = "imp"`,
+		`glob(["**/*"], exclude = ["BUILD.bazel"])`,
+		`kind:import`,
+	} {
+		if !strings.Contains(string(importB), marker) {
+			t.Errorf("project B import BUILD missing %q\n--body--\n%s", marker, importB)
+		}
+	}
+}
+
 // TestWriter_FilterElementShape covers kind:filter — single-dep
 // validation, `config:` parsing of include / exclude / include-
 // orphans recorded as comments in the rendered BUILD, and the
