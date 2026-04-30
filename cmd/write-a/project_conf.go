@@ -27,8 +27,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"gopkg.in/yaml.v3"
 )
 
 // projectConf is the slice of the project.conf surface write-a
@@ -90,15 +88,23 @@ func findProjectConf(startDir string) (string, error) {
 }
 
 // loadProjectConf parses the project.conf at path and returns the
-// resolved projectConf struct (variables: + element-path:).
+// resolved projectConf struct (variables: + element-path:). Runs
+// the YAML composer first so (@): include directives resolve into
+// project.conf's tree before the struct-decode step (FDSDK's
+// project.conf composes variables from include/_private/arch.yml
+// + include/repo_branches.yml + ...).
+//
+// Project-conf-relative includes resolve from the directory
+// containing project.conf — that's the project root.
 func loadProjectConf(path string) (*projectConf, error) {
-	body, err := os.ReadFile(path)
+	root := filepath.Dir(path)
+	doc, err := loadAndComposeYAML(path, root, map[string]bool{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	var pc projectConf
-	if err := yaml.Unmarshal(body, &pc); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+	if err := doc.Decode(&pc); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	return &pc, nil
 }
