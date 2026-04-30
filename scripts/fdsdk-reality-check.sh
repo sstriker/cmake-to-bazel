@@ -129,15 +129,16 @@ fi
 
 # Synthesized multi-element FDSDK-shape probe. Renders a tiny
 # project (synthetic project.conf + element-path: elements +
-# two .bst files in different subdirs with a path-qualified
-# build-depends edge between them). Demonstrates write-a's
-# multi-element resolution pipeline end-to-end without depending
-# on real FDSDK content — useful for proving forward progress on
-# the loader / resolver punch-list items even when the curated
-# isolated probes (which are diagnostic for first-failure) all
-# trip on earlier gaps.
+# multiple .bst files exercising path-qualified deps, build-depends,
+# multi-source elements, source `directory:` flag, and public:
+# block tolerance). Demonstrates write-a's multi-element resolution
+# pipeline end-to-end without depending on real FDSDK content —
+# useful for proving forward progress on the loader / resolver
+# punch-list items even when the curated isolated probes (which
+# are diagnostic for first-failure) all trip on earlier gaps.
 synth_dir="$work_dir/synth"
-mkdir -p "$synth_dir/elements/components" "$synth_dir/elements/bootstrap" "$synth_dir/src-bar"
+mkdir -p "$synth_dir/elements/components" "$synth_dir/elements/bootstrap" \
+         "$synth_dir/src-bar" "$synth_dir/src-extra" "$synth_dir/src-imp"
 cat > "$synth_dir/project.conf" <<'CONF_EOF'
 variables:
   prefix: /usr
@@ -147,23 +148,57 @@ cat > "$synth_dir/src-bar/CMakeLists.txt" <<'CMAKE_EOF'
 cmake_minimum_required(VERSION 3.20)
 project(bar)
 CMAKE_EOF
+cat > "$synth_dir/src-extra/extra.txt" <<'EOF'
+extra payload
+EOF
+cat > "$synth_dir/src-imp/data.txt" <<'EOF'
+imp data
+EOF
 cat > "$synth_dir/elements/bootstrap/bar.bst" <<EOF
 kind: cmake
 sources:
 - kind: local
   path: $synth_dir/src-bar
 EOF
+# Multi-source kind:import exercising the source `directory:` flag
+# plus a public: block (real FDSDK declares both heavily).
+cat > "$synth_dir/elements/components/data.bst" <<EOF
+kind: import
+sources:
+- kind: local
+  path: $synth_dir/src-imp
+- kind: local
+  path: $synth_dir/src-extra
+  directory: extras
+public:
+  bst:
+    split-rules:
+      runtime:
+        - "/data/**"
+EOF
 cat > "$synth_dir/elements/components/foo.bst" <<'BST_EOF'
 kind: stack
 build-depends:
 - bootstrap/bar.bst
+runtime-depends:
+- components/data.bst
 BST_EOF
 synth_err=$("$bin_dir/write-a" \
     --bst "$synth_dir/elements/components/foo.bst" \
     --bst "$synth_dir/elements/bootstrap/bar.bst" \
+    --bst "$synth_dir/elements/components/data.bst" \
     --out "$synth_dir/A" \
     --out-b "$synth_dir/B" \
     --convert-element "$bin_dir/convert-element" 2>&1 >/dev/null) || true
+# Confirm the multi-source / directory: source actually staged
+# correctly (parse + dep resolution is necessary but not sufficient;
+# the BUILD render must land the files at the expected paths).
+synth_extras_check=""
+if [ -z "$synth_err" ]; then
+    if [ ! -f "$synth_dir/B/elements/components/data/extras/extra.txt" ]; then
+        synth_extras_check="multi-source directory:extras failed to stage extra.txt under elements/components/data/extras/"
+    fi
+fi
 
 total=$((ok+fail))
 printf "fdsdk-reality-check: %d/%d isolated-element probes succeeded\n\n" "$ok" "$total"
@@ -178,14 +213,18 @@ else
     echo "          → $first_err"
 fi
 echo
-echo "Synthetic multi-element probe (FDSDK-shape: 1 cmake + 1 stack with"
-echo "path-qualified build-depends edge under element-path: elements):"
-if [ -z "$synth_err" ]; then
-    echo "  OK      synthetic"
-else
+echo "Synthetic multi-element probe (FDSDK-shape: kind:cmake + kind:import"
+echo "+ kind:stack with path-qualified deps, build-depends + runtime-depends,"
+echo "multi-source element with directory: flag, public: block):"
+if [ -n "$synth_err" ]; then
     first_err=$(echo "$synth_err" | head -1)
     echo "  FAIL    synthetic"
     echo "          → $first_err"
+elif [ -n "$synth_extras_check" ]; then
+    echo "  FAIL    synthetic"
+    echo "          → $synth_extras_check"
+else
+    echo "  OK      synthetic"
 fi
 echo
 echo "See docs/fdsdk-reality-check.md for the prioritized punch list."
