@@ -303,6 +303,65 @@ func TestWriter_StackElementShape(t *testing.T) {
 	}
 }
 
+// TestWriter_ComposeElementShape covers kind:compose. Compose is
+// rendering-shape-equivalent to kind:stack — the difference is the
+// kind: marker and the BUILD comment, both validated below.
+func TestWriter_ComposeElementShape(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := makeCmakeBst(t, tmp, "b")
+	bundle := filepath.Join(tmp, "bundle.bst")
+	if err := os.WriteFile(bundle,
+		[]byte("kind: compose\ndepends:\n- a\n- b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{a, b, bundle})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.ByName["bundle"].Bst.Kind != "compose" {
+		t.Fatalf("bundle Kind = %q, want compose", g.ByName["bundle"].Bst.Kind)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	composeA, err := os.ReadFile(filepath.Join(outA, "elements/bundle/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compose's project-A package declares no actionable targets.
+	for _, banned := range []string{"genrule(", "filegroup(", "cc_library("} {
+		if strings.Contains(string(composeA), banned) {
+			t.Errorf("project A compose BUILD should declare no targets, got %q in:\n%s", banned, composeA)
+		}
+	}
+	if !strings.Contains(string(composeA), "kind:compose") {
+		t.Errorf("project A compose BUILD should carry kind:compose marker:\n%s", composeA)
+	}
+
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	composeB, err := os.ReadFile(filepath.Join(outB, "elements/bundle/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`name = "bundle"`,
+		`"//elements/a:a"`,
+		`"//elements/b:b"`,
+		`kind:compose`,
+	} {
+		if !strings.Contains(string(composeB), marker) {
+			t.Errorf("project B bundle BUILD missing %q\n--body--\n%s", marker, composeB)
+		}
+	}
+}
+
 func TestWriter_ManualElementShape(t *testing.T) {
 	tmp := t.TempDir()
 
