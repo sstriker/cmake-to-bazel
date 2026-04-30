@@ -1,7 +1,7 @@
 # Meta-project test fixtures
 
 End-to-end fixtures for the Bazel-as-orchestrator shape described
-in `docs/whole-project-plan.md`. Two fixtures so far:
+in `docs/whole-project-plan.md`. Three fixtures so far:
 
 - **`hello-world.bst`** + **`sources/hello-world/`** — single cmake
   element. Phase 1 acceptance gate (`make e2e-meta-hello`).
@@ -9,6 +9,9 @@ in `docs/whole-project-plan.md`. Two fixtures so far:
   elements (`lib-a.bst`, `lib-b.bst`) plus one `kind: stack`
   (`runtime.bst`) bundling them. Phase 2 acceptance gate
   (`make e2e-meta-stack`).
+- **`manual-greet/`** — single `kind: manual` element with a
+  trivial install pipeline. Phase 3 acceptance gate
+  (`make e2e-meta-manual`).
 
 ## hello-world fixture
 
@@ -105,3 +108,31 @@ convention where `kind: stack` references its deps as
 5. The driver writes a smoke target (`cc_binary` depending on both
    `lib-a` and `lib-b`) and `bazel run`s it; output must contain
    both libs' messages.
+
+## manual-greet fixture (Phase 3)
+
+```
+testdata/meta-project/manual-greet/
+  greet.bst                   # kind:manual + kind:local source
+  sources/greeting.txt        # "Hello from kind:manual!"
+```
+
+Smallest viable kind:manual fixture: an element whose only
+phase-command list is `install-commands`, copying the staged
+`greeting.txt` to `%{install-root}%{prefix}/share/greeting.txt`.
+Exercises both variable substitutions Phase 3's manual handler
+supports (`%{install-root}` / `%{prefix}`) and the install-tree-
+tarball output shape.
+
+`scripts/meta-manual.sh` drives the pipeline:
+
+1. `cmd/write-a` parses `greet.bst`, renders project A (a per-
+   element genrule that runs the install-commands and tars
+   `$INSTALL_ROOT` as `install_tree.tar`) and project B (a
+   placeholder package; the typed-filegroup wrapper for
+   downstream consumers lands in a follow-up).
+2. `bazel build //elements/greet:greet_install` in project A.
+3. The driver extracts `bazel-bin/elements/greet/install_tree.tar`
+   and asserts:
+   - `usr/share/greeting.txt` exists.
+   - Its content is `"Hello from kind:manual!"`.
