@@ -355,24 +355,24 @@ by `make e2e-meta-make` against `testdata/meta-project/make-greet/`
 (a Makefile-driven binary build that exercises the default-commands
 path end-to-end).
 
-The variable resolver (`cmd/write-a/variables.go`) layers project
-defaults (matching BuildStream's `projectconfig.yaml` plus FDSDK's
-`prefix=/usr` overlay) under per-kind defaults under per-element
-`variables:`, expands `%{name}` references recursively with cycle
-detection, and treats `%{install-root}` / `%{build-root}` as
-runtime sentinels mapped to the genrule cmd's exported shell vars.
-Gated by `make e2e-meta-vars` against
-`testdata/meta-project/vars-greet/` (a `.bst` overriding `%{prefix}`
-plus a custom `%{greeting-dir}` composing onto derived defaults).
+The variable resolver (`cmd/write-a/variables.go`) layers four
+scopes, lowest precedence first: BuildStream stock defaults
+(`projectVars`, mirroring `buildstream/data/projectconfig.yaml`'s
+`prefix=/usr/local` baseline), the meta-project's `project.conf`
+`variables:` block (`cmd/write-a/project_conf.go`, walked up from
+each `.bst`), the per-kind defaults the handler registers, and the
+per-element `variables:` block in the `.bst`. References resolve
+recursively with cycle detection; `%{install-root}` /
+`%{build-root}` are runtime sentinels mapped to the genrule cmd's
+exported shell vars. Gated by `make e2e-meta-vars` against
+`testdata/meta-project/vars-greet/` (`prefix=/usr` from
+project.conf, then `prefix=/opt/freedesktop-sdk` from element
+variables — exercising the precedence chain end-to-end).
+
 With the resolver in place, `autotools`, `pyproject`, `makemaker`,
 `modulebuild`, and `script` collapse to small per-kind registration
 files — each declaring its plugin's default variables and command
 templates. `meson` is a separate fine-grained track.
-
-Project-conf parsing — sourcing the project-level variable
-defaults from the meta-project's `project.conf` rather than
-hardcoded values — is a follow-up; FDSDK's `prefix=/usr` overlay
-is currently baked into `projectVars` in `variables.go`.
 
 **Phase 4 — FDSDK acceptance.** Run the full pipeline over the
 FDSDK kind set the survey covers. `bazel build //...` against
