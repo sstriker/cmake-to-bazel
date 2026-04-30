@@ -89,6 +89,14 @@ type bstFile struct {
 	// pipeline-kind handler runs phase commands through
 	// substituteCmd against the resolved map.
 	Variables map[string]string `yaml:"variables"`
+	// Conditionals are the per-arch (?): branches extracted from
+	// `variables:` before the YAML decode pass (yaml.v3 can't
+	// directly unmarshal the (?): shape into a string-map). Empty
+	// for elements with no (?): block. Pipeline handlers consume
+	// these to lower per-arch overrides into project-B select()
+	// over @platforms//cpu:* rather than baking write-a's host arch
+	// into the rendered cmd. See conditional.go.
+	Conditionals []conditionalBranch `yaml:"-"`
 	// Public is the BuildStream public-data block: per-element
 	// downstream metadata (split-rules, environment overrides, ...).
 	// 33 % of FDSDK elements declare it. For v1 we decode it as a
@@ -219,6 +227,11 @@ type element struct {
 	// the same project.conf; nil when no project.conf was found
 	// walking up from the .bst file's directory.
 	ProjectConfVars map[string]string
+	// ProjectConfConditionals are the project-level (?): branches
+	// loaded from project.conf's variables: block. Same shape as
+	// bstFile.Conditionals; together they feed the per-arch
+	// select() pipeline-handler emission.
+	ProjectConfConditionals []conditionalBranch
 }
 
 // graph is the loaded set of elements with cross-references resolved.
@@ -366,6 +379,7 @@ func loadGraph(bstPaths []string) (*graph, error) {
 				elem.Name, existing.Name, p)
 		}
 		elem.ProjectConfVars = info.Variables
+		elem.ProjectConfConditionals = info.Conditionals
 		g.ByName[elem.Name] = elem
 		g.Elements = append(g.Elements, elem)
 	}
@@ -475,10 +489,18 @@ func loadElement(bstPath, includeBase string) (*element, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", bstPath, err)
 	}
+	// Extract (?): conditional branches from variables: BEFORE
+	// the struct decode — yaml.v3 can't directly unmarshal the
+	// list-of-mapping shape into our string-map Variables field.
+	conditionals, err := extractConditionalsFromVariables(doc)
+	if err != nil {
+		return nil, fmt.Errorf("extract conditionals from %s: %w", bstPath, err)
+	}
 	var f bstFile
 	if err := doc.Decode(&f); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", bstPath, err)
 	}
+	f.Conditionals = conditionals
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")
 
 	elem := &element{Name: name, Bst: &f}

@@ -36,6 +36,14 @@ import (
 type projectConf struct {
 	Variables   map[string]string `yaml:"variables"`
 	ElementPath string            `yaml:"element-path"`
+	// Conditionals are the per-arch (?): branches extracted from
+	// `variables:` before the YAML decode pass. Same shape as
+	// bstFile.Conditionals; project-level conditionals layer below
+	// element-level ones. Most FDSDK arch-specific defaults arrive
+	// here (project.conf composes include/_private/arch.yml, which
+	// declares (?): branches setting %{snap_arch} / %{go-arch}
+	// / etc.).
+	Conditionals []conditionalBranch `yaml:"-"`
 }
 
 // projectInfo is the resolved view of the project.conf write-a
@@ -57,6 +65,11 @@ type projectInfo struct {
 	// Variables is the project.conf variables: layer, fed to
 	// resolveVars as the project-conf override layer.
 	Variables map[string]string
+	// Conditionals are the project-level (?): branches (e.g.
+	// FDSDK's project.conf includes arch.yml which declares
+	// per-arch variable overrides). Empty slice when no
+	// project.conf was found.
+	Conditionals []conditionalBranch
 }
 
 // findProjectConf walks up from startDir looking for a project.conf
@@ -102,10 +115,15 @@ func loadProjectConf(path string) (*projectConf, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	conditionals, err := extractConditionalsFromVariables(doc)
+	if err != nil {
+		return nil, fmt.Errorf("extract conditionals from %s: %w", path, err)
+	}
 	var pc projectConf
 	if err := doc.Decode(&pc); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
+	pc.Conditionals = conditionals
 	return &pc, nil
 }
 
@@ -137,8 +155,9 @@ func loadProjectInfoFromBst(bstPath string) (projectInfo, error) {
 	}
 	elementRoot := filepath.Join(root, elementPath)
 	return projectInfo{
-		ProjectRoot: root,
-		ElementRoot: elementRoot,
-		Variables:   pc.Variables,
+		ProjectRoot:  root,
+		ElementRoot:  elementRoot,
+		Variables:    pc.Variables,
+		Conditionals: pc.Conditionals,
 	}, nil
 }

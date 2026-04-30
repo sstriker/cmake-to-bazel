@@ -68,6 +68,13 @@ type pipelineCfg struct {
 	StripCommands     *[]string `yaml:"strip-commands"`
 }
 
+// pipelinePhases is a set of resolved phase command lists ready for
+// rendering. One per arch for conditional elements; one total
+// otherwise.
+type pipelinePhases struct {
+	Configure, Build, Install, Strip []string
+}
+
 func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	var cfg pipelineCfg
 	// Decode the .bst's config: only when it's actually present;
@@ -79,42 +86,114 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	}
 	// Per-phase fallback: nil pointer → handler default; non-nil
 	// pointer (even empty slice) → use what the .bst declared.
-	configure := mergeWithDefault(cfg.ConfigureCommands, h.defaults.Configure)
-	build := mergeWithDefault(cfg.BuildCommands, h.defaults.Build)
-	install := mergeWithDefault(cfg.InstallCommands, h.defaults.Install)
-	strip := mergeWithDefault(cfg.StripCommands, h.defaults.Strip)
+	rawConfigure := mergeWithDefault(cfg.ConfigureCommands, h.defaults.Configure)
+	rawBuild := mergeWithDefault(cfg.BuildCommands, h.defaults.Build)
+	rawInstall := mergeWithDefault(cfg.InstallCommands, h.defaults.Install)
+	rawStrip := mergeWithDefault(cfg.StripCommands, h.defaults.Strip)
 
-	// Compose the variable scope (BuildStream stock < project.conf
-	// < kind defaults < per-element overrides), expand recursively,
-	// and apply to each phase command. References to undefined
-	// variables (typo in a .bst) error out here rather than silently
-	// emitting a literal %{misspelled} into the genrule cmd.
-	vars, err := resolveVars(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
-	if err != nil {
-		return fmt.Errorf("element %q (kind:%s): resolve variables: %w", elem.Name, h.kindName, err)
-	}
-	configure, err = substituteCmds(configure, vars, elem.Name, h.kindName, "configure-commands")
-	if err != nil {
-		return err
-	}
-	build, err = substituteCmds(build, vars, elem.Name, h.kindName, "build-commands")
-	if err != nil {
-		return err
-	}
-	install, err = substituteCmds(install, vars, elem.Name, h.kindName, "install-commands")
-	if err != nil {
-		return err
-	}
-	strip, err = substituteCmds(strip, vars, elem.Name, h.kindName, "strip-commands")
-	if err != nil {
-		return err
+	hasConditionals := len(elem.ProjectConfConditionals) > 0 || len(elem.Bst.Conditionals) > 0
+
+	// Resolution helper: variable-resolve + substitute every phase
+	// command for a specific arch (or unconditional pass when
+	// hasConditionals is false).
+	resolveAt := func(arch string) (pipelinePhases, error) {
+		var vars map[string]string
+		var err error
+		if arch == "" {
+			vars, err = resolveVars(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
+		} else {
+			vars, err = resolveVarsForArch(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables,
+				arch, elem.ProjectConfConditionals, elem.Bst.Conditionals)
+		}
+		if err != nil {
+			return pipelinePhases{}, fmt.Errorf("element %q (kind:%s) resolve variables%s: %w",
+				elem.Name, h.kindName, archSuffix(arch), err)
+		}
+		var p pipelinePhases
+		p.Configure, err = substituteCmds(rawConfigure, vars, elem.Name, h.kindName, "configure-commands")
+		if err != nil {
+			return pipelinePhases{}, err
+		}
+		p.Build, err = substituteCmds(rawBuild, vars, elem.Name, h.kindName, "build-commands")
+		if err != nil {
+			return pipelinePhases{}, err
+		}
+		p.Install, err = substituteCmds(rawInstall, vars, elem.Name, h.kindName, "install-commands")
+		if err != nil {
+			return pipelinePhases{}, err
+		}
+		p.Strip, err = substituteCmds(rawStrip, vars, elem.Name, h.kindName, "strip-commands")
+		if err != nil {
+			return pipelinePhases{}, err
+		}
+		return p, nil
 	}
 
 	if err := stagePipelineSources(elem, elemPkg); err != nil {
 		return err
 	}
+
+	if !hasConditionals {
+		// Single-arch resolution; single-string cmd.
+		phases, err := resolveAt("")
+		if err != nil {
+			return err
+		}
+		return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
+			renderPipelineBuild(elem, []archGroup{{Arches: nil, Phases: phases}}))
+	}
+
+	// Per-arch resolution; group arches by identical resolution so
+	// the emitted select() doesn't duplicate identical branches.
+	type groupKey [4]string
+	groupIdx := map[groupKey]int{}
+	var groups []archGroup
+	for _, arch := range supportedArches {
+		phases, err := resolveAt(arch)
+		if err != nil {
+			return err
+		}
+		key := groupKey{
+			strings.Join(phases.Configure, "\x00"),
+			strings.Join(phases.Build, "\x00"),
+			strings.Join(phases.Install, "\x00"),
+			strings.Join(phases.Strip, "\x00"),
+		}
+		if idx, ok := groupIdx[key]; ok {
+			groups[idx].Arches = append(groups[idx].Arches, arch)
+		} else {
+			groupIdx[key] = len(groups)
+			groups = append(groups, archGroup{Arches: []string{arch}, Phases: phases})
+		}
+	}
+	// Dedup-collapse: if every supported arch resolves identically,
+	// the (?): block didn't actually affect the rendered cmd. Emit
+	// the single-string form to keep the BUILD readable.
+	if len(groups) == 1 {
+		groups[0].Arches = nil
+	}
 	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
-		renderPipelineBuild(elem, configure, build, install, strip))
+		renderPipelineBuild(elem, groups))
+}
+
+// archSuffix shapes an arch identifier into a parenthetical for
+// error messages: empty arch returns empty string, non-empty
+// returns " (arch=<name>)".
+func archSuffix(arch string) string {
+	if arch == "" {
+		return ""
+	}
+	return " (arch=" + arch + ")"
+}
+
+// archGroup is one branch of the per-arch select() the pipeline
+// handler emits. A group with empty Arches is the "single-string
+// cmd" shape (no select); a group with a non-empty Arches list
+// becomes one entry of the select() dict mapped from each
+// constraint label.
+type archGroup struct {
+	Arches []string
+	Phases pipelinePhases
 }
 
 // substituteCmds applies the resolved variable map to every command
@@ -181,7 +260,18 @@ func stagePipelineSources(elem *element, elemPkg string) error {
 // sentinels: $$INSTALL_ROOT (the per-action mktemp dir tarred as
 // install_tree.tar) and $$BUILD_ROOT (the staged source dir, also
 // the cwd where phase commands run).
-func renderPipelineBuild(elem *element, configure, build, install, strip []string) string {
+//
+// groups carries one or more pre-resolved phase command sets:
+//   - Single group with Arches==nil → renders cmd as a single
+//     """...""" block (the no-conditional shape; covers every
+//     v1 fixture and elements whose (?): blocks didn't actually
+//     affect any rendered command).
+//   - Multiple groups → renders cmd as `select({label: """...""",
+//     ...})` over @platforms//cpu:* labels, one branch per arch
+//     group. Lowering BuildStream's (?): per-arch overrides into
+//     project-B Bazel-native multi-arch resolution rather than
+//     baking write-a's host arch into the rendered cmd.
+func renderPipelineBuild(elem *element, groups []archGroup) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `# Generated by cmd/write-a. Do not edit by hand.
 
@@ -196,7 +286,40 @@ genrule(
     name = "%[1]s_install",
     srcs = [":%[1]s_sources"],
     outs = ["install_tree.tar"],
-    cmd = """
+    cmd = %[2]s,
+)
+`, elem.Name, renderPipelineCmdAttr(groups))
+	return b.String()
+}
+
+// renderPipelineCmdAttr emits the value of the genrule's cmd
+// attribute. Single-group case: a triple-quoted shell script
+// string. Multi-group case: a select({...}) dict over
+// @platforms//cpu:* constraint labels.
+func renderPipelineCmdAttr(groups []archGroup) string {
+	if len(groups) == 1 && len(groups[0].Arches) == 0 {
+		return renderPipelineCmdBody(groups[0].Phases)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "select({\n")
+	for _, g := range groups {
+		// Each arch in the group maps to the same body — emit one
+		// label-per-arch entry so Bazel resolves correctly.
+		for _, arch := range g.Arches {
+			fmt.Fprintf(&b, "        %q: %s,\n",
+				archConstraintLabel(arch),
+				renderPipelineCmdBody(g.Phases))
+		}
+	}
+	fmt.Fprintf(&b, "    })")
+	return b.String()
+}
+
+// renderPipelineCmdBody emits the triple-quoted shell-script body
+// the genrule's cmd attribute consumes (or one branch of the
+// select() dict in the multi-arch case).
+func renderPipelineCmdBody(p pipelinePhases) string {
+	return fmt.Sprintf(`"""
         # Snapshot the exec root before any cd. Bazel resolves
         # location expressions to exec-root-relative paths, and the
         # user-provided commands below cd into the staged work dir,
@@ -223,14 +346,11 @@ genrule(
         export INSTALL_ROOT="$$(mktemp -d)"
         export PATH=/usr/local/bin:/usr/bin:/bin
 
-%[2]s
+%[1]s
         # Tar the install tree as the element's primary output.
         cd "$$EXEC_ROOT"
         tar -cf "$(location install_tree.tar)" -C "$$INSTALL_ROOT" .
-    """,
-)
-`, elem.Name, renderPipelineCommands(configure, build, install, strip))
-	return b.String()
+    """`, renderPipelineCommands(p.Configure, p.Build, p.Install, p.Strip))
 }
 
 // renderPipelineCommands flattens the four phase command lists into
