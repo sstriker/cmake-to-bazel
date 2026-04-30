@@ -73,6 +73,12 @@ type bstFile struct {
 	// using a Node here lets handlers re-extract specific shapes
 	// without forcing every kind to share one struct.
 	Config yaml.Node `yaml:"config"`
+	// Variables is the per-element BuildStream variable scope. Layered
+	// on top of project defaults and the per-kind defaults declared
+	// by the handler; consumed via resolveVars in variables.go. Each
+	// pipeline-kind handler runs phase commands through
+	// substituteCmd against the resolved map.
+	Variables map[string]string `yaml:"variables"`
 }
 
 type bstSource struct {

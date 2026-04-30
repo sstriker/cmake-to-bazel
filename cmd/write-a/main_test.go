@@ -352,8 +352,9 @@ config:
 	for _, marker := range []string{
 		`name = "greet_install"`,
 		`outs = ["install_tree.tar"]`,
-		// %{install-root} / %{prefix} substituted to shell vars.
-		`$$INSTALL_ROOT$$PREFIX/share/greeting.txt`,
+		// %{install-root} stays as the runtime sentinel ($$INSTALL_ROOT);
+		// %{prefix} expands to /usr at codegen time (default project var).
+		`$$INSTALL_ROOT/usr/share/greeting.txt`,
 		// Source-staging shadow merge same as cmake handler.
 		`for src in $(SRCS)`,
 		// install-commands phase header rendered.
@@ -497,6 +498,107 @@ config:
 	// install line still renders.
 	if !strings.Contains(got, `make -j1 DESTDIR="$$INSTALL_ROOT" install`) {
 		t.Errorf("install default missing despite no .bst override:\n%s", got)
+	}
+}
+
+// TestWriter_ElementVariablesOverrideProjectDefaults checks the
+// per-element variables: layer flows all the way through
+// pipelineHandler.RenderA: a .bst that sets prefix=/opt/foo causes
+// %{prefix}/share/... in install-commands to render with /opt/foo
+// (rather than the default /usr from projectVars).
+func TestWriter_ElementVariablesOverrideProjectDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "vary.bst")
+	bstBody := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+variables:
+  prefix: /opt/foo
+
+config:
+  install-commands:
+  - install -D x.txt %{install-root}%{datadir}/x.txt
+`
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/vary/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	// %{datadir} = %{prefix}/share, %{prefix} overridden to /opt/foo,
+	// so the resolved path is /opt/foo/share. %{install-root} is the
+	// runtime sentinel and stays as $$INSTALL_ROOT.
+	want := `install -D x.txt $$INSTALL_ROOT/opt/foo/share/x.txt`
+	if !strings.Contains(got, want) {
+		t.Errorf("variable override not applied; want substring %q in:\n%s", want, got)
+	}
+	// And the unsubstituted %{prefix} / %{datadir} must not leak.
+	for _, leak := range []string{`%{prefix}`, `%{datadir}`} {
+		if strings.Contains(got, leak) {
+			t.Errorf("unsubstituted reference %q leaked into output:\n%s", leak, got)
+		}
+	}
+}
+
+// TestWriter_UnknownVariableErrors covers the typo path: a .bst
+// references %{not-a-real-var} in a phase command, the resolver
+// reports the missing variable, and writeProjectA surfaces it.
+func TestWriter_UnknownVariableErrors(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "typo.bst")
+	bstBody := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+config:
+  install-commands:
+  - install -D x.txt %{install-root}%{nonexistent-prefix}/x.txt
+`
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	err = writeProjectA(g, outA, binPath)
+	if err == nil {
+		t.Fatal("expected error for unresolved variable, got nil")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-prefix") {
+		t.Errorf("error should name the missing variable; got: %v", err)
 	}
 }
 
