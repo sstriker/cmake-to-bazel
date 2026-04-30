@@ -345,10 +345,19 @@ coarse-grained kinds — gated by `make e2e-meta-manual` against
 `testdata/meta-project/manual-greet/`. Validates the per-element
 genrule shape, the four phase command lists (configure / build /
 install / strip), and the initial variable-substitution surface
-(`%{install-root}` and `%{prefix}`). Sibling kinds (`make`,
-`autotools`, `pyproject`, ...) layer on top of the manual handler
-once the variable parser lands; `meson` is a separate fine-
-grained track.
+(`%{install-root}` and `%{prefix}`).
+
+A shared `pipelineHandler` shape extracted from kind:manual lets
+sibling coarse-grained kinds register as small `init()` blocks
+with their default phase commands. `kind: make` ships next, with
+the BuildStream `make` plugin's `make` / `make install` defaults
+inlined; gated by `make e2e-meta-make` against
+`testdata/meta-project/make-greet/` (a Makefile-driven binary
+build that exercises the default-commands path end-to-end).
+`autotools`, `pyproject`, `makemaker`, `modulebuild`, and `script`
+are similar small additions once the variable parser lands and
+unblocks their richer default command sets. `meson` is a separate
+fine-grained track.
 
 **Phase 4 — FDSDK acceptance.** Run the full pipeline over the
 FDSDK kind set the survey covers. `bazel build //...` against
