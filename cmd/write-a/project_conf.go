@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
 // projectConf is the slice of the project.conf surface write-a
@@ -61,6 +63,39 @@ type projectConf struct {
 	// handlers emit `env = {...}` on the genrule attribute,
 	// variable-resolved.
 	Environment map[string]string `yaml:"environment"`
+	// Options declares the user-configurable build settings the
+	// project exposes. Each entry produces a Bazel `string_flag`
+	// in project A; per-(option, value) `config_setting`s under
+	// the same package back the eventual `select()` lowering of
+	// (?): branches keyed on these variables. Per
+	// docs/sources-design.md, target_arch keeps the
+	// @platforms//cpu:* pathway; everything else option-typed
+	// gets flag+select.
+	Options map[string]bstOption `yaml:"options"`
+}
+
+// bstOption is one declaration in the project.conf options:
+// block. Mirrors BuildStream's project options shape (see
+// https://docs.buildstream.build/master/format_project.html#format-options).
+//
+// type: arch / enum / bool / flags / element / element-mask /
+// element-list — write-a renders each as a Bazel string_flag.
+// For `bool` and `flags` types we shape the values list to match
+// (true/false for bool; the declared values for flags). The
+// `default` field is parsed as an opaque yaml.Node since
+// flags-typed defaults are lists while every other type is a
+// scalar — the renderer converts to the canonical string form
+// for string_flag.
+type bstOption struct {
+	Type        string `yaml:"type"`
+	Description string `yaml:"description"`
+	// Variable is the BuildStream variable name the option's
+	// chosen value sets. Defaults to the option's own name when
+	// unset (the name : variable identity is BuildStream's
+	// convention).
+	Variable string    `yaml:"variable"`
+	Values   []string  `yaml:"values"`
+	Default  yaml.Node `yaml:"default"`
 }
 
 // projectInfo is the resolved view of the project.conf write-a
@@ -91,6 +126,9 @@ type projectInfo struct {
 	Aliases map[string]string
 	// Environment is the project-level env-var map (see projectConf.Environment).
 	Environment map[string]string
+	// Options is the project-level options-declaration map
+	// (see projectConf.Options).
+	Options map[string]bstOption
 }
 
 // findProjectConf walks up from startDir looking for a project.conf
@@ -182,6 +220,7 @@ func loadProjectInfoFromBst(bstPath string) (projectInfo, error) {
 		Conditionals: pc.Conditionals,
 		Aliases:      pc.Aliases,
 		Environment:  pc.Environment,
+		Options:      pc.Options,
 	}, nil
 }
 

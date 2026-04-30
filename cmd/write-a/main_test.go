@@ -1686,6 +1686,124 @@ config:
 	}
 }
 
+// TestWriter_OptionsPackageRenderedFromProjectConf covers the
+// end-to-end flow: project.conf options: declarations get parsed,
+// threaded onto graph.Options, and writeProjectA emits both
+// //options/BUILD.bazel (with one string_flag per non-target_arch
+// option) and a bazel_skylib bazel_dep in MODULE.bazel.
+func TestWriter_OptionsPackageRenderedFromProjectConf(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte(`options:
+  prod_keys:
+    type: bool
+    variable: prod_keys
+    default: 'False'
+  snap_grade:
+    type: enum
+    variable: snap_grade
+    default: devel
+    values:
+    - devel
+    - stable
+  target_arch:
+    type: arch
+    variable: target_arch
+    values:
+    - x86_64
+    - aarch64
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	if err := os.WriteFile(bst,
+		[]byte("kind: import\nsources:\n- kind: local\n  path: "+srcDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if got := len(g.Options); got != 3 {
+		t.Errorf("graph.Options len: got %d, want 3", got)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	// MODULE.bazel declares bazel_skylib for string_flag.
+	module, err := os.ReadFile(filepath.Join(outA, "MODULE.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(module), `bazel_dep(name = "bazel_skylib"`) {
+		t.Errorf("MODULE.bazel missing bazel_skylib dep:\n%s", module)
+	}
+	// //options/BUILD.bazel exists with the non-target_arch options.
+	opts, err := os.ReadFile(filepath.Join(outA, "options/BUILD.bazel"))
+	if err != nil {
+		t.Fatalf("//options/BUILD.bazel not rendered: %v", err)
+	}
+	for _, marker := range []string{
+		`name = "prod_keys"`,
+		`name = "snap_grade"`,
+	} {
+		if !strings.Contains(string(opts), marker) {
+			t.Errorf("//options/BUILD.bazel missing %q:\n%s", marker, opts)
+		}
+	}
+	if strings.Contains(string(opts), `name = "target_arch"`) {
+		t.Errorf("target_arch should be excluded from //options:\n%s", opts)
+	}
+}
+
+// TestWriter_NoOptionsNoOptionsPackage covers the no-options
+// fixture: writeProjectA doesn't emit //options/BUILD.bazel and
+// MODULE.bazel doesn't declare bazel_skylib (keeps the rendered
+// tree minimal for fixtures that don't use options).
+func TestWriter_NoOptionsNoOptionsPackage(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	if err := os.WriteFile(bst,
+		[]byte("kind: import\nsources:\n- kind: local\n  path: "+srcDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "options")); !os.IsNotExist(err) {
+		t.Errorf("//options/ should not exist when no options declared; stat: %v", err)
+	}
+	module, err := os.ReadFile(filepath.Join(outA, "MODULE.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(module), "bazel_skylib") {
+		t.Errorf("MODULE.bazel shouldn't declare bazel_skylib without options:\n%s", module)
+	}
+}
+
 // TestWriter_EnvironmentRendersExports covers the env-var
 // rendering: project.conf-level + element-level environment
 // blocks compose (element wins), variable references substitute,
