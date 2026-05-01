@@ -339,11 +339,15 @@ Other follow-ups (none on the critical path for `write-a render`):
   fetcher reshapes into a `module_extension` per the design in
   `docs/sources-design.md`; aliases + environment now parsed so
   the data is ready when the extension lands.
-- **`(?):` outside variables:** — write-a's extractor only
-  handles conditional blocks at the `variables:` level (the
-  dominant FDSDK pattern). Per-arch `config:` blocks would need
-  an analogous extractor on `bstFile.Config`. Lands when an
-  FDSDK fixture forces it.
+- **`(?):` outside variables:** — partial. The extractor still
+  only handles `variables:` (?):, but a follow-up
+  `stripRemainingConditionals` pass now removes any other
+  `(?):` blocks (under `config:`, `environment:`, `public:`, …)
+  before struct-decode so the loader doesn't error out on the
+  list-of-mapping shape landing in a strict-typed slot. v1
+  silently drops the per-config / per-environment branches;
+  honoring them as per-arch overrides on the corresponding
+  bstFile fields lands when an FDSDK fixture forces it.
 - **richer `(?):` expression syntax** — partial: `host_arch` /
   `build_arch` / `bootstrap_build_arch` references already
   worked (the parser is variable-agnostic for `==` / `in` / `or`-

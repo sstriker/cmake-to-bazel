@@ -580,6 +580,13 @@ func loadElement(bstPath, includeBase, sourceCache string, options map[string]bs
 	if err != nil {
 		return nil, fmt.Errorf("extract conditionals from %s: %w", bstPath, err)
 	}
+	// Strip any (?): blocks that survived past the variables:
+	// extraction (e.g. inside config:, environment:, public:).
+	// v1 doesn't act on conditionals at those depths, but the
+	// struct-decode pass would barf on the list-of-mapping shape
+	// landing in a strict-typed slot. Per-arch config: branches
+	// land a typed extractor when an FDSDK fixture forces it.
+	stripRemainingConditionals(doc)
 	var f bstFile
 	if err := doc.Decode(&f); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", bstPath, err)

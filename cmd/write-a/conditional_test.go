@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -135,5 +136,87 @@ func TestBranchForArch(t *testing.T) {
 	}
 	if b := branchForArch(branches, "riscv64"); b != nil {
 		t.Errorf("riscv64 not in any branch; want nil, got %+v", b)
+	}
+}
+
+// TestStripRemainingConditionals_DeepStrip covers the v1
+// behaviour: extractConditionalsFromVariables pulls out
+// variables:(?):, and stripRemainingConditionals handles the
+// rest (under config:, environment:, public:, …) so the
+// struct-decode pass succeeds. v1 silently drops the deeper
+// branches; a typed extractor for config: lands when an FDSDK
+// fixture forces it.
+func TestStripRemainingConditionals_DeepStrip(t *testing.T) {
+	tmp := t.TempDir()
+	bstPath := tmp + "/x.bst"
+	body := `kind: autotools
+variables:
+  prefix: /usr
+config:
+  configure-commands:
+  - "./configure --prefix=%{prefix}"
+  (?):
+  - target_arch == "x86_64":
+      configure-commands:
+      - "./configure --prefix=%{prefix} --x86"
+environment:
+  CC: gcc
+  (?):
+  - host_arch == "aarch64":
+      CC: aarch64-linux-gnu-gcc
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph (with deep (?):): %v", err)
+	}
+	if g.Elements[0].Bst.Kind != "autotools" {
+		t.Errorf("kind decode: got %q", g.Elements[0].Bst.Kind)
+	}
+}
+
+// mappingHasKey is a small helper used by the strip-pass test.
+func mappingHasKey(node *yaml.Node, key string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestStripCondNode_RecursesIntoNestedMappings makes sure the
+// strip walker reaches arbitrarily deep mappings (not just the
+// top-level config: / environment: blocks).
+func TestStripCondNode_RecursesIntoNestedMappings(t *testing.T) {
+	body := `top:
+  inner:
+    deep:
+      (?):
+      - "x":
+          a: 1
+      regular: keep-me
+`
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatal(err)
+	}
+	stripRemainingConditionals(&doc)
+	// Walk down to the "deep" map and verify (?): is gone but
+	// regular: survived.
+	root := doc.Content[0]
+	top := root.Content[1]
+	inner := top.Content[1]
+	deep := inner.Content[1]
+	if mappingHasKey(deep, "(?)") {
+		t.Errorf("strip didn't recurse: (?): still in deep map")
+	}
+	if !mappingHasKey(deep, "regular") {
+		t.Errorf("strip removed too much: regular: gone")
 	}
 }

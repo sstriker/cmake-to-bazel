@@ -379,6 +379,48 @@ func extractConditionalsFromVariables(doc *yaml.Node) ([]conditionalBranch, erro
 	return branches, nil
 }
 
+// stripRemainingConditionals walks the post-extract tree and
+// removes any `(?):` keys still present in deeper nested
+// positions (under config:, environment:, public:, …) so the
+// subsequent struct-decode pass doesn't choke on the
+// list-of-mapping shape inside strict-typed slots.
+//
+// extractConditionalsFromVariables already pulled the
+// `variables: (?):` block — the only conditional shape v1
+// actually consumes. Branches deeper in the tree are silently
+// dropped (the .bst loads but the per-arch overrides don't
+// fire). FDSDK fixtures that hit per-arch `config:` blocks land
+// the structured per-config extractor when they surface —
+// tracked as a follow-up; today this strip just unblocks load.
+func stripRemainingConditionals(doc *yaml.Node) {
+	stripCondNode(doc)
+}
+
+func stripCondNode(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	switch node.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, c := range node.Content {
+			stripCondNode(c)
+		}
+	case yaml.MappingNode:
+		out := node.Content[:0]
+		for i := 0; i < len(node.Content); i += 2 {
+			k := node.Content[i].Value
+			if k == "(?)" {
+				continue
+			}
+			out = append(out, node.Content[i], node.Content[i+1])
+		}
+		node.Content = out
+		for i := 1; i < len(node.Content); i += 2 {
+			stripCondNode(node.Content[i])
+		}
+	}
+}
+
 // staticDispatchVars carries the values of dispatch variables that
 // (?): branches reference besides target_arch. write-a evaluates
 // them statically — these aren't multi-arch-select() candidates
