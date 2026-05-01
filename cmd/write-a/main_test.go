@@ -523,6 +523,117 @@ func TestWriter_AutotoolsElementShape(t *testing.T) {
 	}
 }
 
+// TestWriter_AutotoolsNativeRenderOnCacheHit covers the
+// trace-driven autotools native render path. When the trace
+// cache has an entry for the element's srckey, kind:autotools'
+// per-element BUILD switches from the coarse install-pipeline
+// shape to a genrule that runs convert-element-autotools
+// against the cached trace. Cache miss falls back to the
+// existing pipeline (covered by TestWriter_AutotoolsElementShape).
+func TestWriter_AutotoolsNativeRenderOnCacheHit(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Minimal kind:autotools fixture sources. The native path
+	// doesn't actually run any of these — the trace is the
+	// ground truth — but write-a still needs a sources tree to
+	// stage.
+	if err := os.WriteFile(filepath.Join(srcDir, "configure"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile.in"),
+		[]byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "auto.bst")
+	bstBody := "kind: autotools\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate the trace cache. The element's srckey
+	// derives from sourceKey(); for kind:local sources without
+	// a content hash, the native handler falls back to elem.Name.
+	cacheRoot := filepath.Join(tmp, "trace-cache")
+	tracePath := filepath.Join(tmp, "trace.log")
+	if err := os.WriteFile(tracePath,
+		[]byte(`1234  execve("/usr/bin/cc", ["cc", "-O2", "-o", "demo", "demo.c"], 0x... /* 0 vars */) = 0
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	autotoolsConfig.cacheRoot = cacheRoot
+	autotoolsConfig.tracerVersion = "test-v1"
+	autotoolsConfig.convertBin = filepath.Join(tmp, "convert-element-autotools-fake")
+	if err := os.WriteFile(autotoolsConfig.convertBin,
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		autotoolsConfig.cacheRoot = ""
+		autotoolsConfig.tracerVersion = ""
+		autotoolsConfig.convertBin = ""
+	})
+	// Register a trace under the key the handler will look up
+	// (srckey="auto" since kind:local sources without a hash
+	// fall back to elem.Name).
+	if err := os.MkdirAll(filepath.Join(cacheRoot, "auto", "test-v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(tracePath, filepath.Join(cacheRoot, "auto", "test-v1", "trace.log")); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	// Per-element BUILD must reflect the native render shape.
+	body, err := os.ReadFile(filepath.Join(outA, "elements/auto/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, marker := range []string{
+		`name = "auto_trace"`,
+		`name = "auto_converted"`,
+		`outs = ["BUILD.bazel.out"]`,
+		`tools = ["//tools:convert-element-autotools"]`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("native BUILD missing %q\n--body--\n%s", marker, got)
+		}
+	}
+	// Negative: the coarse install-pipeline shape must NOT
+	// surface (would mean we accidentally fell back).
+	for _, missing := range []string{
+		`name = "auto_install"`,
+		`install_tree.tar`,
+		"./configure --prefix",
+	} {
+		if strings.Contains(got, missing) {
+			t.Errorf("native BUILD wrongly contains coarse marker %q", missing)
+		}
+	}
+	// trace.log was staged into the element package alongside
+	// the BUILD so the genrule's filegroup can reference it.
+	if _, err := os.Stat(filepath.Join(outA, "elements/auto/trace.log")); err != nil {
+		t.Errorf("trace.log not staged into project A's element package: %v", err)
+	}
+	// convert-element-autotools binary was staged under tools/.
+	if _, err := os.Stat(filepath.Join(outA, "tools/convert-element-autotools")); err != nil {
+		t.Errorf("convert-element-autotools not staged under tools/: %v", err)
+	}
+}
+
 // TestWriter_AutotoolsElementHonorsConfLocal covers the per-element
 // override path BuildStream documents: `variables: conf-local: ...`
 // appends extra flags to ./configure without re-stating the
