@@ -96,6 +96,7 @@ func Index(im *Imports) (*Resolver, error) {
 		byCMakeTarget: map[string]*Export{},
 		byElement:     map[string]*Element{},
 		byLinkPath:    map[string]*Export{},
+		byLinkLib:     map[string]*Export{},
 	}
 	for _, el := range im.Elements {
 		if el == nil || el.Name == "" {
@@ -120,6 +121,17 @@ func Index(im *Imports) (*Resolver, error) {
 			for _, lp := range ex.LinkPaths {
 				r.byLinkPath[lp] = ex
 			}
+			for _, ll := range ex.LinkLibraries {
+				// First-write-wins on link-library collisions:
+				// two elements both exposing `-lz` is a manifest
+				// authoring concern, not something we want to
+				// surface as a hard error here. The cmake side
+				// already has a similar tolerance (link_paths
+				// can collide too).
+				if _, dup := r.byLinkLib[ll]; !dup {
+					r.byLinkLib[ll] = ex
+				}
+			}
 		}
 	}
 	return r, nil
@@ -142,6 +154,7 @@ type Resolver struct {
 	byCMakeTarget map[string]*Export
 	byElement     map[string]*Element
 	byLinkPath    map[string]*Export
+	byLinkLib     map[string]*Export
 }
 
 // LookupCMakeTarget returns the export for a CMake namespaced target name
@@ -162,6 +175,18 @@ func (r *Resolver) LookupLinkPath(path string) *Export {
 		return nil
 	}
 	return r.byLinkPath[path]
+}
+
+// LookupLinkLibrary returns the export that owns a `-l<name>` link
+// flag's <name>, or nil if no element claims it. Used by
+// convert-element-autotools to resolve link commands' -l<lib>
+// args (e.g., -lz → //elements/zlib:zlib) when the trace
+// itself doesn't produce a matching archive in-graph.
+func (r *Resolver) LookupLinkLibrary(name string) *Export {
+	if r == nil {
+		return nil
+	}
+	return r.byLinkLib[name]
 }
 
 // LookupElement returns an element by name, or nil if none.

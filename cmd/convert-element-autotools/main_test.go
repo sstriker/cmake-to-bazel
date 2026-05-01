@@ -1,9 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 )
 
 // TestParseExecveLine covers the strace text-format shape for
@@ -143,7 +147,7 @@ func TestCorrelate_LibAndApp(t *testing.T) {
 		{Kind: EventArchive, Out: "libfoo.a", Objs: []string{"foo.o", "bar.o"}},
 		{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-O2"}},
 	}
-	got := emitBuild(correlate(events))
+	got := emitBuild(correlate(events), nil)
 
 	for _, marker := range []string{
 		`load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")`,
@@ -178,7 +182,7 @@ func TestCorrelate_GreetStandalone(t *testing.T) {
 	events := []Event{
 		{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-O2"}},
 	}
-	got := emitBuild(correlate(events))
+	got := emitBuild(correlate(events), nil)
 	for _, marker := range []string{
 		`load("@rules_cc//cc:defs.bzl", "cc_binary")`,
 		`cc_binary(`,
@@ -193,6 +197,49 @@ func TestCorrelate_GreetStandalone(t *testing.T) {
 	// No cc_library involved → no linkstatic.
 	if strings.Contains(got, `linkstatic`) {
 		t.Errorf("greet-only render should not include linkstatic")
+	}
+}
+
+// TestEmitBuild_ImportsManifestFallback covers the
+// cross-element dep edge path: a link command's `-l<name>`
+// that doesn't match an in-trace archive falls back to the
+// imports manifest's LookupLinkLibrary, mapping `-lz` →
+// `//elements/zlib:zlib`. Mirrors lower's cmake STATIC
+// IMPORTED dep recovery shape.
+func TestEmitBuild_ImportsManifestFallback(t *testing.T) {
+	tmp := t.TempDir()
+	mf := filepath.Join(tmp, "imports.json")
+	if err := os.WriteFile(mf, []byte(`{
+  "version": 1,
+  "elements": [{
+    "name": "zlib",
+    "exports": [{
+      "cmake_target": "ZLIB::ZLIB",
+      "bazel_label": "//elements/zlib:zlib",
+      "link_libraries": ["z"]
+    }]
+  }]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imports, err := manifest.Load(mf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := []Event{
+		{Kind: EventLink, Out: "myapp", Srcs: []string{"myapp.c"}, Libs: []string{"z"}, Copts: []string{"-O2"}},
+	}
+	got := emitBuild(correlate(events), imports)
+	if !strings.Contains(got, `deps = ["//elements/zlib:zlib"]`) {
+		t.Errorf("expected deps to resolve -lz via manifest:\n%s", got)
+	}
+
+	// Negative check: nil manifest (no fallback) drops the
+	// unresolved -lz silently.
+	got2 := emitBuild(correlate(events), nil)
+	if strings.Contains(got2, "deps") {
+		t.Errorf("nil manifest should not produce deps; got:\n%s", got2)
 	}
 }
 

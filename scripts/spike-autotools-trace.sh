@@ -39,9 +39,12 @@ CGO_ENABLED=0 go build -o "$bin" ./cmd/convert-element-autotools
 #
 #   $1 — fixture name (testdata/meta-project/<name>/sources/)
 #   $2 — assertion grep file (lines = required substrings)
+#   $3 — optional imports.json (relative to repo root) passed
+#        via --imports-manifest. Empty / absent = no manifest.
 run_fixture() {
     name="$1"
     asserts_file="$2"
+    imports="${3:-}"
 
     fixture_root="testdata/meta-project/$name/sources"
     if [ ! -d "$fixture_root" ]; then
@@ -65,7 +68,11 @@ run_fixture() {
         exit 1
     }
 
-    "$bin" --trace "$trace" --out-build "$build_out"
+    if [ -n "$imports" ]; then
+        "$bin" --trace "$trace" --out-build "$build_out" --imports-manifest "$imports"
+    else
+        "$bin" --trace "$trace" --out-build "$build_out"
+    fi
 
     while IFS= read -r marker; do
         [ -z "$marker" ] && continue
@@ -92,8 +99,10 @@ EOF
 run_fixture autotools-greet "$greet_asserts"
 
 # autotools-libapp asserts: cc_library {name=foo} + cc_binary
-# {name=myapp, deps=[":foo"]}, both deriving srcs from the
-# correlated compile events.
+# {name=myapp, deps=[":foo", "//elements/zlib:zlib"]}. The :foo
+# dep comes from in-trace correlation; the zlib dep comes from
+# the imports manifest (myapp links -lz, but no archive
+# producing libz.a appears in the trace).
 libapp_asserts="$work_dir/libapp-asserts.txt"
 cat > "$libapp_asserts" <<'EOF'
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
@@ -104,6 +113,7 @@ linkstatic = True
 cc_binary(
 name = "myapp"
 srcs = ["myapp.c"]
-deps = [":foo"]
+deps = ["//elements/zlib:zlib", ":foo"]
 EOF
-run_fixture autotools-libapp "$libapp_asserts"
+run_fixture autotools-libapp "$libapp_asserts" \
+    "testdata/meta-project/autotools-libapp/imports.json"

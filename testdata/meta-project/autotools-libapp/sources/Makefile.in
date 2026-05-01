@@ -19,7 +19,7 @@ libfoo.a: foo.o bar.o
 	ar rcs libfoo.a foo.o bar.o
 
 myapp: myapp.o libfoo.a
-	$(CC) $(CFLAGS) -o myapp myapp.o -L. -lfoo
+	$(CC) $(CFLAGS) -o myapp myapp.o -L. -lfoo -lz
 
 install: all
 	install -D -m 0755 myapp $(DESTDIR)$(bindir)/myapp
