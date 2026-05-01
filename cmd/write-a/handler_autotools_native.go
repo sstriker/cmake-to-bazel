@@ -145,8 +145,10 @@ func writeAutotoolsImportsManifest(elem *element, elemPkg string) (bool, error) 
 
 // autotoolsTraceExtension is the pipelineExtension that wires
 // the build-tracer + convert-element-autotools steps into the
-// rendered pipeline cmd. Output: install_tree.tar (existing) +
-// BUILD.bazel.out (new). Tools: build-tracer + convert-element-
+// rendered pipeline cmd. Outputs: install_tree.tar (existing)
+// + BUILD.bazel.out (converter output) + make-db.txt
+// (post-build dump of `make -np`, fed back to the converter as
+// a structural hint). Tools: build-tracer + convert-element-
 // autotools (both staged into project A's tools/ at write-a
 // time). When hasImports is true, imports.json is added to the
 // genrule's srcs and the converter step's `--imports-manifest`
@@ -155,7 +157,7 @@ func autotoolsTraceExtension(hasImports bool) *pipelineExtension {
 	ext := &pipelineExtension{
 		WrapPipelineCmds: wrapAutotoolsPipelineCmds,
 		AppendCmd:        autotoolsConverterStep(hasImports),
-		ExtraOuts:        []string{"BUILD.bazel.out"},
+		ExtraOuts:        []string{"BUILD.bazel.out", "make-db.txt"},
 		ExtraTools: []string{
 			"//tools:build-tracer",
 			"//tools:convert-element-autotools",
@@ -197,24 +199,46 @@ func wrapAutotoolsPipelineCmds(cmds string) string {
 
 // autotoolsConverterStep is the shell snippet inserted between
 // the (tracer-wrapped) pipeline cmds and the install-tree tar.
-// Reads the trace produced by build-tracer; writes
-// BUILD.bazel.out for downstream consumers. When hasImports
-// is true, --imports-manifest=$(location imports.json) flows
-// through so cross-element `-l<name>` flags resolve to the
-// right Bazel labels.
+// Two sub-steps:
+//
+//  1. Dump `make -np` (dry-run + print-database) to capture
+//     the post-build Makefile state — fully variable-resolved
+//     after configure ran. Cwd is $$BUILD_ROOT here (the
+//     pipeline's `cd "$$BUILD_ROOT"` is still in effect), so
+//     make finds its Makefile.
+//  2. Run convert-element-autotools against the trace + the
+//     captured make database, emitting BUILD.bazel.out.
+//
+// `make -np` may exit non-zero on a healthy build (it skips
+// the actual build but still attempts `nothing to do` — safe
+// to ignore). The `|| true` keeps the genrule action
+// successful even if make is unhappy with the dry run.
+//
+// When hasImports is true, --imports-manifest=$(location
+// imports.json) threads through so cross-element `-l<name>`
+// flags resolve to the right Bazel labels.
 func autotoolsConverterStep(hasImports bool) string {
 	importsFlag := ""
 	if hasImports {
 		importsFlag = ` \
             --imports-manifest="$(location imports.json)"`
 	}
-	return fmt.Sprintf(`        # Trace -> native cc_library / cc_binary BUILD.bazel.out.
-        # Output goes through bazel's normal action cache (buildbarn
-        # in CI), which is what gives us cross-node convergence —
-        # same trace + same converter version => same BUILD.bazel.out
-        # everywhere.
+	return fmt.Sprintf(`        # Capture the post-build make database. Run from
+        # $$BUILD_ROOT (pipeline cmds left us there); `+"`make -np`"+`
+        # dumps every rule, variable, and prereq edge after
+        # configure-time substitutions are baked in. Tolerate
+        # non-zero exit (make's dry-run can grumble about
+        # "nothing to do" or missing optional targets).
+        make -np > "$$EXEC_ROOT/$(location make-db.txt)" 2>/dev/null || true
+
+        # Trace + make-db -> native cc_library / cc_binary
+        # BUILD.bazel.out. Output goes through bazel's normal
+        # action cache (buildbarn in CI), which is what gives us
+        # cross-node convergence — same trace + same converter
+        # version => same BUILD.bazel.out everywhere.
         cd "$$EXEC_ROOT"
         $(location //tools:convert-element-autotools) \
             --trace="$$AUTOTOOLS_TRACE" \
+            --make-db="$(location make-db.txt)" \
             --out-build="$(location BUILD.bazel.out)"%s`, importsFlag)
 }

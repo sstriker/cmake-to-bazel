@@ -45,6 +45,7 @@ func main() {
 	tracePath := flag.String("trace", "", "path to strace text-format output (`-f -e trace=execve -s 4096 -o <path>`)")
 	outBuild := flag.String("out-build", "", "path to write BUILD.bazel.out")
 	importsPath := flag.String("imports-manifest", "", "optional: path to imports.json mapping cross-element link libraries to Bazel labels")
+	makeDBPath := flag.String("make-db", "", "optional: path to `make -np` dump for post-build Makefile structural hints (target names, recipes, variables)")
 	flag.Parse()
 
 	if *tracePath == "" || *outBuild == "" {
@@ -67,6 +68,23 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	var makeDB *MakeDB
+	if *makeDBPath != "" {
+		body, err := os.ReadFile(*makeDBPath)
+		if err == nil {
+			// Tolerate empty / missing make-db files: the
+			// genrule's `make -np` capture redirects stderr
+			// and uses `|| true` so the artifact may be
+			// absent or empty on healthy builds where make
+			// dislikes the dry run. Treat parse failures the
+			// same — convert-element-autotools should still
+			// emit a valid BUILD.bazel.out from the trace
+			// alone.
+			makeDB = parseMakeDB(body)
+		}
+	}
+	_ = makeDB // recorded but not yet consumed by emit; see follow-ups.
 
 	events := parseTrace(traceFile)
 	graph := correlate(events)

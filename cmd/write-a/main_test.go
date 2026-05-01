@@ -590,10 +590,13 @@ func TestWriter_AutotoolsNativeWraps(t *testing.T) {
 		`name = "auto_install"`,
 		`"install_tree.tar"`,
 		`"BUILD.bazel.out"`,
+		`"make-db.txt"`,
 		`"//tools:build-tracer"`,
 		`"//tools:convert-element-autotools"`,
 		`"$$EXEC_ROOT/$(location //tools:build-tracer)" --out="$$AUTOTOOLS_TRACE"`,
 		`$(location //tools:convert-element-autotools)`,
+		`make -np > "$$EXEC_ROOT/$(location make-db.txt)"`,
+		`--make-db="$(location make-db.txt)"`,
 	} {
 		if !strings.Contains(got, marker) {
 			t.Errorf("native autotools BUILD missing %q\n--body--\n%s", marker, got)
