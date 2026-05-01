@@ -6,7 +6,7 @@ package main
 // the cache-miss branch of nativeAutotoolsHandler. Defined as
 // a function rather than a top-level var so init-order across
 // handler files stays well-defined.
-func autotoolsPipelineHandler() pipelineHandler {
+func autotoolsBasePipelineHandler() pipelineHandler {
 	// kind:autotools is BuildStream's `autotools` plugin lowered onto
 	// the pipelineHandler shape. The plugin's defaults (per
 	// buildstream/src/buildstream/plugins/elements/autotools.py) layer

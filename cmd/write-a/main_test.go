@@ -523,23 +523,20 @@ func TestWriter_AutotoolsElementShape(t *testing.T) {
 	}
 }
 
-// TestWriter_AutotoolsNativeRenderOnCacheHit covers the
-// trace-driven autotools native render path. When the trace
-// cache has an entry for the element's srckey, kind:autotools'
-// per-element BUILD switches from the coarse install-pipeline
-// shape to a genrule that runs convert-element-autotools
-// against the cached trace. Cache miss falls back to the
-// existing pipeline (covered by TestWriter_AutotoolsElementShape).
-func TestWriter_AutotoolsNativeRenderOnCacheHit(t *testing.T) {
+// TestWriter_AutotoolsNativeWraps covers the trace-driven
+// autotools native render path. When --convert-element-autotools
+// + --build-tracer-bin are supplied, the per-element BUILD's
+// install genrule wraps the configure/build/install commands in
+// build-tracer and appends a convert-element-autotools step that
+// emits BUILD.bazel.out alongside install_tree.tar — one Bazel
+// action with two outputs. Bazel's action cache (buildbarn in
+// CI) handles cross-node convergence; no separate registry.
+func TestWriter_AutotoolsNativeWraps(t *testing.T) {
 	tmp := t.TempDir()
 	srcDir := filepath.Join(tmp, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Minimal kind:autotools fixture sources. The native path
-	// doesn't actually run any of these — the trace is the
-	// ground truth — but write-a still needs a sources tree to
-	// stage.
 	if err := os.WriteFile(filepath.Join(srcDir, "configure"),
 		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -554,37 +551,21 @@ func TestWriter_AutotoolsNativeRenderOnCacheHit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pre-populate the trace cache. The element's srckey
-	// derives from sourceKey(); for kind:local sources without
-	// a content hash, the native handler falls back to elem.Name.
-	cacheRoot := filepath.Join(tmp, "trace-cache")
-	tracePath := filepath.Join(tmp, "trace.log")
-	if err := os.WriteFile(tracePath,
-		[]byte(`1234  execve("/usr/bin/cc", ["cc", "-O2", "-o", "demo", "demo.c"], 0x... /* 0 vars */) = 0
-`), 0o644); err != nil {
+	// Marker-shaped fake binaries — RenderA only stages them.
+	fakeAutotoolsBin := filepath.Join(tmp, "convert-element-autotools-fake")
+	if err := os.WriteFile(fakeAutotoolsBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	autotoolsConfig.cacheRoot = cacheRoot
-	autotoolsConfig.tracerVersion = "test-v1"
-	autotoolsConfig.convertBin = filepath.Join(tmp, "convert-element-autotools-fake")
-	if err := os.WriteFile(autotoolsConfig.convertBin,
-		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	fakeTracerBin := filepath.Join(tmp, "build-tracer-fake")
+	if err := os.WriteFile(fakeTracerBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	autotoolsConfig.convertBin = fakeAutotoolsBin
+	autotoolsConfig.tracerBin = fakeTracerBin
 	t.Cleanup(func() {
-		autotoolsConfig.cacheRoot = ""
-		autotoolsConfig.tracerVersion = ""
 		autotoolsConfig.convertBin = ""
+		autotoolsConfig.tracerBin = ""
 	})
-	// Register a trace under the key the handler will look up
-	// (srckey="auto" since kind:local sources without a hash
-	// fall back to elem.Name).
-	if err := os.MkdirAll(filepath.Join(cacheRoot, "auto", "test-v1"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := copyFile(tracePath, filepath.Join(cacheRoot, "auto", "test-v1", "trace.log")); err != nil {
-		t.Fatal(err)
-	}
 
 	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
@@ -596,41 +577,90 @@ func TestWriter_AutotoolsNativeRenderOnCacheHit(t *testing.T) {
 		t.Fatalf("writeProjectA: %v", err)
 	}
 
-	// Per-element BUILD must reflect the native render shape.
 	body, err := os.ReadFile(filepath.Join(outA, "elements/auto/BUILD.bazel"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(body)
+	// Positive markers: install genrule still produces
+	// install_tree.tar but ALSO BUILD.bazel.out; the cmd wraps
+	// in build-tracer and appends a convert-element-autotools
+	// call.
 	for _, marker := range []string{
-		`name = "auto_trace"`,
-		`name = "auto_converted"`,
-		`outs = ["BUILD.bazel.out"]`,
-		`tools = ["//tools:convert-element-autotools"]`,
+		`name = "auto_install"`,
+		`"install_tree.tar"`,
+		`"BUILD.bazel.out"`,
+		`"//tools:build-tracer"`,
+		`"//tools:convert-element-autotools"`,
+		`"$$EXEC_ROOT/$(location //tools:build-tracer)" --out="$$AUTOTOOLS_TRACE"`,
+		`$(location //tools:convert-element-autotools)`,
 	} {
 		if !strings.Contains(got, marker) {
-			t.Errorf("native BUILD missing %q\n--body--\n%s", marker, got)
+			t.Errorf("native autotools BUILD missing %q\n--body--\n%s", marker, got)
 		}
 	}
-	// Negative: the coarse install-pipeline shape must NOT
-	// surface (would mean we accidentally fell back).
+	// Both binaries staged under tools/.
+	if _, err := os.Stat(filepath.Join(outA, "tools/convert-element-autotools")); err != nil {
+		t.Errorf("convert-element-autotools not staged: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "tools/build-tracer")); err != nil {
+		t.Errorf("build-tracer not staged: %v", err)
+	}
+}
+
+// TestWriter_AutotoolsCoarseFallbackWithoutFlags covers the
+// fallback path: without --convert-element-autotools /
+// --build-tracer-bin, the autotools handler renders the
+// unmodified coarse install-pipeline shape. No tracer wrap, no
+// BUILD.bazel.out output, no extra tools.
+func TestWriter_AutotoolsCoarseFallbackWithoutFlags(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "configure"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile.in"),
+		[]byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "auto.bst")
+	bstBody := "kind: autotools\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	autotoolsConfig.convertBin = ""
+	autotoolsConfig.tracerBin = ""
+
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/auto/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	if !strings.Contains(got, `outs = ["install_tree.tar"]`) {
+		t.Errorf("coarse fallback should output only install_tree.tar:\n%s", got)
+	}
 	for _, missing := range []string{
-		`name = "auto_install"`,
-		`install_tree.tar`,
-		"./configure --prefix",
+		`BUILD.bazel.out`,
+		`AUTOTOOLS_TRACE`,
+		`//tools:build-tracer`,
+		`//tools:convert-element-autotools`,
 	} {
 		if strings.Contains(got, missing) {
-			t.Errorf("native BUILD wrongly contains coarse marker %q", missing)
+			t.Errorf("coarse fallback wrongly contains %q\n%s", missing, got)
 		}
-	}
-	// trace.log was staged into the element package alongside
-	// the BUILD so the genrule's filegroup can reference it.
-	if _, err := os.Stat(filepath.Join(outA, "elements/auto/trace.log")); err != nil {
-		t.Errorf("trace.log not staged into project A's element package: %v", err)
-	}
-	// convert-element-autotools binary was staged under tools/.
-	if _, err := os.Stat(filepath.Join(outA, "tools/convert-element-autotools")); err != nil {
-		t.Errorf("convert-element-autotools not staged under tools/: %v", err)
 	}
 }
 

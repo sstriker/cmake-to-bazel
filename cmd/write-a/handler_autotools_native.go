@@ -2,171 +2,219 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-
-	"github.com/sstriker/cmake-to-bazel/internal/tracecache"
+	"strings"
 )
+
+// init registers kind:autotools. The handler always falls back
+// to the coarse install-pipeline shape; when --convert-element-
+// autotools is supplied, it additionally wraps the build cmd in
+// build-tracer + runs convert-element-autotools to emit a native
+// BUILD.bazel.out alongside the install_tree.tar.
+//
+// One genrule with two outputs (install_tree.tar +
+// BUILD.bazel.out). Bazel's action cache (buildbarn in CI)
+// handles convergence — same source + same toolchain + same
+// converter version → same action result, shared across nodes
+// via the existing remote-cache plumbing. No separate registry
+// needed; the "B → A feedback" lives entirely inside the
+// Bazel-action graph.
+func init() {
+	registerHandler(autotoolsHandler{})
+}
 
 // autotoolsConfig holds the render-time settings for the
 // trace-driven autotools converter. Populated from main()'s
 // flags before the per-element render loop runs. Empty
-// cacheRoot disables the native render path entirely
-// (kind:autotools always falls back to the coarse pipeline).
+// convertBin disables the trace+convert wrap entirely
+// (rendered output is the unmodified pipeline shape).
 //
 // Package-level state keeps the kindHandler interface small
-// (RenderA / RenderB don't need an extra config arg) while
-// letting the autotools handler branch on cache state per-
-// element.
+// (RenderA / RenderB don't take a config arg) while letting
+// the autotools handler decide per-element whether to install
+// the extension hooks.
 var autotoolsConfig struct {
-	cacheRoot     string // --trace-cache-root
-	tracerVersion string // --tracer-version
-	convertBin    string // absolute path to convert-element-autotools
+	convertBin string // absolute path to convert-element-autotools
+	tracerBin  string // absolute path to build-tracer
 }
 
-func init() {
-	// kind:autotools registration. The existing pipelineHandler
-	// covers the coarse install_tree.tar shape; we wrap it in
-	// nativeAutotools so a populated trace cache flips the
-	// per-element render to the trace-driven native path.
-	registerHandler(nativeAutotoolsHandler{
-		pipeline: autotoolsPipelineHandler(),
-	})
-}
+// autotoolsHandler picks the right pipelineHandler shape based
+// on the global autotoolsConfig. Without a converter binary,
+// the coarse install_tree.tar pipeline is the rendered shape;
+// with it, the pipelineExtension wraps the cmd in build-tracer
+// and runs convert-element-autotools after the install phase.
+type autotoolsHandler struct{}
 
-// nativeAutotoolsHandler dispatches between the trace-driven
-// native render (when the trace cache has an entry for the
-// element's srckey) and the coarse pipeline render
-// (otherwise). RenderB and the other kindHandler methods
-// delegate unchanged — only RenderA branches.
-type nativeAutotoolsHandler struct {
-	pipeline pipelineHandler
-}
+func (autotoolsHandler) Kind() string                                 { return "autotools" }
+func (autotoolsHandler) NeedsSources() bool                           { return true }
+func (autotoolsHandler) HasProjectABuild() bool                       { return true }
+func (autotoolsHandler) DefaultReadPathsPatterns() *readPathsPatterns { return nil }
 
-func (h nativeAutotoolsHandler) Kind() string           { return "autotools" }
-func (h nativeAutotoolsHandler) NeedsSources() bool     { return h.pipeline.NeedsSources() }
-func (h nativeAutotoolsHandler) HasProjectABuild() bool { return h.pipeline.HasProjectABuild() }
-func (h nativeAutotoolsHandler) DefaultReadPathsPatterns() *readPathsPatterns {
-	return h.pipeline.DefaultReadPathsPatterns()
-}
-
-func (h nativeAutotoolsHandler) RenderA(elem *element, elemPkg string) error {
-	if !nativeAutotoolsEnabled() {
-		return h.pipeline.RenderA(elem, elemPkg)
-	}
-	hit, key, err := autotoolsCacheHit(elem)
+func (autotoolsHandler) RenderA(elem *element, elemPkg string) error {
+	h, err := autotoolsPipelineHandlerForElement(elem, elemPkg)
 	if err != nil {
-		return fmt.Errorf("autotools native render: %w", err)
-	}
-	if !hit {
-		return h.pipeline.RenderA(elem, elemPkg)
-	}
-	return renderNativeAutotools(elem, elemPkg, key)
-}
-
-func (h nativeAutotoolsHandler) RenderB(elem *element, elemPkg string) error {
-	return h.pipeline.RenderB(elem, elemPkg)
-}
-
-// nativeAutotoolsEnabled reports whether main() supplied the
-// flags needed to run the native render path (cache root +
-// converter binary). Without either, every kind:autotools
-// element falls back to the pipeline handler.
-func nativeAutotoolsEnabled() bool {
-	return autotoolsConfig.cacheRoot != "" && autotoolsConfig.convertBin != ""
-}
-
-// autotoolsCacheHit checks the trace cache for an entry
-// matching this element's srckey + the configured tracer
-// version. Returns the constructed Key alongside the hit/miss
-// boolean so RenderNative can re-use it for the lookup.
-func autotoolsCacheHit(elem *element) (bool, tracecache.Key, error) {
-	srckey := elementSrcKey(elem)
-	if srckey == "" {
-		// kind:local sources without a content-key (the v1
-		// fixture shape) get a deterministic placeholder
-		// derived from the element name. Production replaces
-		// this with the @src_<key>// digest.
-		srckey = elem.Name
-	}
-	key := tracecache.Key{
-		SrcKey:        srckey,
-		TracerVersion: autotoolsConfig.tracerVersion,
-	}
-	has, err := tracecache.Has(autotoolsConfig.cacheRoot, key)
-	return has, key, err
-}
-
-// elementSrcKey returns the element's first source's content-
-// addressed srckey, or "" when no key is available (kind:local
-// sources without a hash). Wraps the existing sourceKey()
-// helper so the native autotools path doesn't need to peer at
-// resolvedSource internals.
-func elementSrcKey(elem *element) string {
-	if len(elem.Sources) == 0 {
-		return ""
-	}
-	return sourceKey(elem.Sources[0])
-}
-
-// renderNativeAutotools emits the cache-hit-path BUILD.bazel:
-// stages the cached trace into the element package, emits a
-// genrule that runs convert-element-autotools against it.
-// Outputs mirror kind:cmake's: BUILD.bazel.out (the converted
-// rules) plus an empty cmake-config-bundle.tar placeholder so
-// downstream consumers can keep using the existing
-// cross-element label shape.
-func renderNativeAutotools(elem *element, elemPkg string, key tracecache.Key) error {
-	if err := os.MkdirAll(elemPkg, 0o755); err != nil {
 		return err
 	}
-	tracePath := filepath.Join(elemPkg, "trace.log")
-	if err := tracecache.Lookup(autotoolsConfig.cacheRoot, key, tracePath); err != nil {
-		return fmt.Errorf("lookup cached trace: %w", err)
-	}
-	build := autotoolsNativeBuildBody(elem.Name)
-	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), build)
+	return h.RenderA(elem, elemPkg)
 }
 
-// autotoolsNativeBuildBody renders the per-element BUILD.bazel
-// for the cache-hit path. The genrule is intentionally minimal:
-// it consumes the staged trace.log + an optional imports.json,
-// runs convert-element-autotools, and produces BUILD.bazel.out.
+func (autotoolsHandler) RenderB(elem *element, elemPkg string) error {
+	return autotoolsBasePipelineHandler().RenderB(elem, elemPkg)
+}
+
+// autotoolsPipelineHandlerForElement builds the per-element
+// pipelineHandler. Side effect: when the trace-driven native
+// path is enabled AND the element has cross-element deps, an
+// imports.json is rendered next to the BUILD that maps each
+// dep's link library to its Bazel label (the convention bind
+// from the kind:cmake handler — see writeAutotoolsImportsManifest).
+// The extension's ExtraSrcs lists imports.json so the genrule
+// stages it; AppendCmd's --imports-manifest flag references it
+// via $(location imports.json).
 //
-// imports.json is referenced via the same convention as
-// kind:cmake's cross-element handle (an in-tree filegroup
-// downstream consumers can label-reference). For now the
-// element renders without an imports.json by default;
-// downstream needs cross-element resolution will surface in
-// a follow-up.
-func autotoolsNativeBuildBody(name string) string {
-	return fmt.Sprintf(`# Generated by cmd/write-a (kind:autotools native render). Do not edit by hand.
+// Without --convert-element-autotools / --build-tracer-bin, the
+// returned handler has no extension — the unmodified coarse
+// install_tree.tar pipeline renders.
+func autotoolsPipelineHandlerForElement(elem *element, elemPkg string) (pipelineHandler, error) {
+	h := autotoolsBasePipelineHandler()
+	if autotoolsConfig.convertBin == "" {
+		return h, nil
+	}
+	hasImports, err := writeAutotoolsImportsManifest(elem, elemPkg)
+	if err != nil {
+		return pipelineHandler{}, err
+	}
+	h.extension = autotoolsTraceExtension(hasImports)
+	return h, nil
+}
 
-package(default_visibility = ["//visibility:public"])
+// writeAutotoolsImportsManifest renders an imports.json next
+// to the element's BUILD when there are cross-element deps to
+// resolve. Convention bind: each dep "<name>" maps to
+// link_libraries=["<name>"] → "//elements/<name>:<name>".
+// Mirrors writeCmakeImportsManifest's shape, except the
+// resolution key is the link-library name (matched against
+// `-l<name>` flags by convert-element-autotools'
+// LookupLinkLibrary) rather than the cmake target name.
+//
+// Returns (true, nil) when imports.json was written;
+// (false, nil) when the element has no deps that need
+// cross-element resolution (no file written).
+func writeAutotoolsImportsManifest(elem *element, elemPkg string) (bool, error) {
+	if len(elem.Deps) == 0 {
+		return false, nil
+	}
+	var b strings.Builder
+	b.WriteString(`{
+  "version": 1,
+  "elements": [
+`)
+	first := true
+	for _, dep := range elem.Deps {
+		if dep == nil {
+			continue
+		}
+		if !first {
+			b.WriteString(",\n")
+		}
+		first = false
+		fmt.Fprintf(&b, `    {
+      "name": %q,
+      "exports": [
+        {
+          "cmake_target": %q,
+          "bazel_label": "//elements/%s:%s",
+          "link_libraries": [%q]
+        }
+      ]
+    }`, dep.Name, dep.Name+"::"+dep.Name, dep.Name, dep.Name, dep.Name)
+	}
+	b.WriteString(`
+  ]
+}
+`)
+	if first {
+		// All deps were nil — shouldn't happen but tolerated.
+		return false, nil
+	}
+	if err := writeFile(filepath.Join(elemPkg, "imports.json"), b.String()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
-# trace.log was staged from the trace cache at write-a time.
-# Source-srckey + tracer-version match across nodes, so all
-# project A renders for this element pull the same trace bytes.
-filegroup(
-    name = "%[1]s_trace",
-    srcs = ["trace.log"],
-)
+// autotoolsTraceExtension is the pipelineExtension that wires
+// the build-tracer + convert-element-autotools steps into the
+// rendered pipeline cmd. Output: install_tree.tar (existing) +
+// BUILD.bazel.out (new). Tools: build-tracer + convert-element-
+// autotools (both staged into project A's tools/ at write-a
+// time). When hasImports is true, imports.json is added to the
+// genrule's srcs and the converter step's `--imports-manifest`
+// flag references it via $(location imports.json).
+func autotoolsTraceExtension(hasImports bool) *pipelineExtension {
+	ext := &pipelineExtension{
+		WrapPipelineCmds: wrapAutotoolsPipelineCmds,
+		AppendCmd:        autotoolsConverterStep(hasImports),
+		ExtraOuts:        []string{"BUILD.bazel.out"},
+		ExtraTools: []string{
+			"//tools:build-tracer",
+			"//tools:convert-element-autotools",
+		},
+	}
+	if hasImports {
+		ext.ExtraSrcs = []string{"imports.json"}
+	}
+	return ext
+}
 
-genrule(
-    name = "%[1]s_converted",
-    srcs = [":%[1]s_trace"],
-    outs = ["BUILD.bazel.out"],
-    cmd = """
-        $(location //tools:convert-element-autotools) \\
-            --trace="$(location :%[1]s_trace)" \\
-            --out-build="$(location BUILD.bazel.out)"
-    """,
-    tools = ["//tools:convert-element-autotools"],
-)
+// wrapAutotoolsPipelineCmds rewrites the resolved
+// configure/build/install commands block. Every command runs
+// under build-tracer so a single trace.log captures the entire
+// process tree (compile / archive / link / install execve
+// calls). The trace lives in $$AUTOTOOLS_TRACE; the converter
+// step (AppendCmd) reads it.
+//
+// We use one tracer invocation around the whole pipeline —
+// configure + build + install — rather than per-phase, so the
+// process-tree filtering is straightforward (one strace
+// session, one trace file).
+//
+// Path note: the tool reference is anchored to $$EXEC_ROOT.
+// Bazel resolves $(location //tools:build-tracer) to an
+// exec-root-relative path; pipelineHandler's prelude already
+// `cd "$$BUILD_ROOT"` by the time this runs, so the bare
+// relative path wouldn't find the staged binary.
+func wrapAutotoolsPipelineCmds(cmds string) string {
+	return fmt.Sprintf(`        # Build-tracer wraps the entire configure/build/install
+        # pipeline. The trace artifact captures every execve under
+        # the build sandbox; convert-element-autotools (run by the
+        # AppendCmd step) reads it to emit BUILD.bazel.out.
+        export AUTOTOOLS_TRACE="$$(mktemp)"
+        "$$EXEC_ROOT/$(location //tools:build-tracer)" --out="$$AUTOTOOLS_TRACE" -- sh -c '
+%s
+'`, cmds)
+}
 
-filegroup(
-    name = "build_bazel",
-    srcs = ["BUILD.bazel.out"],
-)
-`, name)
+// autotoolsConverterStep is the shell snippet inserted between
+// the (tracer-wrapped) pipeline cmds and the install-tree tar.
+// Reads the trace produced by build-tracer; writes
+// BUILD.bazel.out for downstream consumers. When hasImports
+// is true, --imports-manifest=$(location imports.json) flows
+// through so cross-element `-l<name>` flags resolve to the
+// right Bazel labels.
+func autotoolsConverterStep(hasImports bool) string {
+	importsFlag := ""
+	if hasImports {
+		importsFlag = ` \
+            --imports-manifest="$(location imports.json)"`
+	}
+	return fmt.Sprintf(`        # Trace -> native cc_library / cc_binary BUILD.bazel.out.
+        # Output goes through bazel's normal action cache (buildbarn
+        # in CI), which is what gives us cross-node convergence —
+        # same trace + same converter version => same BUILD.bazel.out
+        # everywhere.
+        cd "$$EXEC_ROOT"
+        $(location //tools:convert-element-autotools) \
+            --trace="$$AUTOTOOLS_TRACE" \
+            --out-build="$(location BUILD.bazel.out)"%s`, importsFlag)
 }

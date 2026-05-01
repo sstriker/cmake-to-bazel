@@ -216,6 +216,17 @@ e2e-meta-import: check-tools converter
 e2e-meta-autotools: check-tools converter
 	scripts/meta-autotools.sh
 
+# Trace-driven kind:autotools native acceptance gate. Drives
+# the autotools-greet fixture through write-a +
+# --convert-element-autotools + --build-tracer-bin; bazel build
+# runs the tracer-wrapped install genrule + the native converter
+# inline; the gate asserts the rendered BUILD.bazel.out contains
+# native cc_binary targets recovered from the trace.
+# Bazel's action cache (buildbarn in CI) handles cross-node
+# convergence transparently — same action key, same outputs.
+e2e-meta-autotools-native: check-tools converter
+	scripts/meta-autotools-native.sh
+
 # Conditional-lowering acceptance gate. Single kind:manual element
 # (testdata/meta-project/conditional-greet/) whose .bst declares
 # (?): per-arch variable overrides. write-a lowers them into a

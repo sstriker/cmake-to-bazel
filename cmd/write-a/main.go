@@ -353,9 +353,8 @@ func main() {
 	hostArch := flag.String("host-arch", "", "override the static host_arch dispatch variable (default: auto-detected from the build host).")
 	buildArch := flag.String("build-arch", "", "override the static build_arch dispatch variable (default: auto-detected from the build host).")
 	bootstrapBuildArch := flag.String("bootstrap-build-arch", "", "override the static bootstrap_build_arch dispatch variable (default: auto-detected from the build host).")
-	traceCacheRoot := flag.String("trace-cache-root", "", "optional: trace cache root for the trace-driven autotools converter. When set, kind:autotools elements with a cached trace render as a native cc_library / cc_binary genrule (B→A feedback loop); without it (or on cache miss) they fall back to the coarse install_tree.tar pipeline.")
-	tracerVersion := flag.String("tracer-version", "strace-v1", "tracer wire-format version paired with --trace-cache-root for cache key construction. Bump when build-tracer's output shape changes.")
-	autotoolsBin := flag.String("convert-element-autotools", "", "optional: path to convert-element-autotools (paired with --trace-cache-root for kind:autotools native rendering)")
+	autotoolsBin := flag.String("convert-element-autotools", "", "optional: path to convert-element-autotools. When set (alongside --build-tracer-bin), kind:autotools elements render with the trace-driven native converter wired into the install genrule; bazel's action cache handles convergence across nodes via the existing remote-cache plumbing.")
+	tracerBin := flag.String("build-tracer-bin", "", "optional: path to build-tracer. Required when --convert-element-autotools is set.")
 	flag.Parse()
 
 	if len(bstPaths) == 0 || *outA == "" || *convertBin == "" {
@@ -364,19 +363,31 @@ func main() {
 	}
 
 	// Wire the trace-driven autotools converter's render-time
-	// config. Empty cache root disables the native path entirely
-	// — kind:autotools elements always render as the coarse
-	// install_tree.tar pipeline. With a cache root, individual
-	// elements' native vs coarse branch is decided per-element
-	// at RenderA time based on the cache's contents.
-	autotoolsConfig.cacheRoot = *traceCacheRoot
-	autotoolsConfig.tracerVersion = *tracerVersion
+	// config. Empty convertBin disables the trace+convert wrap
+	// entirely — kind:autotools elements render as the
+	// unmodified coarse install_tree.tar pipeline. With both
+	// flags set, the install genrule wraps the build cmd in
+	// build-tracer, runs convert-element-autotools against the
+	// trace, and produces a native BUILD.bazel.out alongside
+	// install_tree.tar. Bazel's action cache (buildbarn in CI)
+	// handles cross-node convergence via the existing
+	// remote-cache plumbing.
+	if (*autotoolsBin != "") != (*tracerBin != "") {
+		log.Fatalf("--convert-element-autotools and --build-tracer-bin must be set together")
+	}
 	if *autotoolsBin != "" {
 		abs, err := filepath.Abs(*autotoolsBin)
 		if err != nil {
 			log.Fatalf("resolve convert-element-autotools path: %v", err)
 		}
 		autotoolsConfig.convertBin = abs
+	}
+	if *tracerBin != "" {
+		abs, err := filepath.Abs(*tracerBin)
+		if err != nil {
+			log.Fatalf("resolve build-tracer path: %v", err)
+		}
+		autotoolsConfig.tracerBin = abs
 	}
 
 	g, err := loadGraph(bstPaths, *sourceCache)
@@ -824,12 +835,11 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 		return err
 	}
 	exports := []string{"convert-element", "sources.json"}
-	// Also stage convert-element-autotools when a path was
-	// supplied AND the trace cache is configured (the only
-	// caller is the kind:autotools native render path).
-	// Without these, the kind:autotools handler always falls
-	// back to the coarse pipeline that needs neither.
-	if autotoolsConfig.convertBin != "" && autotoolsConfig.cacheRoot != "" {
+	// Also stage convert-element-autotools + build-tracer when
+	// the trace-driven kind:autotools path is configured. The
+	// install genrule references both via tools = [...]; without
+	// staging, the labels would resolve to nothing.
+	if autotoolsConfig.convertBin != "" && autotoolsConfig.tracerBin != "" {
 		stagedAt := filepath.Join(outDir, "tools", "convert-element-autotools")
 		if err := copyFile(autotoolsConfig.convertBin, stagedAt); err != nil {
 			return fmt.Errorf("stage convert-element-autotools: %w", err)
@@ -837,7 +847,14 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 		if err := os.Chmod(stagedAt, 0o755); err != nil {
 			return err
 		}
-		exports = append(exports, "convert-element-autotools")
+		stagedTracer := filepath.Join(outDir, "tools", "build-tracer")
+		if err := copyFile(autotoolsConfig.tracerBin, stagedTracer); err != nil {
+			return fmt.Errorf("stage build-tracer: %w", err)
+		}
+		if err := os.Chmod(stagedTracer, 0o755); err != nil {
+			return err
+		}
+		exports = append(exports, "convert-element-autotools", "build-tracer")
 	}
 	exportsList := ""
 	for i, e := range exports {
