@@ -59,7 +59,11 @@ func TestParseExecveLine(t *testing.T) {
 
 // TestClassifyArgv_Compile / Link / Archive cover the four
 // invocation shapes we recognize. Compile and link branch on
-// `-c`; archive branches on `ar`'s mode-flag arg.
+// `-c`; archive branches on `ar`'s mode-flag arg. Note that
+// default-toolchain flags (`-O2`, `-fPIC`, `-DNDEBUG`, etc.)
+// are intentionally stripped, so test cases use a hardening
+// flag (`-fstack-protector-strong`) to assert copts are
+// captured at all.
 func TestClassifyArgv(t *testing.T) {
 	cases := []struct {
 		name string
@@ -69,21 +73,33 @@ func TestClassifyArgv(t *testing.T) {
 	}{
 		{
 			"compile-only",
-			[]string{"cc", "-c", "-O2", "-o", "foo.o", "foo.c"},
+			[]string{"cc", "-c", "-fstack-protector-strong", "-o", "foo.o", "foo.c"},
 			true,
-			Event{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-O2"}},
+			Event{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-fstack-protector-strong"}},
 		},
 		{
 			"compile-and-link greet-style",
-			[]string{"cc", "-O2", "-o", "greet", "greet.c"},
+			[]string{"cc", "-fstack-protector-strong", "-o", "greet", "greet.c"},
 			true,
-			Event{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-O2"}},
+			Event{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-fstack-protector-strong"}},
 		},
 		{
 			"link-only with -l",
-			[]string{"cc", "-O2", "-o", "myapp", "myapp.o", "-L.", "-lfoo"},
+			[]string{"cc", "-fstack-protector-strong", "-o", "myapp", "myapp.o", "-L.", "-lfoo"},
 			true,
-			Event{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-O2"}},
+			Event{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-fstack-protector-strong"}},
+		},
+		{
+			"default-toolchain flags stripped",
+			[]string{"cc", "-O2", "-fPIC", "-g", "-DNDEBUG", "-c", "-o", "foo.o", "foo.c"},
+			true,
+			Event{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}},
+		},
+		{
+			"-D extracted to defines",
+			[]string{"cc", "-c", "-DFOO=1", "-DBAR", "-o", "foo.o", "foo.c"},
+			true,
+			Event{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Defines: []string{"BAR", "FOO=1"}},
 		},
 		{
 			"archive ar rcs",
@@ -129,6 +145,9 @@ func TestClassifyArgv(t *testing.T) {
 			if !reflect.DeepEqual(got.Copts, c.want.Copts) {
 				t.Errorf("Copts = %#v, want %#v", got.Copts, c.want.Copts)
 			}
+			if !reflect.DeepEqual(got.Defines, c.want.Defines) {
+				t.Errorf("Defines = %#v, want %#v", got.Defines, c.want.Defines)
+			}
 		})
 	}
 }
@@ -140,12 +159,15 @@ func TestClassifyArgv(t *testing.T) {
 // archive (libfoo.a from foo.o + bar.o), one link (myapp from
 // myapp.o + -lfoo).
 func TestCorrelate_LibAndApp(t *testing.T) {
+	// `-fstack-protector-strong` is a non-default flag that
+	// passes through copts (used here so the test can assert
+	// copts are wired); `-O2` would be stripped.
 	events := []Event{
-		{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-O2"}},
-		{Kind: EventCompile, Out: "bar.o", Srcs: []string{"bar.c"}, Copts: []string{"-O2"}},
-		{Kind: EventCompile, Out: "myapp.o", Srcs: []string{"myapp.c"}, Copts: []string{"-O2"}},
+		{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-fstack-protector-strong"}, Defines: []string{"FOO=1"}},
+		{Kind: EventCompile, Out: "bar.o", Srcs: []string{"bar.c"}, Copts: []string{"-fstack-protector-strong"}, Defines: []string{"FOO=1"}},
+		{Kind: EventCompile, Out: "myapp.o", Srcs: []string{"myapp.c"}, Copts: []string{"-fstack-protector-strong"}},
 		{Kind: EventArchive, Out: "libfoo.a", Objs: []string{"foo.o", "bar.o"}},
-		{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-O2"}},
+		{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-fstack-protector-strong"}},
 	}
 	got := emitBuild(correlate(events), nil)
 
@@ -154,7 +176,8 @@ func TestCorrelate_LibAndApp(t *testing.T) {
 		`cc_library(`,
 		`name = "foo"`,
 		`srcs = ["bar.c", "foo.c"]`,
-		`copts = ["-O2"]`,
+		`copts = ["-fstack-protector-strong"]`,
+		`defines = ["FOO=1"]`,
 		`linkstatic = True`,
 		`cc_binary(`,
 		`name = "myapp"`,
@@ -180,7 +203,7 @@ func TestCorrelate_LibAndApp(t *testing.T) {
 // directly listed.
 func TestCorrelate_GreetStandalone(t *testing.T) {
 	events := []Event{
-		{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-O2"}},
+		{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-fstack-protector-strong"}},
 	}
 	got := emitBuild(correlate(events), nil)
 	for _, marker := range []string{
@@ -188,7 +211,7 @@ func TestCorrelate_GreetStandalone(t *testing.T) {
 		`cc_binary(`,
 		`name = "greet"`,
 		`srcs = ["greet.c"]`,
-		`copts = ["-O2"]`,
+		`copts = ["-fstack-protector-strong"]`,
 	} {
 		if !strings.Contains(got, marker) {
 			t.Errorf("missing marker %q\n--body--\n%s", marker, got)
@@ -228,7 +251,7 @@ func TestEmitBuild_ImportsManifestFallback(t *testing.T) {
 	}
 
 	events := []Event{
-		{Kind: EventLink, Out: "myapp", Srcs: []string{"myapp.c"}, Libs: []string{"z"}, Copts: []string{"-O2"}},
+		{Kind: EventLink, Out: "myapp", Srcs: []string{"myapp.c"}, Libs: []string{"z"}},
 	}
 	got := emitBuild(correlate(events), imports)
 	if !strings.Contains(got, `deps = ["//elements/zlib:zlib"]`) {

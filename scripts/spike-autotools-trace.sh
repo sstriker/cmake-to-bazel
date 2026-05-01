@@ -123,13 +123,15 @@ run_fixture() {
     cat "$build_out"
 }
 
-# autotools-greet asserts: single cc_binary, no cc_library
+# autotools-greet asserts: single cc_binary, no cc_library.
+# Default-toolchain flags (-O2 etc.) are intentionally stripped
+# from the converter output, so only the binary's name + srcs
+# are asserted here.
 greet_asserts="$work_dir/greet-asserts.txt"
 cat > "$greet_asserts" <<'EOF'
 cc_binary(
 name = "greet"
 srcs = ["greet.c"]
-copts = ["-O2"]
 EOF
 run_fixture autotools-greet "$greet_asserts"
 

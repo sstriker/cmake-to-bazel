@@ -104,12 +104,13 @@ const (
 // to basenames where matching by basename is safer than matching
 // by absolute path (which is build-dir-dependent).
 type Event struct {
-	Kind  EventKind
-	Out   string   // output path (-o argument or ar's first positional)
-	Srcs  []string // .c/.cc/.cpp/.cxx/.c++/.C input args (compile + link)
-	Objs  []string // .o input args (link + archive)
-	Libs  []string // -l<name> args (link)
-	Copts []string // remaining flags, sorted + deduped
+	Kind    EventKind
+	Out     string   // output path (-o argument or ar's first positional)
+	Srcs    []string // .c/.cc/.cpp/.cxx/.c++/.C input args (compile + link)
+	Objs    []string // .o input args (link + archive)
+	Libs    []string // -l<name> args (link)
+	Copts   []string // remaining flags, sorted + deduped (excludes default-toolchain + -D / -L / -I)
+	Defines []string // -D<name>[=<val>] args, sorted + deduped (excludes -DNDEBUG)
 }
 
 // parseTrace walks an strace text-format trace, returning the
@@ -159,8 +160,29 @@ func classifyArgv(argv []string) (Event, bool) {
 // EventLink (compile-and-link / link-only). Returns ok=false
 // for invocations we can't sensibly classify (e.g., `cc
 // --version`).
+//
+// Flag handling:
+//   - `-D<name>[=<val>]` lands in Defines, not Copts. Bazel's
+//     cc_library / cc_binary surface defines as a first-class
+//     attribute; emitting them as `-D...` in copts would be
+//     redundant.
+//   - `-O<N>` / `-Os` / `-Og` / `-g[N]` / `-DNDEBUG` /
+//     `-fPIC` / `-fpic` / `-fPIE` / `-fpie` are stripped:
+//     Bazel's cc_toolchain provides these per compilation
+//     mode (opt / dbg / fastbuild) and per linkstatic shape;
+//     copying them onto every target would override the
+//     user's `bazel build -c dbg` intent.
+//   - `-L<dir>` / `-I<dir>` stripped: build-dir-specific
+//     paths; Bazel's includes / deps attributes carry the
+//     equivalents at higher granularity.
+//   - Everything else with a `-` prefix passes through as
+//     copts. Distro-specific hardening flags
+//     (`-fstack-protector-strong`, `-fcf-protection`,
+//     `-D_FORTIFY_SOURCE=N`, etc.) are intentionally
+//     preserved — those carry build-time intent the
+//     user-side cc_toolchain may not replicate.
 func classifyCompilerDriver(argv []string) (Event, bool) {
-	var srcs, objs, libs, copts []string
+	var srcs, objs, libs, copts, defines []string
 	output := ""
 	compileOnly := false
 	for i := 1; i < len(argv); i++ {
@@ -175,12 +197,24 @@ func classifyCompilerDriver(argv []string) (Event, bool) {
 			output = a[2:]
 		case strings.HasPrefix(a, "-l") && len(a) > 2:
 			libs = append(libs, a[2:])
+		case strings.HasPrefix(a, "-D") && len(a) > 2:
+			// -DNDEBUG is one of the stripped defaults — Bazel's
+			// opt mode defines it. Other -D<name>[=<val>] entries
+			// land on the Bazel rule's defines attribute.
+			d := a[2:]
+			if d == "NDEBUG" {
+				continue
+			}
+			defines = append(defines, d)
 		case isSourceFile(a):
 			srcs = append(srcs, a)
 		case isObjectFile(a):
 			objs = append(objs, a)
 		default:
 			if strings.HasPrefix(a, "-") {
+				if isDefaultToolchainFlag(a) {
+					continue
+				}
 				// Drop -L<dir> and -I<dir> flags from copts —
 				// they're build-dir-specific paths and bazel's
 				// includes/deps attributes carry the equivalents
@@ -203,10 +237,11 @@ func classifyCompilerDriver(argv []string) (Event, bool) {
 			return Event{}, false
 		}
 		return Event{
-			Kind:  EventCompile,
-			Out:   output,
-			Srcs:  srcs,
-			Copts: stableUnique(copts),
+			Kind:    EventCompile,
+			Out:     output,
+			Srcs:    srcs,
+			Copts:   stableUnique(copts),
+			Defines: stableUnique(defines),
 		}, true
 	}
 	// Not -c: compile-and-link or link-only.
@@ -214,13 +249,55 @@ func classifyCompilerDriver(argv []string) (Event, bool) {
 		return Event{}, false
 	}
 	return Event{
-		Kind:  EventLink,
-		Out:   output,
-		Srcs:  srcs,
-		Objs:  objs,
-		Libs:  stableUnique(libs),
-		Copts: stableUnique(copts),
+		Kind:    EventLink,
+		Out:     output,
+		Srcs:    srcs,
+		Objs:    objs,
+		Libs:    stableUnique(libs),
+		Copts:   stableUnique(copts),
+		Defines: stableUnique(defines),
 	}, true
+}
+
+// isDefaultToolchainFlag reports whether a copt is one Bazel's
+// stock cc_toolchain provides per compilation mode / target
+// shape. Stripping these from converter output prevents the
+// converted Bazel rules from overriding the user's
+// `bazel build -c dbg|opt|fastbuild` intent and their
+// linkstatic-vs-shared choice.
+//
+// The list is intentionally narrow: only flags every
+// modern cc_toolchain (rules_cc default + sensible vendored
+// configs) carries, where the autotools-emitted version
+// would be redundant rather than additive.
+func isDefaultToolchainFlag(flag string) bool {
+	switch flag {
+	case "-fPIC", "-fpic", "-fPIE", "-fpie":
+		return true
+	}
+	// Optimization level: -O0, -O1, -O2, -O3, -Os, -Og, -Ofast.
+	if strings.HasPrefix(flag, "-O") && len(flag) > 1 {
+		return true
+	}
+	// Debug info: -g, -g0..-g3, -gdwarf etc.
+	if flag == "-g" || strings.HasPrefix(flag, "-g") && isDebugInfoFlag(flag) {
+		return true
+	}
+	return false
+}
+
+// isDebugInfoFlag matches the family of `-g*` flags that fall
+// under Bazel's debug-info handling: -g, -g0..-g3, -ggdb, etc.
+// Carved out as a separate predicate because gcc has many
+// `-g`-prefixed flags that are NOT debug-info (e.g., -gz,
+// -gsplit-dwarf), and we err on the conservative side —
+// strip the universal forms, preserve the rest.
+func isDebugInfoFlag(flag string) bool {
+	switch flag {
+	case "-g", "-g0", "-g1", "-g2", "-g3", "-ggdb", "-ggdb0", "-ggdb1", "-ggdb2", "-ggdb3":
+		return true
+	}
+	return false
 }
 
 // classifyArchiver inspects an `ar` argv. Recognizes the
@@ -329,6 +406,7 @@ type CCRule struct {
 	Name     string
 	Srcs     []string // sorted
 	Copts    []string // sorted, deduped
+	Defines  []string // sorted, deduped (-D<name>[=<val>] from compile events)
 	Deps     []string // sorted (in-tree library labels like ":foo")
 }
 
@@ -361,6 +439,9 @@ func emitBuild(g *Graph, imports *manifest.Resolver) string {
 		if len(r.Copts) > 0 {
 			fmt.Fprintf(&b, "    copts = %s,\n", strList(r.Copts))
 		}
+		if len(r.Defines) > 0 {
+			fmt.Fprintf(&b, "    defines = %s,\n", strList(r.Defines))
+		}
 		if len(r.Deps) > 0 {
 			fmt.Fprintf(&b, "    deps = %s,\n", strList(r.Deps))
 		}
@@ -377,7 +458,7 @@ func buildRules(g *Graph, imports *manifest.Resolver) []CCRule {
 	var libs, bins []CCRule
 	// Archives → cc_library.
 	for _, a := range g.archives {
-		var srcs, copts []string
+		var srcs, copts, defines []string
 		for _, obj := range a.Objs {
 			c, ok := g.objToCompile[filepath.Base(obj)]
 			if !ok {
@@ -385,29 +466,28 @@ func buildRules(g *Graph, imports *manifest.Resolver) []CCRule {
 			}
 			srcs = append(srcs, c.Srcs...)
 			copts = append(copts, c.Copts...)
+			defines = append(defines, c.Defines...)
 		}
 		if len(srcs) == 0 {
 			continue
 		}
-		sort.Strings(srcs)
-		srcs = dedup(srcs)
-		sort.Strings(copts)
-		copts = dedup(copts)
 		libs = append(libs, CCRule{
 			RuleKind: "cc_library",
 			Name:     stripLibPrefixSuffix(a.Out),
-			Srcs:     srcs,
-			Copts:    copts,
+			Srcs:     stableUnique(srcs),
+			Copts:    stableUnique(copts),
+			Defines:  stableUnique(defines),
 		})
 	}
 	// Links → cc_binary.
 	for _, l := range g.links {
-		var srcs, copts, deps []string
-		// Direct .c args carry their own copts (event-level).
+		var srcs, copts, defines, deps []string
+		// Direct .c args carry their own copts/defines (event-level).
 		srcs = append(srcs, l.Srcs...)
 		copts = append(copts, l.Copts...)
+		defines = append(defines, l.Defines...)
 		// Each .o input expands to its compile event's source +
-		// copts (last-write-wins on duplicate basenames).
+		// copts + defines (last-write-wins on duplicate basenames).
 		for _, obj := range l.Objs {
 			c, ok := g.objToCompile[filepath.Base(obj)]
 			if !ok {
@@ -415,6 +495,7 @@ func buildRules(g *Graph, imports *manifest.Resolver) []CCRule {
 			}
 			srcs = append(srcs, c.Srcs...)
 			copts = append(copts, c.Copts...)
+			defines = append(defines, c.Defines...)
 		}
 		// `-l<name>` arg resolves in two stages:
 		//   1. If the trace also produced an archive
@@ -440,18 +521,13 @@ func buildRules(g *Graph, imports *manifest.Resolver) []CCRule {
 		if len(srcs) == 0 {
 			continue
 		}
-		sort.Strings(srcs)
-		srcs = dedup(srcs)
-		sort.Strings(copts)
-		copts = dedup(copts)
-		sort.Strings(deps)
-		deps = dedup(deps)
 		bins = append(bins, CCRule{
 			RuleKind: "cc_binary",
 			Name:     filepath.Base(l.Out),
-			Srcs:     srcs,
-			Copts:    copts,
-			Deps:     deps,
+			Srcs:     stableUnique(srcs),
+			Copts:    stableUnique(copts),
+			Defines:  stableUnique(defines),
+			Deps:     stableUnique(deps),
 		})
 	}
 	sort.Slice(libs, func(i, j int) bool { return libs[i].Name < libs[j].Name })
