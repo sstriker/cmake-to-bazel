@@ -458,17 +458,44 @@ source-push-graph: source-push
 	$(SOURCE_PUSH) graph --cas=$(CAS_ADDR) --source-cache=$(SOURCE_CACHE)
 
 # fdsdk-source-push: thin convenience wrapper for the FDSDK
-# end-to-end workflow. Today it just delegates to
-# source-push-graph (FDSDK_SOURCE_CACHE → SOURCE_CACHE), but
-# carries the FDSDK semantics — when we add bst integration
-# this is where it lands.
+# end-to-end workflow. Two paths:
+#
+#   FDSDK_SOURCE_CACHE=<dir>   → cmd/source-push graph
+#       (BuildStream-free; uploads pre-fetched trees indexed by
+#       sourceKey). Test/dev path; used when the operator already
+#       has a populated --source-cache directory.
+#
+#   FDSDK_DIR=<dir>            → tools/bst-source-push.sh
+#       (real `bst source push` against the FDSDK BuildStream
+#       project). Production path; requires BuildStream installed
+#       on the host or in the cached venv (see `make bst-venv`).
+#
+# Pass exactly one. If both are set, FDSDK_DIR (the bst path)
+# wins — that's the canonical mechanism.
 fdsdk-source-push:
-	@if [ -z "$(FDSDK_SOURCE_CACHE)" ]; then \
-		echo "error: FDSDK_SOURCE_CACHE=<path> is required"; \
-		echo "  (the source-cache directory --source-cache populated for FDSDK)"; \
+	@if [ -n "$(FDSDK_DIR)" ]; then \
+		echo "fdsdk-source-push via real \`bst source push\` ($(FDSDK_DIR))"; \
+		./tools/bst-source-push.sh "$(FDSDK_DIR)"; \
+	elif [ -n "$(FDSDK_SOURCE_CACHE)" ]; then \
+		$(MAKE) source-push-graph SOURCE_CACHE=$(FDSDK_SOURCE_CACHE); \
+	else \
+		echo "error: pass either FDSDK_DIR=<bst-project-dir> (real bst path) or FDSDK_SOURCE_CACHE=<cache-dir> (in-tree Go uploader path)"; \
 		exit 2; \
 	fi
-	$(MAKE) source-push-graph SOURCE_CACHE=$(FDSDK_SOURCE_CACHE)
+
+# bst-venv: install BuildStream into a hermetic venv at
+# ~/.cache/cmake-to-bazel/bst-venv/. Run once; tools/bst-source-push.sh
+# auto-picks the venv's bst when no host bst is on PATH. Useful
+# when the operator's distro doesn't ship bst or ships a stale
+# version.
+bst-venv:
+	@mkdir -p $$HOME/.cache/cmake-to-bazel
+	@if [ ! -d $$HOME/.cache/cmake-to-bazel/bst-venv ]; then \
+		python3 -m venv $$HOME/.cache/cmake-to-bazel/bst-venv; \
+	fi
+	$$HOME/.cache/cmake-to-bazel/bst-venv/bin/pip install --upgrade pip
+	$$HOME/.cache/cmake-to-bazel/bst-venv/bin/pip install BuildStream
+	@$$HOME/.cache/cmake-to-bazel/bst-venv/bin/bst --version
 
 # e2e-source-push: stand up buildbarn, pack a tiny synthetic
 # source-cache, push it via cmd/source-push, verify CAS contents
