@@ -44,11 +44,21 @@ narrow ("drop `util.h` from toplib's hdrs because `util` is a
 different target's name") false-positives on projects where a
 header coincidentally shares a name with an unrelated target
 (e.g. a `util` executable that has nothing to do with a
-`util.h` header in a different library). Real fix would scan
-each cc_library's source files for `#include "..."` directives
-and emit only matched headers — deterministic, no name
-guessing. Deferred until an FDSDK-shape fixture surfaces a
-case where the cosmetic noise actually matters.
+`util.h` header in a different library).
+
+**Why we won't pursue the deterministic alternative**: scanning
+source files for `#include "..."` directives is deterministic
+(no name guessing), but expands the converter's action input
+set to include every `.c` / `.cpp` source file it reads. That
+means every source-file edit invalidates convert-element's
+cache and triggers a re-run. The current behaviour (read only
+the codemodel / cmakeFiles / compile_commands / build.ninja)
+keeps convert-element re-runs gated on CMakeLists / cmake-cache
+changes, which are rare. Trading rare re-runs for precise hdrs
+isn't worth it — the hdrs duplication is a cosmetic BUILD-file
+diff, not a build-time correctness issue.
+
+This delta stays open as documentation; no fix is planned.
 
 ### configure-file — generated header dependency missing (correctness)
 
@@ -84,6 +94,36 @@ with no inference. With that pairing in hand:
 
 The trace-expand approach also closes the find-package STATIC
 delta below — same parser, different command.
+
+### multi-language — only first compile group's flags emitted (correctness)
+
+**Fixture**: `converter/testdata/sample-projects/multi-language/`
+(one cc_library with both `c_part.c` and `cxx_part.cpp` plus
+per-language `target_compile_options($<COMPILE_LANGUAGE:C>:...)`
+and `$<COMPILE_LANGUAGE:CXX>:...`).
+
+**Surfaced**: emitted `cc_library` has
+`copts = ["-O3", "-std=c11"]` — only the C compile group's
+flags. The C++ compile group's `-std=c++17` is dropped because
+lower assumes "at most one language per target" (per the
+`cg := t.CompileGroups[0]` line in lowerTarget). Bazel-build
+of the converted output would compile `cxx_part.cpp` with
+`-std=c11`, which fails (C++ source compiled in C dialect).
+
+**Fix shape**: split a multi-language cc_library into one
+cc_library per language, link them via a third cc_library /
+filegroup that groups them. cmake codemodel emits one
+CompileGroup per language with the right per-language flags;
+walk all CompileGroups (not just `[0]`) and emit one Bazel
+target per language, with srcs partitioned by source extension
++ language. Each emitted target's `copts` carries that
+language's flags. The original target's name aggregates them
+via `deps = [":<name>_c", ":<name>_cxx"]` (or similar).
+
+This is structural: changes the 1:1 cmake-target → Bazel-target
+mapping. Defer until FDSDK actually surfaces multi-language
+targets in the curated probe set (most kind:cmake elements are
+single-language); track here so a future PR can pick it up.
 
 ### find-package STATIC — IMPORTED deps don't surface (correctness)
 

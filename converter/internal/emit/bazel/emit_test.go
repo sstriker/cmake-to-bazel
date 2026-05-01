@@ -355,3 +355,93 @@ func TestEmit_FindPackage_Golden(t *testing.T) {
 		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
+
+// TestEmit_GeneratorExpressions_Golden exercises cmake's $<...>
+// generator expressions. The codemodel resolves them at
+// configure time, so what surfaces in CompileGroups[].Includes
+// / Defines / Compile-fragments is the resolved-for-this-config
+// values, not generator-expression literals. Confirms
+// convert-element doesn't trip on the expressions and emits
+// the resolved values cleanly. Known clean — no gap.
+func TestEmit_GeneratorExpressions_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/generator-expressions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/generator-expressions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "generator-expressions", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestEmit_MultiLanguage_Golden exercises C+C++ in a single
+// cc_library target. cmake codemodel emits one CompileGroup per
+// language; lower's "at most one language per target"
+// assumption (cg := t.CompileGroups[0]) drops the second
+// language's flags entirely.
+//
+// Known delta captured by the golden:
+//   - copts emitted = first compile group's only.
+//     `cxx_part.cpp` would be compiled with `-std=c11` (the C
+//     std flag), failing as C++ in C dialect.
+//
+// Fix shape (deferred): split multi-language targets into one
+// cc_library per language. See docs/cmake-conversion-deltas.md.
+func TestEmit_MultiLanguage_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/multi-language")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/multi-language")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "multi-language", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
