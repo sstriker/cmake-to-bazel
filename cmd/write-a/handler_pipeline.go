@@ -123,12 +123,20 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	// command for a specific tuple (one entry per dispatch
 	// variable). Empty tuple = unconditional resolution.
 	resolveAt := func(tuple map[string]string) (pipelinePhases, error) {
+		// Per-element built-ins. BuildStream reserves a small set of
+		// names that resolve to the element's own metadata —
+		// `element-name` is the one v1 actually sees in FDSDK
+		// (bootstrap/base-sdk/perl uses it in flags.yml). Lowest
+		// precedence (any user var with the same name overrides).
+		elemBuiltins := map[string]string{
+			"element-name": elem.Name,
+		}
 		var vars map[string]string
 		var err error
 		if len(tuple) == 0 {
-			vars, err = resolveVars(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
+			vars, err = resolveVars(elemBuiltins, elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
 		} else {
-			vars, err = resolveVarsForTuple(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables,
+			vars, err = resolveVarsForTuple(elemBuiltins, elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables,
 				tuple, elem.ProjectConfConditionals, elem.Bst.Conditionals)
 		}
 		if err != nil {
@@ -225,12 +233,34 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	// resolves to one phases set; group tuples by identical
 	// resolution so the emitted select() doesn't duplicate identical
 	// branches.
+	//
+	// Soft-skip semantics: when a tuple's resolution fails with a
+	// "variable referenced but not defined" error (the FDSDK
+	// pattern where flags.yml has (?): branches for
+	// {x86_64, aarch64, ppc64le, riscv64} but not loongarch64,
+	// while the option declaration enumerates loongarch64), log
+	// the skip and omit the tuple from the rendered select().
+	// Bazel surfaces the missing platform at build time as
+	// "no matching select() arm" rather than write-a aborting
+	// the whole element render. Preserves render robustness on
+	// real-world graphs where dispatch values overshoot what
+	// the (?): branches actually cover.
 	type groupKey [4]string
 	groupIdx := map[groupKey]int{}
 	var groups []dispatchGroup
 	for _, tuple := range cartesianTuples(dispatch) {
 		phases, err := resolveAt(tuple)
 		if err != nil {
+			if strings.Contains(err.Error(), "referenced but not defined") {
+				// Tuple silently dropped from the rendered
+				// select(); bazel surfaces the missing platform
+				// at build time as "no matching select() arm,"
+				// which is louder than write-a aborting render.
+				// Future --verbose flag can echo the skip to
+				// stderr; for now the BUILD content is the
+				// canonical record of which dispatch arms exist.
+				continue
+			}
 			return err
 		}
 		key := groupKey{
@@ -248,6 +278,13 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 				Phases: phases,
 			})
 		}
+	}
+	// All tuples skipped → nothing to emit. Surface as error so
+	// the operator knows nothing's buildable rather than silently
+	// rendering an empty select().
+	if len(groups) == 0 {
+		return fmt.Errorf("element %q (kind:%s): every dispatch tuple was unresolvable; check (?): branch coverage vs option values",
+			elem.Name, h.kindName)
 	}
 	// Dedup-collapse: if every dispatch tuple resolves identically,
 	// the (?): block didn't actually affect the rendered cmd. Emit

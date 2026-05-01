@@ -911,7 +911,7 @@ func dispatchable(varname string, options map[string]bstOption) bool {
 // v1 only ever passes a one-entry tuple (per dispatchSpaceForElement's
 // single-variable constraint). The signature accepts arbitrary
 // tuples so the cross-product follow-up doesn't need to refactor.
-func resolveVarsForTuple(projectConf, kindVars, elemVars map[string]string,
+func resolveVarsForTuple(elemBuiltins, projectConf, kindVars, elemVars map[string]string,
 	tuple map[string]string,
 	projectConditionals, elemConditionals []conditionalBranch) (map[string]string, error) {
 	pc := projectConf
@@ -952,5 +952,5 @@ func resolveVarsForTuple(projectConf, kindVars, elemVars map[string]string,
 	for k, v := range tuple {
 		pc2[k] = v
 	}
-	return resolveVars(pc2, kindVars, ev)
+	return resolveVars(elemBuiltins, pc2, kindVars, ev)
 }

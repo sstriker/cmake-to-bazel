@@ -36,6 +36,12 @@ import (
 // fatal-warnings, …) are ignored at unmarshal time so we don't
 // have to track BuildStream's full schema.
 type projectConf struct {
+	// Name is the BuildStream project name (e.g. "freedesktop-sdk")
+	// from project.conf's top-level `name:` field. BuildStream
+	// exposes this as the `%{project-name}` built-in variable;
+	// FDSDK's bootstrap/base-sdk/perl uses it in flags.yml's
+	// arch-conditional overrides.
+	Name        string            `yaml:"name"`
 	Variables   map[string]string `yaml:"variables"`
 	ElementPath string            `yaml:"element-path"`
 	// Conditionals are the per-arch (?): branches extracted from
@@ -213,10 +219,24 @@ func loadProjectInfoFromBst(bstPath string) (projectInfo, error) {
 		elementPath = "."
 	}
 	elementRoot := filepath.Join(root, elementPath)
+	// Inject `%{project-name}` (the BuildStream built-in) as a
+	// project-conf-level variable. Lower precedence than user
+	// declarations in project.conf's variables: block, so a
+	// user-set `project-name` would override (rare; this is
+	// mostly there for elements that reference %{project-name}
+	// in their command shapes — FDSDK does this in flags.yml).
+	vars := pc.Variables
+	if pc.Name != "" {
+		merged := map[string]string{"project-name": pc.Name}
+		for k, v := range pc.Variables {
+			merged[k] = v
+		}
+		vars = merged
+	}
 	return projectInfo{
 		ProjectRoot:  root,
 		ElementRoot:  elementRoot,
-		Variables:    pc.Variables,
+		Variables:    vars,
 		Conditionals: pc.Conditionals,
 		Aliases:      pc.Aliases,
 		Environment:  pc.Environment,
