@@ -695,7 +695,23 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 	if err := writeFile(filepath.Join(outDir, "rules", "zero_files.bzl"), zeroFilesBzl); err != nil {
 		return err
 	}
+	if err := writeFile(filepath.Join(outDir, "rules", "sources.bzl"), renderSourcesBzl()); err != nil {
+		return err
+	}
 	if err := writeFile(filepath.Join(outDir, "rules", "BUILD.bazel"), "# rules/ holds the starlark utilities project A's per-element BUILDs use.\n"); err != nil {
+		return err
+	}
+
+	// Emit tools/sources.json — the data file the sources extension
+	// reads to declare per-source repos. One entry per unique source
+	// identity (kind + url + ref) across the graph; kind:local
+	// sources are excluded since they don't need a CAS-backed repo.
+	srcs := collectSources(g)
+	srcJSON, err := marshalSourcesJSON(srcs)
+	if err != nil {
+		return fmt.Errorf("marshal sources.json: %w", err)
+	}
+	if err := writeFile(filepath.Join(outDir, "tools", "sources.json"), string(srcJSON)); err != nil {
 		return err
 	}
 
@@ -714,7 +730,7 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 	if err := os.Chmod(stagedBin, 0o755); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(outDir, "tools", "BUILD.bazel"), `exports_files(["convert-element"])`+"\n"); err != nil {
+	if err := writeFile(filepath.Join(outDir, "tools", "BUILD.bazel"), `exports_files(["convert-element", "sources.json"])`+"\n"); err != nil {
 		return err
 	}
 
@@ -747,12 +763,33 @@ func writeProjectB(g *graph, outDir string) error {
 		return err
 	}
 
-	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelB()); err != nil {
+	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelB(g)); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"),
 		"# project B root; per-element packages live under elements/<name>/.\n",
 	); err != nil {
+		return err
+	}
+
+	// Project B reads the same sources extension + JSON as project
+	// A so @src_<key>// repos resolve to the same CAS Directories
+	// in both workspaces.
+	if err := writeFile(filepath.Join(outDir, "rules", "sources.bzl"), renderSourcesBzl()); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(outDir, "rules", "BUILD.bazel"), "# rules/ holds the starlark utilities project B's per-element BUILDs use.\n"); err != nil {
+		return err
+	}
+	srcs := collectSources(g)
+	srcJSON, err := marshalSourcesJSON(srcs)
+	if err != nil {
+		return fmt.Errorf("marshal sources.json: %w", err)
+	}
+	if err := writeFile(filepath.Join(outDir, "tools", "sources.json"), string(srcJSON)); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(outDir, "tools", "BUILD.bazel"), "# tools/ holds the JSON inputs the sources extension reads.\nexports_files([\"sources.json\"])\n"); err != nil {
 		return err
 	}
 
@@ -792,21 +829,51 @@ bazel_dep(name = "bazel_skylib", version = "1.7.1")
 # toolchain bookkeeping.)
 `)
 	}
+	b.WriteString(renderSourcesUseExtension(collectSources(g)))
 	return b.String()
 }
 
 // moduleBazelB declares rules_cc so project A's converted
 // BUILD.bazel.out (which loads cc_library from @rules_cc//cc:defs.bzl)
 // resolves cleanly in project B.
-func moduleBazelB() string {
-	return `module(name = "meta_project_b", version = "0.0.0")
+func moduleBazelB(g *graph) string {
+	var b strings.Builder
+	b.WriteString(`module(name = "meta_project_b", version = "0.0.0")
 
 # rules_cc is what the cmake-converter emits load() lines against
 # (load("@rules_cc//cc:defs.bzl", "cc_library")). Pin a recent stable
 # release; this is downloaded from bcr.bazel.build the first time
 # project B's bazel build runs.
 bazel_dep(name = "rules_cc", version = "0.0.17")
-`
+`)
+	b.WriteString(renderSourcesUseExtension(collectSources(g)))
+	return b.String()
+}
+
+// renderSourcesUseExtension emits the use_extension + use_repo
+// block for the sources module extension. Both project A and
+// project B include the same block so the @src_<key>// repos
+// resolve identically across the two workspaces.
+//
+// When the graph has no non-kind:local sources the block is
+// omitted entirely — declaring an extension with zero repos is
+// legal but noisy in MODULE.bazel review.
+func renderSourcesUseExtension(s sourcesJSON) string {
+	if len(s.Sources) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(`
+sources = use_extension("//rules:sources.bzl", "sources")
+sources.from_json(path = "//tools:sources.json")
+use_repo(
+    sources,
+`)
+	for _, e := range s.Sources {
+		fmt.Fprintf(&b, "    %q,\n", "src_"+e.Key)
+	}
+	b.WriteString(")\n")
+	return b.String()
 }
 
 // summarizeKinds is for the startup log line: "kind:cmake×2, kind:stack×1".

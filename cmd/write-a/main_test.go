@@ -100,6 +100,8 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 		"tools/BUILD.bazel",
 		"elements/hello/BUILD.bazel",
 		"elements/hello/sources/CMakeLists.txt",
+		"rules/sources.bzl",
+		"tools/sources.json",
 	} {
 		if _, err := os.Stat(filepath.Join(outA, want)); err != nil {
 			t.Errorf("missing rendered file %q in project A: %v", want, err)
@@ -2492,4 +2494,126 @@ func appendDepends(bstPath string, deps []string) error {
 		body = append(body, "- "+d+"\n"...)
 	}
 	return os.WriteFile(bstPath, body, 0o644)
+}
+
+// TestWriter_NonLocalSourceProducesUseRepoBlock asserts the wiring
+// from PR #56: an element with a non-kind:local source flows
+// through writeProjectA + writeProjectB so that:
+//   - tools/sources.json contains one entry per unique source key.
+//   - MODULE.bazel for both projects loads the sources extension
+//     and use_repo's the corresponding "src_<key>" repo.
+//   - rules/sources.bzl is staged into both workspaces.
+func TestWriter_NonLocalSourceProducesUseRepoBlock(t *testing.T) {
+	tmp := t.TempDir()
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: a1b2c3
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	outB := filepath.Join(tmp, "project-B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+
+	// sources.json content: exactly one entry, key matches
+	// sourceKey(rs).
+	wantKey := sourceKey(g.Elements[0].Sources[0])
+	if wantKey == "" {
+		t.Fatal("test setup error: sourceKey returned empty for non-local source")
+	}
+	for _, dir := range []string{outA, outB} {
+		raw, err := os.ReadFile(filepath.Join(dir, "tools/sources.json"))
+		if err != nil {
+			t.Fatalf("%s: read sources.json: %v", dir, err)
+		}
+		if !strings.Contains(string(raw), wantKey) {
+			t.Errorf("%s/tools/sources.json missing key %q:\n%s", dir, wantKey, raw)
+		}
+		if !strings.Contains(string(raw), `"kind": "tar"`) {
+			t.Errorf("%s/tools/sources.json missing kind=tar:\n%s", dir, raw)
+		}
+	}
+
+	// rules/sources.bzl exists in both workspaces.
+	for _, dir := range []string{outA, outB} {
+		if _, err := os.Stat(filepath.Join(dir, "rules/sources.bzl")); err != nil {
+			t.Errorf("%s: rules/sources.bzl missing: %v", dir, err)
+		}
+	}
+
+	// MODULE.bazel loads the extension + use_repo's the key in
+	// both projects.
+	for _, dir := range []string{outA, outB} {
+		raw, err := os.ReadFile(filepath.Join(dir, "MODULE.bazel"))
+		if err != nil {
+			t.Fatalf("%s: read MODULE.bazel: %v", dir, err)
+		}
+		got := string(raw)
+		for _, want := range []string{
+			`use_extension("//rules:sources.bzl", "sources")`,
+			`sources.from_json(path = "//tools:sources.json")`,
+			`"src_` + wantKey + `"`,
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s/MODULE.bazel missing %q:\n%s", dir, want, got)
+			}
+		}
+	}
+}
+
+// TestWriter_LocalOnlyGraphSkipsUseRepoBlock asserts that a graph
+// with only kind:local sources still emits the (empty) sources.json
+// and the rules/sources.bzl file (so adding a non-local source
+// later doesn't require a write-a structure change), but skips the
+// noisy use_extension/use_repo block in MODULE.bazel.
+func TestWriter_LocalOnlyGraphSkipsUseRepoBlock(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"), []byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(sampleCmakeBst), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "rules/sources.bzl")); err != nil {
+		t.Errorf("rules/sources.bzl should still be emitted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "tools/sources.json")); err != nil {
+		t.Errorf("tools/sources.json should still be emitted: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(outA, "MODULE.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "use_extension") {
+		t.Errorf("MODULE.bazel should skip use_extension when no non-local sources:\n%s", raw)
+	}
 }
