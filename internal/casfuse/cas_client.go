@@ -110,6 +110,35 @@ func (c *CASClient) GetDirectory(ctx context.Context, d Digest) (*repb.Directory
 	return dir, nil
 }
 
+// PushBlob uploads bytes for a single blob to CAS. Used by
+// cmd/source-push to populate a CAS instance from a packed
+// source tree without going through BuildStream — handy for
+// tests and dev workflows where bst isn't installed.
+//
+// Uses BatchUpdateBlobs for small payloads (fits in one RPC).
+// Caller is responsible for chunking large blobs across calls;
+// source files are typically small enough that this isn't a
+// concern in practice.
+func (c *CASClient) PushBlob(ctx context.Context, d Digest, body []byte) error {
+	resp, err := c.cas.BatchUpdateBlobs(ctx, &repb.BatchUpdateBlobsRequest{
+		InstanceName: c.instance,
+		Requests: []*repb.BatchUpdateBlobsRequest_Request{
+			{Digest: d.toProto(), Data: body},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("BatchUpdateBlobs(%s): %w", d, err)
+	}
+	if len(resp.Responses) != 1 {
+		return fmt.Errorf("BatchUpdateBlobs(%s) returned %d responses, want 1", d, len(resp.Responses))
+	}
+	r := resp.Responses[0]
+	if r.Status != nil && r.Status.Code != 0 {
+		return fmt.Errorf("BatchUpdateBlobs(%s): %s", d, r.Status.Message)
+	}
+	return nil
+}
+
 // ReadBlob streams a blob's contents into a buffer and returns
 // it. The daemon could stream into the FUSE read response
 // directly for big files; v1 keeps the implementation simple by

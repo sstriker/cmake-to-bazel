@@ -28,8 +28,11 @@ DIFF         := $(BIN_DIR)/orchestrate-diff
 HISTORY      := $(BIN_DIR)/orchestrate-history
 BST_TRANSLATE := $(BIN_DIR)/orchestrate-bst-translate
 DERIVE_TOOLCHAIN := $(BIN_DIR)/derive-toolchain
+WRITE_A      := $(BIN_DIR)/write-a
+CAS_FUSE     := $(BIN_DIR)/cas-fuse
+SOURCE_PUSH  := $(BIN_DIR)/source-push
 
-all: converter orchestrator diff history bst-translate derive-toolchain
+all: converter orchestrator diff history bst-translate derive-toolchain write-a cas-fuse source-push
 
 converter: $(CONVERTER)
 
@@ -42,6 +45,12 @@ history: $(HISTORY)
 bst-translate: $(BST_TRANSLATE)
 
 derive-toolchain: $(DERIVE_TOOLCHAIN)
+
+write-a: $(WRITE_A)
+
+cas-fuse: $(CAS_FUSE)
+
+source-push: $(SOURCE_PUSH)
 
 $(CONVERTER):
 	@mkdir -p $(BIN_DIR)
@@ -66,6 +75,20 @@ $(BST_TRANSLATE):
 $(DERIVE_TOOLCHAIN):
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(DERIVE_TOOLCHAIN) ./converter/cmd/derive-toolchain
+
+$(WRITE_A):
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(WRITE_A) ./cmd/write-a
+
+# cas-fuse links against go-fuse which uses cgo; leave CGO_ENABLED
+# at the default. Daemon binary, not a hot path build.
+$(CAS_FUSE):
+	@mkdir -p $(BIN_DIR)
+	$(GO) build $(GOFLAGS) -o $(CAS_FUSE) ./cmd/cas-fuse
+
+$(SOURCE_PUSH):
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o $(SOURCE_PUSH) ./cmd/source-push
 
 # Unit tests: pre-recorded File API fixtures, no cmake required.
 test:
@@ -400,3 +423,60 @@ check-tools:
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# source-push driver targets (PR #59).
+#
+# The production path is `bst source push` invoked against a
+# BuildStream project's source-caches:-configured CAS endpoint.
+# Run from inside the FDSDK checkout:
+#
+#   bst source push --deps all <element>.bst
+#
+# That requires BuildStream installed on the host, which has a
+# heavy native dep chain (ostree, gobject-introspection, ...).
+# For test + dev workflows where bst isn't available but a
+# populated --source-cache directory is, the in-tree
+# cmd/source-push graph subcommand achieves the same effect by
+# packing each <cache>/<key>/ tree directly into REAPI CAS:
+#
+#   make source-push-graph SOURCE_CACHE=/tmp/sc
+#
+# CI uses this path against a stood-up buildbarn so the
+# end-to-end "populate CAS from local trees, mount with cas-fuse,
+# read through" round-trip is exercised on every change.
+
+CAS_ADDR ?= 127.0.0.1:8980
+
+# source-push-graph: walk a populated source-cache dir and push
+# each tree to CAS. Prints a JSON manifest {key → digest} on
+# stdout. Used by the e2e-source-push CI job and by devs who
+# already have a --source-cache from `make e2e-orchestrate-...`.
+source-push-graph: source-push
+	@if [ -z "$(SOURCE_CACHE)" ]; then \
+		echo "error: SOURCE_CACHE=<path> is required"; exit 2; \
+	fi
+	$(SOURCE_PUSH) graph --cas=$(CAS_ADDR) --source-cache=$(SOURCE_CACHE)
+
+# fdsdk-source-push: thin convenience wrapper for the FDSDK
+# end-to-end workflow. Today it just delegates to
+# source-push-graph (FDSDK_SOURCE_CACHE → SOURCE_CACHE), but
+# carries the FDSDK semantics — when we add bst integration
+# this is where it lands.
+fdsdk-source-push:
+	@if [ -z "$(FDSDK_SOURCE_CACHE)" ]; then \
+		echo "error: FDSDK_SOURCE_CACHE=<path> is required"; \
+		echo "  (the source-cache directory --source-cache populated for FDSDK)"; \
+		exit 2; \
+	fi
+	$(MAKE) source-push-graph SOURCE_CACHE=$(FDSDK_SOURCE_CACHE)
+
+# e2e-source-push: stand up buildbarn, pack a tiny synthetic
+# source-cache, push it via cmd/source-push, verify CAS contents
+# round-trip through casfuse.NewTree. The fast cousin of the
+# full project-B e2e (PR #60) — runs in seconds and gates the
+# wire-format end of the pipeline.
+e2e-source-push: source-push buildbarn-up
+	@$(GO) test -tags=buildbarn -run TestE2E_SourcePush ./internal/casfuse/...; \
+	  ec=$$?; \
+	  $(MAKE) buildbarn-down; \
+	  exit $$ec

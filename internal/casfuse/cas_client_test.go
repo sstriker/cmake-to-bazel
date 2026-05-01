@@ -62,6 +62,17 @@ type fakeCAS struct {
 	blobs map[string][]byte // hash → bytes
 }
 
+func (f *fakeCAS) BatchUpdateBlobs(_ context.Context, req *repb.BatchUpdateBlobsRequest) (*repb.BatchUpdateBlobsResponse, error) {
+	out := &repb.BatchUpdateBlobsResponse{}
+	for _, r := range req.Requests {
+		f.blobs[r.Digest.Hash] = append([]byte(nil), r.Data...)
+		out.Responses = append(out.Responses, &repb.BatchUpdateBlobsResponse_Response{
+			Digest: r.Digest,
+		})
+	}
+	return out, nil
+}
+
 func (f *fakeCAS) BatchReadBlobs(_ context.Context, req *repb.BatchReadBlobsRequest) (*repb.BatchReadBlobsResponse, error) {
 	out := &repb.BatchReadBlobsResponse{}
 	for _, d := range req.Digests {
@@ -181,6 +192,25 @@ func TestCASClient_ReadBlob(t *testing.T) {
 	defer teardown()
 
 	got, err := client.ReadBlob(context.Background(), Digest{Hash: "filehash", Size: int64(len(body))})
+	if err != nil {
+		t.Fatalf("ReadBlob: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Errorf("got %q, want %q", got, body)
+	}
+}
+
+func TestCASClient_PushBlob(t *testing.T) {
+	client, teardown := startFakeCAS(t, map[string][]byte{})
+	defer teardown()
+
+	body := []byte("freshly pushed")
+	d := Digest{Hash: "newhash", Size: int64(len(body))}
+	if err := client.PushBlob(context.Background(), d, body); err != nil {
+		t.Fatalf("PushBlob: %v", err)
+	}
+	// Verify by reading it back.
+	got, err := client.ReadBlob(context.Background(), d)
 	if err != nil {
 		t.Fatalf("ReadBlob: %v", err)
 	}

@@ -222,5 +222,12 @@ jobs:
       - name: Run M3b Execute keystone against real Buildbarn workers
         run: make e2e-buildbarn-execute 2>&1 | tee -a /tmp/cijob.log
 
+      - name: Run source-push roundtrip against real bb-storage (PR #59)
+        # Pack a synthetic source tree, push every blob into CAS via
+        # cmd/source-push's wire format, then read it back through
+        # casfuse.Tree. Verifies BatchUpdateBlobs / BatchReadBlobs
+        # / ByteStream.Read interop with bb-storage end-to-end.
+        run: make e2e-source-push 2>&1 | tee -a /tmp/cijob.log
+
       - uses: ./.github/actions/post-failure-tail
         if: failure()
