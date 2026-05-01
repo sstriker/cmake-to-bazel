@@ -201,7 +201,7 @@ rather than a write-a gap.
 
 Full pipeline-handler lowering done across PRs #45 / #49 / #51 / #52 / #53 / #54. target_arch lowers to `select()` over `@platforms//cpu:*`; project.conf-declared options lower to `config_setting` per `(option, value)`; cross-product (target_arch × option) emits per-tuple `config_setting`s combining `constraint_values` + `flag_values`. Static-fold survives for host facts (host_arch / build_arch).
 
-Diagnosed-via-probe but unfixed: when multiple deeply-nested `(@):` includes each declare their own `variables: (?):` block, the YAML composer's parent-wins merge drops all but one. FDSDK's bootstrap/base-sdk/perl.bst hits this — its flags.yml-derived `bootstrap_build_arch` branches get overridden by a higher-layer (?):). Fix is in the composer's `mergeMappings`: detect both-mapping-have-`(?):` and concatenate the branch lists rather than parent-wins. Separate follow-up.
+Diagnosed-via-probe and **fixed**: when multiple deeply-nested `(@):` includes each declared their own `variables: (?):` block, the YAML composer's parent-wins merge dropped all but one — FDSDK's bootstrap/base-sdk/perl.bst hit this with its flags.yml-derived `bootstrap_build_arch` branches getting overridden by a higher-layer `(?):`. Composer's `mergeMappings` now detects both-mapping-have-`(?)` (key without trailing colon — that's the YAML separator) sequence values and concatenates with src (included) first, dst (parent) last so per-branch last-match-wins preserves "your local (?): overrides the included one" while letting included branches contribute when the parent's don't apply.
 
 ### 9-original. `(?):` conditional directive (81 elements) — historical
 

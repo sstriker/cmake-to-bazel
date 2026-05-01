@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestCompose_SingleInclude covers the basic case: a YAML file
@@ -284,5 +286,134 @@ func TestCompose_ScalarIncludeAccepted(t *testing.T) {
 	}
 	if got["k"] != "v" {
 		t.Errorf("scalar (@): didn't merge include; got %v", got)
+	}
+}
+
+// TestCompose_ConditionalBlocksConcatenate covers the FDSDK
+// bootstrap/base-sdk/perl.bst shape: an included file declares
+// variables: (?): branches; the parent file declares its own
+// variables: (?): block. With the original parent-wins-on-
+// list-values behaviour, the included branches got dropped
+// silently, breaking arch-conditional variable resolution
+// downstream (bootstrap_build_arch undefined etc.).
+//
+// Fix concatenates with src (included) first, dst (parent)
+// last — last-match-wins per branch evaluation preserves
+// "your local (?): overrides the included one" while still
+// letting included branches contribute when the parent's
+// branches don't apply.
+func TestCompose_ConditionalBlocksConcatenate(t *testing.T) {
+	tmp := t.TempDir()
+	included := `variables:
+  (?):
+  - bootstrap_build_arch == "x86_64":
+      build_arch_flags: "-msse4.2"
+  - bootstrap_build_arch == "aarch64":
+      build_arch_flags: "-march=armv8-a"
+`
+	if err := os.WriteFile(filepath.Join(tmp, "flags.yml"), []byte(included), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parent := `(@): flags.yml
+variables:
+  (?):
+  - target_arch == "ppc64le":
+      build_arch_flags: "-mvsx"
+`
+	parentPath := filepath.Join(tmp, "perl.bst")
+	if err := os.WriteFile(parentPath, []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := loadAndComposeYAML(parentPath, tmp, map[string]bool{})
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	root := unwrapDocument(doc)
+	if root.Kind != yaml.MappingNode {
+		t.Fatalf("expected root mapping; got kind %v", root.Kind)
+	}
+
+	// Locate variables: (?): inside the composed tree and verify
+	// it carries all THREE branches (two from include + one from
+	// parent) — pre-fix only the parent's one survived.
+	var vars *yaml.Node
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "variables" {
+			vars = root.Content[i+1]
+			break
+		}
+	}
+	if vars == nil {
+		t.Fatal("composed tree has no variables: key")
+	}
+	var conds *yaml.Node
+	for i := 0; i < len(vars.Content); i += 2 {
+		if vars.Content[i].Value == "(?)" {
+			conds = vars.Content[i+1]
+			break
+		}
+	}
+	if conds == nil {
+		t.Fatal("variables: (?): not found in composed tree")
+	}
+	if conds.Kind != yaml.SequenceNode {
+		t.Fatalf("(?): should be a sequence; got kind %v", conds.Kind)
+	}
+	if len(conds.Content) != 3 {
+		t.Errorf("expected 3 branches (2 from include + 1 from parent); got %d", len(conds.Content))
+	}
+
+	// Assert order: src (include) first, then parent. The first
+	// two branches are the includes' x86_64 + aarch64; the last
+	// is the parent's ppc64le.
+	wantExpressions := []string{
+		`bootstrap_build_arch == "x86_64"`,
+		`bootstrap_build_arch == "aarch64"`,
+		`target_arch == "ppc64le"`,
+	}
+	for i, want := range wantExpressions {
+		branch := conds.Content[i]
+		if branch.Kind != yaml.MappingNode || len(branch.Content) < 2 {
+			t.Errorf("branch %d malformed: %+v", i, branch)
+			continue
+		}
+		if branch.Content[0].Value != want {
+			t.Errorf("branch %d expression: got %q, want %q", i, branch.Content[0].Value, want)
+		}
+	}
+}
+
+// TestCompose_NoConditionalBlocksUnchanged is a regression
+// guard: when neither included nor parent has a (?): block, the
+// fix path doesn't fire and nothing changes.
+func TestCompose_NoConditionalBlocksUnchanged(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "inc.yml"),
+		[]byte("variables:\n  a: from-include\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(tmp, "p.bst")
+	if err := os.WriteFile(parentPath,
+		[]byte("(@): inc.yml\nvariables:\n  b: from-parent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := loadAndComposeYAML(parentPath, tmp, map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := unwrapDocument(doc)
+	var got map[string]string
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "variables" {
+			vars := root.Content[i+1]
+			got = map[string]string{}
+			for j := 0; j < len(vars.Content); j += 2 {
+				got[vars.Content[j].Value] = vars.Content[j+1].Value
+			}
+		}
+	}
+	if got["a"] != "from-include" || got["b"] != "from-parent" {
+		t.Errorf("non-(?):  composition regressed: %v", got)
 	}
 }
