@@ -218,3 +218,45 @@ func TestApplyReadPathsPatterns_CMakeListsAlwaysReal(t *testing.T) {
 		t.Errorf("expected both CMakeLists.txt files real; got %v", real)
 	}
 }
+
+func TestComposeReadPathsPatterns_Layers(t *testing.T) {
+	defaults := &readPathsPatterns{Rules: []patternRule{
+		{Include: true, Pattern: "**/CMakeLists.txt"},
+		{Include: true, Pattern: "cmake/*.cmake"},
+	}}
+	overrides := &readPathsPatterns{Rules: []patternRule{
+		{Include: true, Pattern: "extra/*.txt"},
+		{Include: false, Pattern: "cmake/internal/*"},
+	}}
+	got := composeReadPathsPatterns(defaults, overrides)
+	if got == nil || len(got.Rules) != 4 {
+		t.Fatalf("composed rules: got %+v, want 4 rules", got)
+	}
+	// Order: defaults first, overrides last (so per-element
+	// rules can refine — the include-followed-by-exclude pattern
+	// for narrowing internal files relies on this ordering).
+	wantPatterns := []string{
+		"**/CMakeLists.txt",
+		"cmake/*.cmake",
+		"extra/*.txt",
+		"cmake/internal/*",
+	}
+	for i, want := range wantPatterns {
+		if got.Rules[i].Pattern != want {
+			t.Errorf("rule %d: got %q, want %q", i, got.Rules[i].Pattern, want)
+		}
+	}
+}
+
+func TestComposeReadPathsPatterns_NilCases(t *testing.T) {
+	if composeReadPathsPatterns(nil, nil) != nil {
+		t.Errorf("nil + nil should be nil (default no-narrowing)")
+	}
+	a := &readPathsPatterns{Rules: []patternRule{{Include: true, Pattern: "x"}}}
+	if composeReadPathsPatterns(nil, a) != a {
+		t.Errorf("nil + a should pass through a")
+	}
+	if composeReadPathsPatterns(a, nil) != a {
+		t.Errorf("a + nil should pass through a")
+	}
+}

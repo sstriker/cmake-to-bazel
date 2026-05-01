@@ -54,9 +54,10 @@ type pipelineHandler struct {
 	defaults    pipelineDefaults
 }
 
-func (h pipelineHandler) Kind() string           { return h.kindName }
-func (h pipelineHandler) NeedsSources() bool     { return true }
-func (h pipelineHandler) HasProjectABuild() bool { return true }
+func (h pipelineHandler) Kind() string                                 { return h.kindName }
+func (h pipelineHandler) NeedsSources() bool                           { return true }
+func (h pipelineHandler) HasProjectABuild() bool                       { return true }
+func (h pipelineHandler) DefaultReadPathsPatterns() *readPathsPatterns { return nil }
 
 // pipelineCfg is the .bst `config:` block shape every pipeline-kind
 // element shares. Pointer-to-slice so the renderer can distinguish

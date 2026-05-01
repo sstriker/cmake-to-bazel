@@ -21,6 +21,24 @@ func (cmakeHandler) Kind() string           { return "cmake" }
 func (cmakeHandler) NeedsSources() bool     { return true }
 func (cmakeHandler) HasProjectABuild() bool { return true }
 
+// DefaultReadPathsPatterns returns the cmake-converter default
+// shadow-tree narrowing rules. Per-element <element>.read-paths.txt
+// rules layer on top.
+//
+// Today: empty (no defaults). The patterns mechanism is in place
+// but the cmake defaults aren't tuned yet — empirical narrowing
+// data from the FDSDK reality-check probe will inform what's
+// safe to default-include. Until that lands, every cmake element
+// without an explicit read-paths.txt stages everything as real
+// (the conservative pre-narrowing behaviour); per-element files
+// remain the only narrowing path.
+//
+// Pinning the converter version pins these defaults, so cache-
+// key stability follows the converter release contract.
+func (cmakeHandler) DefaultReadPathsPatterns() *readPathsPatterns {
+	return nil
+}
+
 func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 	// FUSE-sources mode (--use-fuse-sources): skip on-disk staging
 	// entirely; the per-element BUILD references @src_<key>//:tree
@@ -161,8 +179,33 @@ func partitionSources(elem *element) error {
 	}
 	sort.Strings(universe)
 
-	elem.RealPaths, elem.ZeroPaths = applyReadPathsPatterns(elem.Patterns, universe)
+	// Compose: converter defaults first, per-element override
+	// rules concatenated after. applyReadPathsPatterns evaluates
+	// rules left-to-right so defaults set the conservative
+	// baseline and per-element entries refine.
+	patterns := composeReadPathsPatterns(cmakeHandler{}.DefaultReadPathsPatterns(), elem.Patterns)
+	elem.RealPaths, elem.ZeroPaths = applyReadPathsPatterns(patterns, universe)
 	return nil
+}
+
+// composeReadPathsPatterns layers a per-element override file on
+// top of converter defaults. nil + nil → nil (default-no-narrow);
+// nil + b → b; a + nil → a; a + b → concatenated rules with
+// defaults first.
+func composeReadPathsPatterns(defaults, overrides *readPathsPatterns) *readPathsPatterns {
+	if defaults == nil && overrides == nil {
+		return nil
+	}
+	if defaults == nil {
+		return overrides
+	}
+	if overrides == nil {
+		return defaults
+	}
+	out := &readPathsPatterns{}
+	out.Rules = append(out.Rules, defaults.Rules...)
+	out.Rules = append(out.Rules, overrides.Rules...)
+	return out
 }
 
 func cmakeElementBuild(elem *element) string {

@@ -29,9 +29,10 @@ func init() { registerHandler(filterHandler{}) }
 // public-data parser that reads parent domain definitions.
 type filterHandler struct{}
 
-func (filterHandler) Kind() string           { return "filter" }
-func (filterHandler) NeedsSources() bool     { return false }
-func (filterHandler) HasProjectABuild() bool { return false }
+func (filterHandler) Kind() string                                 { return "filter" }
+func (filterHandler) NeedsSources() bool                           { return false }
+func (filterHandler) HasProjectABuild() bool                       { return false }
+func (filterHandler) DefaultReadPathsPatterns() *readPathsPatterns { return nil }
 
 // filterCfg is the .bst `config:` shape kind:filter elements share.
 // Pointer-to-slice for include / exclude lets the renderer
