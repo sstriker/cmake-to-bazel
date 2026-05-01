@@ -31,6 +31,20 @@ func TestParseArchExpression(t *testing.T) {
 		{"host-arch-or-chain", `host_arch == "x86_64" or host_arch == "i686"`, "host_arch", []string{"x86_64", "i686"}},
 		// Mixed-LHS or-chain: not yet supported; returns ("", nil).
 		{"mixed-lhs", `target_arch == "x86_64" or bootstrap_build_arch == "aarch64"`, "", nil},
+		// PR — richer expressions: parens + and-chains.
+		{"parens-around-equals", `(target_arch == "x86_64")`, "target_arch", []string{"x86_64"}},
+		{"parens-around-or", `(target_arch == "x86_64" or target_arch == "aarch64")`, "target_arch", []string{"x86_64", "aarch64"}},
+		// and-chain over same LHS — intersection. The double-!=
+		// negation chain is the dominant FDSDK shape: arches
+		// excluded by both.
+		{"and-double-negate", `target_arch != "x86_64" and target_arch != "i686"`, "target_arch",
+			[]string{"aarch64", "ppc64le", "riscv64", "loongarch64"}},
+		// in-tuple intersected with a single == — should narrow to the singleton.
+		{"and-narrow-to-singleton", `target_arch in ("x86_64", "aarch64") and target_arch == "x86_64"`, "target_arch", []string{"x86_64"}},
+		// Mixed-LHS and-chain: not yet supported; returns ("", nil).
+		{"mixed-lhs-and", `target_arch == "x86_64" and bootstrap_build_arch == "aarch64"`, "", nil},
+		// Empty intersection — well-defined: matches no arches.
+		{"and-empty-intersection", `target_arch == "x86_64" and target_arch == "aarch64"`, "target_arch", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

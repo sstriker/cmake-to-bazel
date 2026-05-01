@@ -344,9 +344,15 @@ Other follow-ups (none on the critical path for `write-a render`):
   dominant FDSDK pattern). Per-arch `config:` blocks would need
   an analogous extractor on `bstFile.Config`. Lands when an
   FDSDK fixture forces it.
-- **richer `(?):` expression syntax** — `host_arch` /
-  `build_arch` references, `and`-combinators, parentheses.
-  Branches with unrecognized expressions are silently skipped
-  today. Surfaces empirically as the
-  `bootstrap_build_arch`-referenced-but-not-defined finding
-  above.
+- **richer `(?):` expression syntax** — partial: `host_arch` /
+  `build_arch` / `bootstrap_build_arch` references already
+  worked (the parser is variable-agnostic for `==` / `in` / `or`-
+  chains; only `!=` is target_arch-only because the closed-set
+  complement is well-defined there). Now adds outer parens
+  (single layer) and `and`-combinators over the same LHS
+  variable (the dominant FDSDK shape: negation chains
+  `var != "X" and var != "Y"` interpret as set intersection of
+  the per-conjunct complements). Mixed-LHS `and`-chains require
+  multi-dimensional constraint dispatch and still return
+  ("", nil) — silently skipped — pending the dispatch-model
+  expansion.
