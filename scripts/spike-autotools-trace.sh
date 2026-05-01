@@ -1,25 +1,28 @@
 #!/bin/sh
 # spike-autotools-trace.sh — round-trip the B→A trace-driven
-# autotools-to-Bazel conversion against the autotools-greet
-# fixture.
+# autotools-to-Bazel conversion against two fixtures:
 #
-# Steps:
-#   1. Build cmd/convert-element-autotools.
-#   2. Stage a writable copy of the fixture's source tree.
-#   3. Run ./configure + make under strace, capturing every
-#      execve to a text-format trace file.
-#   4. Run convert-element-autotools against the trace; emit
-#      BUILD.bazel.out.
-#   5. Assert the output declares cc_binary(name="greet",
-#      srcs=["greet.c"], copts=["-O2"]) — the native shape the
-#      same source would produce if it were a kind:cmake
-#      element with `add_executable(greet greet.c)`.
+#   1. autotools-greet — single compile-and-link invocation
+#      (`cc -O2 -o greet greet.c`). Validates the basic
+#      cc_binary recovery path.
+#   2. autotools-libapp — Makefile that compiles foo.c and
+#      bar.c into .o files, archives them into libfoo.a, and
+#      links myapp against -lfoo. Validates cross-event
+#      correlation: archive → cc_library, link's -l<name> →
+#      :<name> dep on the archived target.
+#
+# Each fixture stage:
+#   - Stage a writable copy of the fixture's source tree.
+#   - Run ./configure + make under `strace -f -e trace=execve`.
+#   - Run convert-element-autotools against the trace; emit
+#     BUILD.bazel.out.
+#   - Assert the rendered output has the expected target shape.
 #
 # This is the spike-validation gate. It does NOT yet wire the
-# converter into write-a's kind:autotools handler — that's
-# the next slice. The spike proves the trace shape + parser
-# are sufficient to recover a sensible Bazel target before we
-# spend effort on the action-cache + write-a integration.
+# converter into write-a's kind:autotools handler — that's the
+# next slice. The spike proves the trace shape + parser are
+# sufficient to recover sensible Bazel targets before we spend
+# effort on the action-cache + write-a integration.
 
 set -eu
 
@@ -32,35 +35,75 @@ trap 'rm -rf "$work_dir"' EXIT
 bin="$work_dir/convert-element-autotools"
 CGO_ENABLED=0 go build -o "$bin" ./cmd/convert-element-autotools
 
-src="$work_dir/src"
-cp -r testdata/meta-project/autotools-greet/sources "$src"
+# run_fixture stages, traces, converts, asserts.
+#
+#   $1 — fixture name (testdata/meta-project/<name>/sources/)
+#   $2 — assertion grep file (lines = required substrings)
+run_fixture() {
+    name="$1"
+    asserts_file="$2"
 
-trace="$work_dir/trace.log"
-build_out="$work_dir/BUILD.bazel.out"
-
-(cd "$src" && \
-    strace -f -e trace=execve -s 4096 -o "$trace" \
-        -- sh -c './configure --prefix=/usr >/dev/null 2>&1 && make >/dev/null 2>&1') \
-    || {
-    echo "spike-autotools-trace: build failed under strace" >&2
-    head -100 "$trace" >&2
-    exit 1
-}
-
-"$bin" --trace "$trace" --out-build "$build_out"
-
-# Asserts on the rendered BUILD.
-for marker in \
-    'cc_binary(' \
-    'name = "greet"' \
-    'srcs = ["greet.c"]' \
-    'copts = ["-O2"]'; do
-    if ! grep -qF "$marker" "$build_out"; then
-        echo "spike-autotools-trace: rendered BUILD.bazel.out missing marker: $marker" >&2
-        cat "$build_out" >&2
+    fixture_root="testdata/meta-project/$name/sources"
+    if [ ! -d "$fixture_root" ]; then
+        echo "spike-autotools-trace: missing fixture $fixture_root" >&2
         exit 1
     fi
-done
-echo "spike-autotools-trace: ok"
-echo "--- rendered BUILD.bazel.out ---"
-cat "$build_out"
+
+    src="$work_dir/$name-src"
+    cp -r "$fixture_root" "$src"
+    chmod -R u+w "$src"
+
+    trace="$work_dir/$name-trace.log"
+    build_out="$work_dir/$name-BUILD.bazel.out"
+
+    (cd "$src" && \
+        strace -f -e trace=execve -s 4096 -o "$trace" \
+            -- sh -c './configure --prefix=/usr >/dev/null 2>&1 && make >/dev/null 2>&1') \
+        || {
+        echo "spike-autotools-trace[$name]: build failed under strace" >&2
+        head -100 "$trace" >&2
+        exit 1
+    }
+
+    "$bin" --trace "$trace" --out-build "$build_out"
+
+    while IFS= read -r marker; do
+        [ -z "$marker" ] && continue
+        if ! grep -qF "$marker" "$build_out"; then
+            echo "spike-autotools-trace[$name]: rendered BUILD.bazel.out missing marker: $marker" >&2
+            cat "$build_out" >&2
+            exit 1
+        fi
+    done < "$asserts_file"
+
+    echo "spike-autotools-trace[$name]: ok"
+    echo "--- $name BUILD.bazel.out ---"
+    cat "$build_out"
+}
+
+# autotools-greet asserts: single cc_binary, no cc_library
+greet_asserts="$work_dir/greet-asserts.txt"
+cat > "$greet_asserts" <<'EOF'
+cc_binary(
+name = "greet"
+srcs = ["greet.c"]
+copts = ["-O2"]
+EOF
+run_fixture autotools-greet "$greet_asserts"
+
+# autotools-libapp asserts: cc_library {name=foo} + cc_binary
+# {name=myapp, deps=[":foo"]}, both deriving srcs from the
+# correlated compile events.
+libapp_asserts="$work_dir/libapp-asserts.txt"
+cat > "$libapp_asserts" <<'EOF'
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+cc_library(
+name = "foo"
+srcs = ["bar.c", "foo.c"]
+linkstatic = True
+cc_binary(
+name = "myapp"
+srcs = ["myapp.c"]
+deps = [":foo"]
+EOF
+run_fixture autotools-libapp "$libapp_asserts"

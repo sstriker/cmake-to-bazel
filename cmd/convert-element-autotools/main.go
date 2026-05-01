@@ -1,34 +1,32 @@
 // convert-element-autotools is the spike implementation of the
-// B→A trace-driven autotools-to-Bazel converter described in the
-// design discussion. Round 1 of building a kind:autotools element
-// in project B runs the build under a process tracer; the trace
-// gets registered (CAS-keyed by srckey) and read back by project
-// A's render in round 2. With the trace in hand, the autotools
-// element converts to native cc_library / cc_binary targets just
-// like cmake elements do, instead of the opaque install_tree.tar
-// genrule.
+// B→A trace-driven autotools-to-Bazel converter described in
+// docs/trace-driven-autotools.md. Round 1 of building a
+// kind:autotools element in project B runs the build under a
+// process tracer; the trace gets registered (CAS-keyed by
+// srckey) and read back by project A's render in round 2.
+// With the trace in hand, the autotools element converts to
+// native cc_library / cc_binary targets instead of the opaque
+// install_tree.tar genrule.
 //
-// Spike scope (intentionally narrow to validate the shape):
+// Spike scope:
 //   - Input: a strace text-format trace file (see --trace).
-//   - Trace event filter: top-level compiler driver execve calls
-//     (cc / gcc / g++ / clang / c++). gcc-internal sub-invocations
-//     (cc1 / as / collect2 / ld) are noise the driver re-emits
-//     in a portable form; skip them.
-//   - Conversion: single-step compile-and-link invocations with
-//     both sources and a `-o <output>` flag map to one cc_binary.
-//     Other shapes (compile-only `-c` to a .o, link-from-objects,
-//     archive via `ar`, install-only commands, …) are deferred —
-//     they need cross-event correlation that's out of scope for
-//     this spike.
-//   - Output: BUILD.bazel.out; just one cc_binary rule per
-//     compile-and-link command, named by the `-o` argument's
-//     basename.
+//   - Trace event filter: top-level compiler-driver execve calls
+//     (cc / gcc / g++ / clang / c++) and `ar` archive calls.
+//     gcc-internal cc1 / as / collect2 / ld sub-invocations are
+//     filtered out — they're a portable re-emission of the
+//     driver call.
+//   - Cross-event correlation: a compile-only `cc -c -o x.o x.c`
+//     event paired with an archive `ar rcs libfoo.a x.o y.o`
+//     pairs the .o → .c map back to source files for the
+//     archive's cc_library{srcs=[...]}. Link events that
+//     consume the same archive resolve `-lfoo` → `:foo`.
+//   - Output: BUILD.bazel.out with one cc_library per recovered
+//     archive plus one cc_binary per recovered link.
 //
-// Once this end-to-end shape is validated against the
-// autotools-greet fixture, follow-up work expands the converter
-// to handle compile-link-archive correlation, cross-element dep
-// edges, and the registry-keyed CAS lookup write-a needs to
-// gate the coarse-vs-native branch.
+// Cross-element dep resolution (link command's `-l<lib>`
+// referencing system / out-of-tree libraries) is the next slice
+// — it needs the imports manifest, mirroring the cmake STATIC
+// IMPORTED dep recovery path.
 package main
 
 import (
@@ -58,30 +56,10 @@ func main() {
 	}
 	defer traceFile.Close()
 
-	var binaries []ccBinary
-	scanner := bufio.NewScanner(traceFile)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // strace lines can be long
-	for scanner.Scan() {
-		line := scanner.Text()
-		argv, ok := parseExecveLine(line)
-		if !ok {
-			continue
-		}
-		if !isUserCompilerDriver(argv) {
-			continue
-		}
-		bin, ok := classifyCompileLink(argv)
-		if !ok {
-			continue
-		}
-		binaries = append(binaries, bin)
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "convert-element-autotools: scan trace: %v\n", err)
-		os.Exit(1)
-	}
+	events := parseTrace(traceFile)
+	graph := correlate(events)
+	out := emitBuild(graph)
 
-	out := emitBuild(binaries)
 	if err := os.MkdirAll(filepath.Dir(*outBuild), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "convert-element-autotools: mkdir: %v\n", err)
 		os.Exit(1)
@@ -92,32 +70,454 @@ func main() {
 	}
 }
 
-// ccBinary captures the spike-shape native target derived from
-// a compile-and-link invocation. Populated by classifyCompileLink
-// and emitted by emitBuild.
-type ccBinary struct {
-	Name  string   // basename of -o argument
-	Srcs  []string // positional source-file args (.c/.cc/.cpp/.cxx)
-	Copts []string // every other flag, sorted, deduped
+// EventKind classifies a trace event by what it produces.
+//
+//   - EventCompile: `cc -c ... -o X.o Y.c` — one source → one
+//     object. Copts on the event are the remaining argv flags.
+//   - EventLink: `cc ... -o BIN A.c|A.o ... [-lLIB]...` — produces
+//     a binary or shared object. May mix .c and .o inputs.
+//   - EventArchive: `ar rcs libNAME.a A.o B.o ...` — produces a
+//     static library from object files.
+type EventKind int
+
+const (
+	EventCompile EventKind = iota
+	EventLink
+	EventArchive
+)
+
+// Event is the typed trace event we extract from a single
+// compiler-driver / archiver execve call. Source paths are
+// preserved verbatim from argv; the correlation pass normalizes
+// to basenames where matching by basename is safer than matching
+// by absolute path (which is build-dir-dependent).
+type Event struct {
+	Kind  EventKind
+	Out   string   // output path (-o argument or ar's first positional)
+	Srcs  []string // .c/.cc/.cpp/.cxx/.c++/.C input args (compile + link)
+	Objs  []string // .o input args (link + archive)
+	Libs  []string // -l<name> args (link)
+	Copts []string // remaining flags, sorted + deduped
 }
 
-// parseExecveLine returns the argv from an strace `execve(...)` line
-// when the call succeeded. Lines from `strace -f -e trace=execve`
-// look like:
+// parseTrace walks an strace text-format trace, returning the
+// sequence of recognized Events. Unknown / uninteresting lines
+// are silently skipped.
+func parseTrace(r *os.File) []Event {
+	var out []Event
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		argv, ok := parseExecveLine(line)
+		if !ok {
+			continue
+		}
+		ev, ok := classifyArgv(argv)
+		if !ok {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// classifyArgv routes a single execve argv to the right Event
+// constructor (or returns ok=false for argv we don't lower).
+// Compiler-driver argv → compile or link event. Archiver argv →
+// archive event. gcc-internal sub-invocations (cc1 / as /
+// collect2 / ld) → filtered out (the user-facing driver argv
+// is the canonical record).
+func classifyArgv(argv []string) (Event, bool) {
+	if len(argv) == 0 {
+		return Event{}, false
+	}
+	bin := filepath.Base(argv[0])
+	switch bin {
+	case "cc", "gcc", "g++", "clang", "clang++", "c++", "cxx":
+		return classifyCompilerDriver(argv)
+	case "ar":
+		return classifyArchiver(argv)
+	}
+	return Event{}, false
+}
+
+// classifyCompilerDriver inspects a cc/gcc/g++/clang argv and
+// returns either an EventCompile (compile-only `-c`) or
+// EventLink (compile-and-link / link-only). Returns ok=false
+// for invocations we can't sensibly classify (e.g., `cc
+// --version`).
+func classifyCompilerDriver(argv []string) (Event, bool) {
+	var srcs, objs, libs, copts []string
+	output := ""
+	compileOnly := false
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
+		switch {
+		case a == "-c":
+			compileOnly = true
+		case a == "-o" && i+1 < len(argv):
+			output = argv[i+1]
+			i++
+		case strings.HasPrefix(a, "-o") && len(a) > 2:
+			output = a[2:]
+		case strings.HasPrefix(a, "-l") && len(a) > 2:
+			libs = append(libs, a[2:])
+		case isSourceFile(a):
+			srcs = append(srcs, a)
+		case isObjectFile(a):
+			objs = append(objs, a)
+		default:
+			if strings.HasPrefix(a, "-") {
+				// Drop -L<dir> and -I<dir> flags from copts —
+				// they're build-dir-specific paths and bazel's
+				// includes/deps attributes carry the equivalents
+				// at higher granularity. Other flags pass through.
+				if !strings.HasPrefix(a, "-L") && !strings.HasPrefix(a, "-I") {
+					copts = append(copts, a)
+				}
+			}
+		}
+	}
+	if output == "" {
+		return Event{}, false
+	}
+	if compileOnly {
+		// Compile-only invocations should have exactly one
+		// source and an output ending in .o. Tolerate
+		// non-.o outputs (some Makefiles use unusual
+		// extensions); skip if zero srcs.
+		if len(srcs) == 0 {
+			return Event{}, false
+		}
+		return Event{
+			Kind:  EventCompile,
+			Out:   output,
+			Srcs:  srcs,
+			Copts: stableUnique(copts),
+		}, true
+	}
+	// Not -c: compile-and-link or link-only.
+	if len(srcs)+len(objs) == 0 {
+		return Event{}, false
+	}
+	return Event{
+		Kind:  EventLink,
+		Out:   output,
+		Srcs:  srcs,
+		Objs:  objs,
+		Libs:  stableUnique(libs),
+		Copts: stableUnique(copts),
+	}, true
+}
+
+// classifyArchiver inspects an `ar` argv. Recognizes the
+// canonical autotools `ar rcs lib<NAME>.a <obj> <obj>...`
+// shape; other shapes (extract, list, replace-only) return
+// ok=false. The first positional after the operation flags is
+// the archive output; everything after that is .o inputs.
+func classifyArchiver(argv []string) (Event, bool) {
+	if len(argv) < 3 {
+		return Event{}, false
+	}
+	// ar's first non-binary arg is the operation flag set
+	// (e.g., "rcs", "rv"). Skip it; verify it includes a
+	// create-or-replace operation ('r' or 'q').
+	flags := argv[1]
+	if !strings.ContainsAny(flags, "rq") {
+		return Event{}, false
+	}
+	output := argv[2]
+	if !strings.HasSuffix(output, ".a") {
+		return Event{}, false
+	}
+	var objs []string
+	for _, a := range argv[3:] {
+		if isObjectFile(a) {
+			objs = append(objs, a)
+		}
+	}
+	if len(objs) == 0 {
+		return Event{}, false
+	}
+	return Event{
+		Kind: EventArchive,
+		Out:  output,
+		Objs: objs,
+	}, true
+}
+
+func isSourceFile(p string) bool {
+	switch filepath.Ext(p) {
+	case ".c", ".cc", ".cpp", ".cxx", ".C", ".c++":
+		return true
+	}
+	return false
+}
+
+func isObjectFile(p string) bool {
+	return filepath.Ext(p) == ".o"
+}
+
+// Graph is the correlated view of the trace events: which
+// archives consume which compile-output objects, which links
+// consume which archives. The emitter walks Graph to produce
+// cc_library / cc_binary rules.
+type Graph struct {
+	// objToCompile maps a normalized .o basename to the compile
+	// event that produced it. Last-write-wins when the same
+	// basename is recompiled (rare but possible during a single
+	// make run with re-targeting).
+	objToCompile map[string]Event
+	// libByBaseName maps a stripped library basename
+	// (libfoo.a → "foo") to the archive event that produced it.
+	// Used to resolve link events' -l<name> args to local
+	// cc_library labels.
+	libByBaseName map[string]Event
+	// archives are the recovered archive events in
+	// trace-arrival order; emit walks them deterministically.
+	archives []Event
+	// links are the recovered link events in trace-arrival
+	// order.
+	links []Event
+}
+
+func correlate(events []Event) *Graph {
+	g := &Graph{
+		objToCompile:  map[string]Event{},
+		libByBaseName: map[string]Event{},
+	}
+	for _, ev := range events {
+		switch ev.Kind {
+		case EventCompile:
+			g.objToCompile[filepath.Base(ev.Out)] = ev
+		case EventArchive:
+			g.archives = append(g.archives, ev)
+			g.libByBaseName[stripLibPrefixSuffix(ev.Out)] = ev
+		case EventLink:
+			g.links = append(g.links, ev)
+		}
+	}
+	return g
+}
+
+// stripLibPrefixSuffix turns `lib<name>.a` (or `<dir>/lib<name>.a`)
+// into `<name>` — the form used in `-l<name>` link flags and
+// the natural Bazel rule name for the archive.
+func stripLibPrefixSuffix(p string) string {
+	base := filepath.Base(p)
+	base = strings.TrimSuffix(base, ".a")
+	return strings.TrimPrefix(base, "lib")
+}
+
+// CCRule is the spike's IR target: emitted as either
+// `cc_library` or `cc_binary` based on the producing event.
+type CCRule struct {
+	RuleKind string // "cc_library" or "cc_binary"
+	Name     string
+	Srcs     []string // sorted
+	Copts    []string // sorted, deduped
+	Deps     []string // sorted (in-tree library labels like ":foo")
+}
+
+// emitBuild renders BUILD.bazel.out from the correlated graph.
+// One cc_library per archive (sources from constituent .o
+// compiles), one cc_binary per link (sources from direct .c
+// args + objects' compile sources, deps from `-l<name>` mapped
+// to local archives). Order is stable: libraries first sorted
+// by name, then binaries sorted by name.
+func emitBuild(g *Graph) string {
+	rules := buildRules(g)
+	if len(rules) == 0 {
+		return "# Generated by convert-element-autotools. DO NOT EDIT.\n# (no buildable targets recovered from trace)\n"
+	}
+
+	var b strings.Builder
+	b.WriteString("# Generated by convert-element-autotools. DO NOT EDIT.\n\n")
+
+	loads := neededLoads(rules)
+	if len(loads) > 0 {
+		fmt.Fprintf(&b, `load("@rules_cc//cc:defs.bzl", %s)`, joinQuoted(loads))
+		b.WriteString("\n")
+	}
+
+	for _, r := range rules {
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "%s(\n    name = %q,\n", r.RuleKind, r.Name)
+		fmt.Fprintf(&b, "    srcs = %s,\n", strList(r.Srcs))
+		if len(r.Copts) > 0 {
+			fmt.Fprintf(&b, "    copts = %s,\n", strList(r.Copts))
+		}
+		if len(r.Deps) > 0 {
+			fmt.Fprintf(&b, "    deps = %s,\n", strList(r.Deps))
+		}
+		if r.RuleKind == "cc_library" {
+			b.WriteString("    linkstatic = True,\n")
+		}
+		b.WriteString("    visibility = [\"//visibility:public\"],\n")
+		b.WriteString(")\n")
+	}
+	return b.String()
+}
+
+func buildRules(g *Graph) []CCRule {
+	var libs, bins []CCRule
+	// Archives → cc_library.
+	for _, a := range g.archives {
+		var srcs, copts []string
+		for _, obj := range a.Objs {
+			c, ok := g.objToCompile[filepath.Base(obj)]
+			if !ok {
+				continue
+			}
+			srcs = append(srcs, c.Srcs...)
+			copts = append(copts, c.Copts...)
+		}
+		if len(srcs) == 0 {
+			continue
+		}
+		sort.Strings(srcs)
+		srcs = dedup(srcs)
+		sort.Strings(copts)
+		copts = dedup(copts)
+		libs = append(libs, CCRule{
+			RuleKind: "cc_library",
+			Name:     stripLibPrefixSuffix(a.Out),
+			Srcs:     srcs,
+			Copts:    copts,
+		})
+	}
+	// Links → cc_binary.
+	for _, l := range g.links {
+		var srcs, copts, deps []string
+		// Direct .c args carry their own copts (event-level).
+		srcs = append(srcs, l.Srcs...)
+		copts = append(copts, l.Copts...)
+		// Each .o input expands to its compile event's source +
+		// copts (last-write-wins on duplicate basenames).
+		for _, obj := range l.Objs {
+			c, ok := g.objToCompile[filepath.Base(obj)]
+			if !ok {
+				continue
+			}
+			srcs = append(srcs, c.Srcs...)
+			copts = append(copts, c.Copts...)
+		}
+		// `-l<name>` arg resolves to `:<name>` when the trace
+		// also produced an archive `lib<name>.a`. Unmatched
+		// names are dropped silently for now (a follow-up
+		// adds imports-manifest lookup for cross-element /
+		// system libs, mirroring the cmake STATIC IMPORTED
+		// dep recovery path).
+		for _, lib := range l.Libs {
+			if _, ok := g.libByBaseName[lib]; ok {
+				deps = append(deps, ":"+lib)
+			}
+		}
+		if len(srcs) == 0 {
+			continue
+		}
+		sort.Strings(srcs)
+		srcs = dedup(srcs)
+		sort.Strings(copts)
+		copts = dedup(copts)
+		sort.Strings(deps)
+		deps = dedup(deps)
+		bins = append(bins, CCRule{
+			RuleKind: "cc_binary",
+			Name:     filepath.Base(l.Out),
+			Srcs:     srcs,
+			Copts:    copts,
+			Deps:     deps,
+		})
+	}
+	sort.Slice(libs, func(i, j int) bool { return libs[i].Name < libs[j].Name })
+	sort.Slice(bins, func(i, j int) bool { return bins[i].Name < bins[j].Name })
+	return append(libs, bins...)
+}
+
+// neededLoads returns the rules_cc symbols loaded by the
+// rendered rules — only what's actually used, in stable order.
+func neededLoads(rules []CCRule) []string {
+	seen := map[string]bool{}
+	for _, r := range rules {
+		seen[r.RuleKind] = true
+	}
+	var out []string
+	for _, k := range []string{"cc_binary", "cc_library", "cc_test"} {
+		if seen[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// stableUnique sorts and dedupes a slice of strings.
+func stableUnique(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	cp := append([]string(nil), in...)
+	sort.Strings(cp)
+	return dedup(cp)
+}
+
+func dedup(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := []string{in[0]}
+	for _, s := range in[1:] {
+		if s != out[len(out)-1] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// strList renders a Go []string as a Bazel string list.
+func strList(items []string) string {
+	if len(items) == 0 {
+		return "[]"
+	}
+	parts := make([]string, len(items))
+	for i, s := range items {
+		parts[i] = fmt.Sprintf("%q", s)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// joinQuoted renders a Go []string as a comma-space-separated
+// list of double-quoted strings (used for the rules_cc load
+// statement's symbol list).
+func joinQuoted(items []string) string {
+	parts := make([]string, len(items))
+	for i, s := range items {
+		parts[i] = fmt.Sprintf("%q", s)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// parseExecveLine returns the argv from an strace `execve(...)`
+// line when the call succeeded. Lines from `strace -f -e
+// trace=execve` look like:
 //
 //	1234  execve("/usr/bin/cc", ["cc", "-O2", "-o", "greet", "greet.c"], 0x... /* N vars */) = 0
 //
-// We tolerate the optional PID prefix and reject failed execves
-// (return value != 0) as well as `<unfinished ...>` continuation
-// fragments.
+// We tolerate the optional PID prefix and reject failed
+// execves (return value != 0) as well as `<unfinished ...>`
+// continuation fragments.
 func parseExecveLine(line string) ([]string, bool) {
 	idx := strings.Index(line, "execve(")
 	if idx < 0 {
 		return nil, false
 	}
-	// Trailing `= 0` (or other return code). Bail on failures and
-	// on the unfinished-call resumption fragments strace emits when
-	// other syscalls interleave.
+	// Trailing `= 0` (or other return code). Bail on failures
+	// and on the unfinished-call resumption fragments strace
+	// emits when other syscalls interleave.
+	if len(line) < 12 {
+		return nil, false
+	}
 	tail := line[len(line)-12:]
 	if !strings.Contains(tail, "= 0") {
 		return nil, false
@@ -126,14 +526,11 @@ func parseExecveLine(line string) ([]string, bool) {
 		return nil, false
 	}
 	rest := line[idx+len("execve("):]
-	// First arg is the path string; we don't actually need it
-	// because argv[0] in the array carries the basename. Skip past
-	// the closing `"` and the comma.
 	pathEnd := indexAfterQuoted(rest, 0)
 	if pathEnd < 0 {
 		return nil, false
 	}
-	rest = rest[pathEnd+1:] // skip closing quote
+	rest = rest[pathEnd+1:]
 	rest = strings.TrimLeft(rest, ", ")
 	if !strings.HasPrefix(rest, "[") {
 		return nil, false
@@ -143,14 +540,9 @@ func parseExecveLine(line string) ([]string, bool) {
 	if end < 0 {
 		return nil, false
 	}
-	argvBlock := rest[:end]
-	return parseArgvBlock(argvBlock), true
+	return parseArgvBlock(rest[:end]), true
 }
 
-// indexAfterQuoted returns the index of the closing double-quote
-// of a strace-style quoted string starting at start. strace
-// escapes embedded quotes / backslashes / non-printables;
-// supports the few we encounter in argv.
 func indexAfterQuoted(s string, start int) int {
 	if start >= len(s) || s[start] != '"' {
 		return -1
@@ -169,8 +561,6 @@ func indexAfterQuoted(s string, start int) int {
 	return -1
 }
 
-// indexUnescapedClose returns the index of the first close
-// character at top level (not inside a quoted string).
 func indexUnescapedClose(s string, close byte) int {
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
@@ -187,13 +577,10 @@ func indexUnescapedClose(s string, close byte) int {
 	return -1
 }
 
-// parseArgvBlock splits the inside-the-brackets text of strace's
-// argv into individual unquoted strings.
 func parseArgvBlock(block string) []string {
 	var out []string
 	i := 0
 	for i < len(block) {
-		// skip whitespace + commas
 		for i < len(block) && (block[i] == ' ' || block[i] == ',') {
 			i++
 		}
@@ -207,17 +594,12 @@ func parseArgvBlock(block string) []string {
 		if end < 0 {
 			break
 		}
-		raw := block[i+1 : end]
-		out = append(out, unescapeStraceString(raw))
+		out = append(out, unescapeStraceString(block[i+1:end]))
 		i = end + 1
 	}
 	return out
 }
 
-// unescapeStraceString reverses strace's argv-quoting. Handles
-// the small set of escapes we see in compiler argv (\\, \", \n,
-// \t, \r, octal \NNN). Unknown escapes pass through as the
-// escaped character.
 func unescapeStraceString(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -245,116 +627,4 @@ func unescapeStraceString(s string) string {
 		}
 	}
 	return b.String()
-}
-
-// isUserCompilerDriver reports whether argv is a top-level
-// compiler driver invocation. Filters out gcc-internal cc1 / as
-// / collect2 / ld sub-processes which strace also captures but
-// which we treat as implementation details of the user-facing
-// driver invocation.
-func isUserCompilerDriver(argv []string) bool {
-	if len(argv) == 0 {
-		return false
-	}
-	bin := filepath.Base(argv[0])
-	switch bin {
-	case "cc", "gcc", "g++", "clang", "clang++", "c++", "cxx":
-		return true
-	}
-	return false
-}
-
-// classifyCompileLink walks argv to decide whether it's a
-// single-step compile-and-link invocation we know how to lower
-// to cc_binary. Returns false for compile-only (`-c`) invocations
-// and for invocations missing either srcs or `-o`.
-func classifyCompileLink(argv []string) (ccBinary, bool) {
-	var srcs []string
-	var copts []string
-	output := ""
-	compileOnly := false
-	for i := 1; i < len(argv); i++ {
-		a := argv[i]
-		switch {
-		case a == "-c":
-			compileOnly = true
-		case a == "-o" && i+1 < len(argv):
-			output = argv[i+1]
-			i++
-		case strings.HasPrefix(a, "-o") && len(a) > 2:
-			output = a[2:]
-		case strings.HasSuffix(a, ".c"),
-			strings.HasSuffix(a, ".cc"),
-			strings.HasSuffix(a, ".cpp"),
-			strings.HasSuffix(a, ".cxx"),
-			strings.HasSuffix(a, ".c++"),
-			strings.HasSuffix(a, ".C"):
-			srcs = append(srcs, a)
-		default:
-			if strings.HasPrefix(a, "-") {
-				copts = append(copts, a)
-			}
-		}
-	}
-	if compileOnly || output == "" || len(srcs) == 0 {
-		return ccBinary{}, false
-	}
-	sort.Strings(copts)
-	copts = dedup(copts)
-	sort.Strings(srcs)
-	return ccBinary{
-		Name:  filepath.Base(output),
-		Srcs:  srcs,
-		Copts: copts,
-	}, true
-}
-
-func dedup(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := []string{in[0]}
-	for _, s := range in[1:] {
-		if s != out[len(out)-1] {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// emitBuild renders the spike's BUILD.bazel.out — a header
-// comment plus one cc_binary per recovered compile-and-link
-// invocation. Stable ordering by Name so reruns of the same
-// trace produce byte-identical output.
-func emitBuild(bins []ccBinary) string {
-	if len(bins) == 0 {
-		return "# Generated by convert-element-autotools. DO NOT EDIT.\n# (no compile-and-link invocations recovered from trace)\n"
-	}
-	sort.Slice(bins, func(i, j int) bool { return bins[i].Name < bins[j].Name })
-
-	var b strings.Builder
-	b.WriteString("# Generated by convert-element-autotools. DO NOT EDIT.\n\n")
-	b.WriteString(`load("@rules_cc//cc:defs.bzl", "cc_binary")` + "\n")
-	for _, bin := range bins {
-		b.WriteString("\n")
-		fmt.Fprintf(&b, "cc_binary(\n    name = %q,\n", bin.Name)
-		fmt.Fprintf(&b, "    srcs = %s,\n", strList(bin.Srcs))
-		if len(bin.Copts) > 0 {
-			fmt.Fprintf(&b, "    copts = %s,\n", strList(bin.Copts))
-		}
-		b.WriteString("    visibility = [\"//visibility:public\"],\n")
-		b.WriteString(")\n")
-	}
-	return b.String()
-}
-
-func strList(items []string) string {
-	if len(items) == 0 {
-		return "[]"
-	}
-	parts := make([]string, len(items))
-	for i, s := range items {
-		parts[i] = fmt.Sprintf("%q", s)
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
 }

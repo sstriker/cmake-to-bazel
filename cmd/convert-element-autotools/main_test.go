@@ -53,59 +53,74 @@ func TestParseExecveLine(t *testing.T) {
 	}
 }
 
-// TestClassifyCompileLink covers the spike's cc_binary
-// recognition rules: single-step compile-and-link with both
-// srcs and `-o` becomes a target; compile-only or link-only or
-// missing-output invocations are skipped.
-func TestClassifyCompileLink(t *testing.T) {
+// TestClassifyArgv_Compile / Link / Archive cover the four
+// invocation shapes we recognize. Compile and link branch on
+// `-c`; archive branches on `ar`'s mode-flag arg.
+func TestClassifyArgv(t *testing.T) {
 	cases := []struct {
 		name string
 		argv []string
 		ok   bool
-		want ccBinary
+		want Event
 	}{
 		{
-			"compile and link to greet",
+			"compile-only",
+			[]string{"cc", "-c", "-O2", "-o", "foo.o", "foo.c"},
+			true,
+			Event{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-O2"}},
+		},
+		{
+			"compile-and-link greet-style",
 			[]string{"cc", "-O2", "-o", "greet", "greet.c"},
 			true,
-			ccBinary{Name: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-O2"}},
+			Event{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-O2"}},
 		},
 		{
-			"compile-only -c",
-			[]string{"cc", "-c", "-O2", "x.c", "-o", "x.o"},
-			false, ccBinary{},
-		},
-		{
-			"link-only (no srcs)",
-			[]string{"cc", "-o", "out", "x.o", "y.o"},
-			false, ccBinary{},
-		},
-		{
-			"missing -o",
-			[]string{"cc", "x.c"},
-			false, ccBinary{},
-		},
-		{
-			"clued -ofoo (no space)",
-			[]string{"cc", "-O2", "-ofoo", "foo.c"},
+			"link-only with -l",
+			[]string{"cc", "-O2", "-o", "myapp", "myapp.o", "-L.", "-lfoo"},
 			true,
-			ccBinary{Name: "foo", Srcs: []string{"foo.c"}, Copts: []string{"-O2"}},
+			Event{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-O2"}},
+		},
+		{
+			"archive ar rcs",
+			[]string{"ar", "rcs", "libfoo.a", "foo.o", "bar.o"},
+			true,
+			Event{Kind: EventArchive, Out: "libfoo.a", Objs: []string{"foo.o", "bar.o"}},
+		},
+		{
+			"gcc-internal cc1 (filtered)",
+			[]string{"/usr/libexec/gcc/x86_64-linux-gnu/13/cc1", "-quiet", "x.c"},
+			false, Event{},
+		},
+		{
+			"ar list-mode (filtered: not r/q)",
+			[]string{"ar", "t", "libfoo.a"},
+			false, Event{},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := classifyCompileLink(c.argv)
+			got, ok := classifyArgv(c.argv)
 			if ok != c.ok {
 				t.Fatalf("ok = %v, want %v", ok, c.ok)
 			}
 			if !c.ok {
 				return
 			}
-			if got.Name != c.want.Name {
-				t.Errorf("Name = %q, want %q", got.Name, c.want.Name)
+			if got.Kind != c.want.Kind {
+				t.Errorf("Kind = %d, want %d", got.Kind, c.want.Kind)
+			}
+			if got.Out != c.want.Out {
+				t.Errorf("Out = %q, want %q", got.Out, c.want.Out)
 			}
 			if !reflect.DeepEqual(got.Srcs, c.want.Srcs) {
 				t.Errorf("Srcs = %#v, want %#v", got.Srcs, c.want.Srcs)
+			}
+			if !reflect.DeepEqual(got.Objs, c.want.Objs) {
+				t.Errorf("Objs = %#v, want %#v", got.Objs, c.want.Objs)
+			}
+			if !reflect.DeepEqual(got.Libs, c.want.Libs) {
+				t.Errorf("Libs = %#v, want %#v", got.Libs, c.want.Libs)
 			}
 			if !reflect.DeepEqual(got.Copts, c.want.Copts) {
 				t.Errorf("Copts = %#v, want %#v", got.Copts, c.want.Copts)
@@ -114,51 +129,89 @@ func TestClassifyCompileLink(t *testing.T) {
 	}
 }
 
-// TestIsUserCompilerDriver filters out gcc-internal cc1 / as /
-// collect2 / ld sub-invocations that live alongside the user-
-// facing cc/gcc/clang call in the trace.
-func TestIsUserCompilerDriver(t *testing.T) {
-	cases := []struct {
-		argv []string
-		want bool
-	}{
-		{[]string{"/usr/bin/cc", "-O2"}, true},
-		{[]string{"gcc", "-c", "x.c"}, true},
-		{[]string{"clang++", "x.cpp"}, true},
-		{[]string{"/usr/libexec/gcc/x86_64-linux-gnu/13/cc1", "x.c"}, false},
-		{[]string{"/usr/bin/as", "-o", "x.o", "x.s"}, false},
-		{[]string{"/usr/bin/ld", "x.o"}, false},
-		{[]string{"/usr/libexec/gcc/x86_64-linux-gnu/13/collect2"}, false},
-		{nil, false},
+// TestCorrelate_LibAndApp exercises the full correlation
+// pipeline for an autotools project that produces a static
+// library + a binary linking against it. Three compile events
+// (foo.c → foo.o, bar.c → bar.o, myapp.c → myapp.o), one
+// archive (libfoo.a from foo.o + bar.o), one link (myapp from
+// myapp.o + -lfoo).
+func TestCorrelate_LibAndApp(t *testing.T) {
+	events := []Event{
+		{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-O2"}},
+		{Kind: EventCompile, Out: "bar.o", Srcs: []string{"bar.c"}, Copts: []string{"-O2"}},
+		{Kind: EventCompile, Out: "myapp.o", Srcs: []string{"myapp.c"}, Copts: []string{"-O2"}},
+		{Kind: EventArchive, Out: "libfoo.a", Objs: []string{"foo.o", "bar.o"}},
+		{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-O2"}},
 	}
-	for _, c := range cases {
-		t.Run(strings.Join(c.argv, " "), func(t *testing.T) {
-			if got := isUserCompilerDriver(c.argv); got != c.want {
-				t.Errorf("got %v, want %v", got, c.want)
-			}
-		})
-	}
-}
+	got := emitBuild(correlate(events))
 
-// TestEmitBuild_E2E walks the spike's full pipeline against an
-// inline autotools-greet-shaped strace fragment, confirming the
-// rendered BUILD has the cc_binary shape.
-func TestEmitBuild_E2E(t *testing.T) {
-	bins := []ccBinary{{
-		Name:  "greet",
-		Srcs:  []string{"greet.c"},
-		Copts: []string{"-O2"},
-	}}
-	got := emitBuild(bins)
 	for _, marker := range []string{
-		`load("@rules_cc//cc:defs.bzl", "cc_binary")`,
-		`name = "greet"`,
-		`srcs = ["greet.c"]`,
+		`load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")`,
+		`cc_library(`,
+		`name = "foo"`,
+		`srcs = ["bar.c", "foo.c"]`,
 		`copts = ["-O2"]`,
-		`visibility = ["//visibility:public"]`,
+		`linkstatic = True`,
+		`cc_binary(`,
+		`name = "myapp"`,
+		`srcs = ["myapp.c"]`,
+		`deps = [":foo"]`,
 	} {
 		if !strings.Contains(got, marker) {
 			t.Errorf("missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// Library should come before binary (sort: cc_library < cc_binary
+	// by alphabetical name happens to also satisfy "libs first").
+	libIdx := strings.Index(got, `cc_library(`)
+	binIdx := strings.Index(got, `cc_binary(`)
+	if libIdx < 0 || binIdx < 0 || libIdx > binIdx {
+		t.Errorf("expected cc_library before cc_binary; lib=%d bin=%d", libIdx, binIdx)
+	}
+}
+
+// TestCorrelate_GreetStandalone covers the original spike's
+// shape: a single compile-and-link invocation without any
+// archives. Falls through to the EventLink path with srcs
+// directly listed.
+func TestCorrelate_GreetStandalone(t *testing.T) {
+	events := []Event{
+		{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-O2"}},
+	}
+	got := emitBuild(correlate(events))
+	for _, marker := range []string{
+		`load("@rules_cc//cc:defs.bzl", "cc_binary")`,
+		`cc_binary(`,
+		`name = "greet"`,
+		`srcs = ["greet.c"]`,
+		`copts = ["-O2"]`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// No cc_library involved → no linkstatic.
+	if strings.Contains(got, `linkstatic`) {
+		t.Errorf("greet-only render should not include linkstatic")
+	}
+}
+
+// TestStripLibPrefixSuffix covers the lib<name>.a → <name>
+// conversion used to (a) name the cc_library rule and
+// (b) match -l<name> link flags.
+func TestStripLibPrefixSuffix(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"libfoo.a", "foo"},
+		{"./libfoo.a", "foo"},
+		{"build/libfoo.a", "foo"},
+		{"lib.a", ""},
+		{"foo.a", "foo"}, // no `lib` prefix: leave name intact
+	}
+	for _, c := range cases {
+		if got := stripLibPrefixSuffix(c.in); got != c.want {
+			t.Errorf("stripLibPrefixSuffix(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

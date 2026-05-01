@@ -1,0 +1,29 @@
+CC ?= cc
+CFLAGS = @CFLAGS@
+prefix = @PREFIX@
+bindir = $(prefix)/bin
+libdir = $(prefix)/lib
+
+all: libfoo.a myapp
+
+foo.o: foo.c foo.h
+	$(CC) $(CFLAGS) -c foo.c -o foo.o
+
+bar.o: bar.c foo.h
+	$(CC) $(CFLAGS) -c bar.c -o bar.o
+
+myapp.o: myapp.c foo.h
+	$(CC) $(CFLAGS) -c myapp.c -o myapp.o
+
+libfoo.a: foo.o bar.o
+	ar rcs libfoo.a foo.o bar.o
+
+myapp: myapp.o libfoo.a
+	$(CC) $(CFLAGS) -o myapp myapp.o -L. -lfoo
+
+install: all
+	install -D -m 0755 myapp $(DESTDIR)$(bindir)/myapp
+	install -D -m 0644 libfoo.a $(DESTDIR)$(libdir)/libfoo.a
+
+clean:
+	rm -f foo.o bar.o myapp.o libfoo.a myapp
