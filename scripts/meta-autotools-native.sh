@@ -119,11 +119,14 @@ run_bazel() {
 # tracer-wrapped configure/build/install AND the native
 # converter inline — one action, two outputs.
 #
-# --spawn_strategy=local because build-tracer (= strace) needs
-# ptrace permission, which Bazel's default linux-sandbox
-# doesn't grant.
-run_bazel "$A" build //elements/greet:greet_install \
-    --spawn_strategy=local 2>&1 | tail -10
+# build-tracer's native backend uses ptrace from a parent
+# process; bazel's default linux-sandbox usually allows that
+# (kernel.yama.ptrace_scope = 1 means "trace your own
+# children"), so we don't need --spawn_strategy=local. The
+# strace fallback (--strace flag on build-tracer) requires
+# the host's strace binary to be in the action's PATH and
+# may need spawn_strategy=local on hardened sandboxes.
+run_bazel "$A" build //elements/greet:greet_install 2>&1 | tail -10
 
 # Native BUILD.bazel.out + install_tree.tar should both exist.
 for want in \
