@@ -60,37 +60,29 @@ diff, not a build-time correctness issue.
 
 This delta stays open as documentation; no fix is planned.
 
-### multi-language — only first compile group's flags emitted (correctness)
-
-**Fixture**: `converter/testdata/sample-projects/multi-language/`
-(one cc_library with both `c_part.c` and `cxx_part.cpp` plus
-per-language `target_compile_options($<COMPILE_LANGUAGE:C>:...)`
-and `$<COMPILE_LANGUAGE:CXX>:...`).
-
-**Surfaced**: emitted `cc_library` has
-`copts = ["-O3", "-std=c11"]` — only the C compile group's
-flags. The C++ compile group's `-std=c++17` is dropped because
-lower assumes "at most one language per target" (per the
-`cg := t.CompileGroups[0]` line in lowerTarget). Bazel-build
-of the converted output would compile `cxx_part.cpp` with
-`-std=c11`, which fails (C++ source compiled in C dialect).
-
-**Fix shape**: split a multi-language cc_library into one
-cc_library per language, link them via a third cc_library /
-filegroup that groups them. cmake codemodel emits one
-CompileGroup per language with the right per-language flags;
-walk all CompileGroups (not just `[0]`) and emit one Bazel
-target per language, with srcs partitioned by source extension
-+ language. Each emitted target's `copts` carries that
-language's flags. The original target's name aggregates them
-via `deps = [":<name>_c", ":<name>_cxx"]` (or similar).
-
-This is structural: changes the 1:1 cmake-target → Bazel-target
-mapping. Defer until FDSDK actually surfaces multi-language
-targets in the curated probe set (most kind:cmake elements are
-single-language); track here so a future PR can pick it up.
-
 ## Resolved deltas
+
+### multi-language — per-language compile-group split ✓
+
+**Fixture**: `converter/testdata/sample-projects/multi-language/`.
+
+**Was**: emitted `cc_library` carried only the C compile
+group's flags; C++ source would compile with `-std=c11` and
+fail. Lower's `cg := t.CompileGroups[0]` assumed one language
+per target.
+
+**Now**: targets with ≥ 2 distinct compile-group languages
+split into a wrapper cc_library (the user-visible name,
+deps-only) plus one private sub-library per language with
+that language's srcs + flags. Wrapper retains the public
+surface (`hdrs`, `includes`, `linkstatic`, `visibility`,
+install metadata); sub-libraries (`<name>_c`, `<name>_cxx`,
+…) carry srcs + `copts` + `defines` extracted from each
+CompileGroup's CompileCommandFragments. Single-language
+targets stay one cc_library — split only fires at len(langs)
+≥ 2. See `splitMultiLanguage` in
+`converter/internal/lower/lower.go` and
+`converter/testdata/golden/multi-language/BUILD.bazel.golden`.
 
 ### configure-file — generated header dependency missing ✓
 

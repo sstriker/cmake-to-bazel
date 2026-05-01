@@ -1,5 +1,7 @@
 package fileapi
 
+import "encoding/json"
+
 // Codemodel is <reply>/codemodel-v2-*.json.
 //
 // Schema reference: cmake-file-api(7), "codemodel" object kind.
@@ -38,6 +40,42 @@ type ConfigDirectory struct {
 	MinimumCMakeVersion struct {
 		String string `json:"string"`
 	} `json:"minimumCMakeVersion"`
+}
+
+// Directory mirrors the contents of one directory-*.json file
+// (referenced by ConfigDirectory.JSONFile). Exposes per-directory
+// install rules — install(FILES ...), install(DIRECTORY ...),
+// install(EXPORT ...), install(TARGETS ...) — as a single
+// Installers slice.
+type Directory struct {
+	Paths struct {
+		Source string `json:"source"`
+		Build  string `json:"build"`
+	} `json:"paths"`
+	Installers []DirectoryInstaller `json:"installers"`
+}
+
+// DirectoryInstaller is one install() invocation. Type
+// distinguishes shapes:
+//
+//   - "target": install(TARGETS ...) — already covered by
+//     Target.Install.
+//   - "directory": install(DIRECTORY ...) — bulk source-tree
+//     copy.
+//   - "file": install(FILES ...) — explicit per-file copy.
+//   - "export": install(EXPORT ...) — synthesized
+//     <Pkg>Targets.cmake; covered by cmakecfg.
+//
+// Paths is a heterogeneous list: most installer types record
+// plain string paths, but install(DIRECTORY) entries are
+// {"from": ..., "to": ...} objects. We keep paths in a
+// json.RawMessage so callers can decode whichever shape they
+// need.
+type DirectoryInstaller struct {
+	Component   string            `json:"component"`
+	Destination string            `json:"destination"`
+	Type        string            `json:"type"`
+	Paths       []json.RawMessage `json:"paths"`
 }
 
 type ConfigProject struct {

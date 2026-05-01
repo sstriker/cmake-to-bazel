@@ -116,3 +116,15 @@ if ! grep -q 'deps = \["//elements/prod:prod"\]' "$cons_build"; then
     exit 1
 fi
 echo "meta-cross-cmake: cross-element dep edge OK (cons → //elements/prod:prod)"
+
+# Producer-shipped cmake helper assertion: the prod fixture's
+# install(FILES Helpers.cmake DESTINATION lib/cmake/prod) line
+# must show up in the bundle tar so downstream consumers
+# `include(${prod_DIR}/Helpers.cmake)` resolves.
+prod_bundle="$A/bazel-bin/elements/prod/cmake-config-bundle.tar"
+if ! tar -tf "$prod_bundle" | grep -q '^\./lib/cmake/prod/Helpers\.cmake$'; then
+    echo "meta-cross-cmake: prod cmake-config-bundle.tar missing producer-shipped Helpers.cmake" >&2
+    tar -tf "$prod_bundle" >&2
+    exit 1
+fi
+echo "meta-cross-cmake: producer-shipped Helpers.cmake captured in bundle"

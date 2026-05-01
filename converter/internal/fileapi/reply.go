@@ -30,6 +30,12 @@ type Reply struct {
 	// Targets maps target id to its parsed details. Populated lazily by
 	// Load, keyed by the id from Codemodel.Configurations[].Targets[].Id.
 	Targets map[string]Target
+	// Directories carries the parsed directory-*.json content for every
+	// ConfigDirectory.JSONFile referenced from Codemodel. Indexed by
+	// JSONFile basename (the codemodel's per-config Directories[]
+	// entries reference them this way). Empty when no directories carry
+	// install rules.
+	Directories map[string]Directory
 }
 
 // Load reads every consumed object from a reply directory. Returns an error if
@@ -40,9 +46,10 @@ func Load(replyDir string) (*Reply, error) {
 		return nil, fmt.Errorf("fileapi: load index: %w", err)
 	}
 	r := &Reply{
-		Path:    replyDir,
-		Index:   idx,
-		Targets: map[string]Target{},
+		Path:        replyDir,
+		Index:       idx,
+		Targets:     map[string]Target{},
+		Directories: map[string]Directory{},
 	}
 
 	for _, obj := range idx.Objects {
@@ -75,6 +82,20 @@ func Load(replyDir string) (*Reply, error) {
 				return nil, fmt.Errorf("fileapi: target %s: %w", tref.Name, err)
 			}
 			r.Targets[tref.Id] = t
+		}
+		for _, d := range cfg.Directories {
+			if d.JSONFile == "" {
+				continue
+			}
+			if _, seen := r.Directories[d.JSONFile]; seen {
+				continue
+			}
+			path := filepath.Join(replyDir, d.JSONFile)
+			var dir Directory
+			if err := readJSON(path, &dir); err != nil {
+				return nil, fmt.Errorf("fileapi: directory %s: %w", d.JSONFile, err)
+			}
+			r.Directories[d.JSONFile] = dir
 		}
 	}
 

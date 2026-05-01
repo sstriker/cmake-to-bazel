@@ -18,3 +18,9 @@ install(EXPORT prodTargets
         FILE prodTargets.cmake
         NAMESPACE prod::
         DESTINATION lib/cmake/prod)
+
+# Producer-shipped cmake helper: convert-element scans the
+# directory installer list, picks up Helpers.cmake's
+# install(FILES ...) entry, and stages it into the synth-
+# prefix bundle alongside the synthesized prodConfig.cmake.
+install(FILES Helpers.cmake DESTINATION lib/cmake/prod)

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sstriker/cmake-to-bazel/converter/internal/cli"
@@ -236,6 +237,17 @@ func run(a cli.Args) error {
 				return err
 			}
 		}
+		// Capture producer-shipped cmake macros: the codemodel's
+		// per-directory installer list carries every install(FILES
+		// *.cmake DESTINATION lib/cmake/<Pkg>) the producer wrote.
+		// Drop those into flatDir alongside the synthesized
+		// <Pkg>*.cmake; synthprefix.Build's copy loop then sweeps
+		// them through into lib/cmake/<Pkg>/ in the bundle. Real-
+		// world helpers (KDE's ECM, GoogleTest's GoogleTest module,
+		// etc.) flow without a separate plumbing path.
+		if err := stageInstalledCmakeFiles(r, pkg.Name, flatDir); err != nil {
+			return err
+		}
 		// synthprefix.Build refuses to write into an existing
 		// dir; it owns its dst. The CLI lets callers point
 		// --out-bundle-dir at a fresh path (Bazel genrules
@@ -297,6 +309,95 @@ func run(a cli.Args) error {
 
 // handleError marshals a typed Tier-1 failure to OutFailure (if requested) and
 // returns the appropriate exit code.
+// stageInstalledCmakeFiles copies every install(FILES *.cmake
+// DESTINATION lib/cmake/<pkgName>[/<sub>]) target file into
+// flatDir. cmakecfg's synthesized bundle lands flat in flatDir
+// already; layering producer-shipped helpers in the same dir
+// lets synthprefix.Build pick them up via its existing
+// `*.cmake → lib/cmake/<Pkg>/` copy loop.
+//
+// Conservative scope:
+//   - only `type=="file"` installers (install(DIRECTORY) /
+//     install(EXPORT) handled elsewhere or implicitly).
+//   - only destinations that match `lib/cmake/<pkgName>` exactly,
+//     or any prefix-tree-shaped destination starting with
+//     `lib/cmake/`. Helpers cmake configure-finds via
+//     find_package(<Pkg>) live there.
+//   - only files with `.cmake` extension; other shipped data
+//     belongs in different filegroups (Phase 4 typed slices).
+//
+// Subdirectory destinations (e.g. lib/cmake/<Pkg>/modules) lose
+// their nested layout when flattened into flatDir. v1 only
+// surfaces the top level; nested layouts are a follow-up if a
+// FDSDK-shape fixture surfaces them.
+func stageInstalledCmakeFiles(r *fileapi.Reply, pkgName, flatDir string) error {
+	cmakeSrc := r.Codemodel.Paths.Source
+	for _, dir := range r.Directories {
+		dirSrc := dir.Paths.Source
+		if dirSrc == "" {
+			dirSrc = cmakeSrc
+		} else if !filepath.IsAbs(dirSrc) {
+			dirSrc = filepath.Join(cmakeSrc, dirSrc)
+		}
+		for _, inst := range dir.Installers {
+			if inst.Type != "file" {
+				continue
+			}
+			if !cmakeConfigDestination(inst.Destination, pkgName) {
+				continue
+			}
+			for _, raw := range inst.Paths {
+				var p string
+				if err := json.Unmarshal(raw, &p); err != nil {
+					// install(FILES) records plain strings; an
+					// {"from":..,"to":..} object is the
+					// install(DIRECTORY) shape and shouldn't appear
+					// here, but skip rather than fail.
+					continue
+				}
+				if filepath.Ext(p) != ".cmake" {
+					continue
+				}
+				abs := p
+				if !filepath.IsAbs(abs) {
+					abs = filepath.Join(dirSrc, p)
+				}
+				body, err := os.ReadFile(abs)
+				if err != nil {
+					// Producer-shipped file referenced by the
+					// installer but missing on disk is unusual but
+					// not a hard error — skip silently so the
+					// bundle still synthesizes.
+					continue
+				}
+				dst := filepath.Join(flatDir, filepath.Base(p))
+				if err := os.WriteFile(dst, body, 0o644); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// cmakeConfigDestination reports whether dest is the canonical
+// shape cmake's find_package(CONFIG) probes. Accepts:
+//   - lib/cmake/<pkgName>          (canonical)
+//   - lib/cmake/<pkgName>/<sub>    (nested helper layout)
+//   - lib/cmake/<anything>         (NOT — restrict to our pkg
+//     so unrelated install rules don't pollute the bundle).
+//
+// Case-sensitive: cmake's filesystem checks are case-sensitive
+// on Linux and the codemodel records the user-written
+// destination verbatim.
+func cmakeConfigDestination(dest, pkgName string) bool {
+	want := "lib/cmake/" + pkgName
+	if dest == want {
+		return true
+	}
+	return strings.HasPrefix(dest, want+"/")
+}
+
 func handleError(a cli.Args, err error) int {
 	var tier1 *failure.Error
 	if errors.As(err, &tier1) {

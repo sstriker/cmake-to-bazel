@@ -224,10 +224,12 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 		pkg.Targets = append(pkg.Targets, *irt)
 	}
 
-	// Append recovered genrules then cc_test rules in deterministic
-	// order; cc.Genrules and cc.Tests are appended in target-walk
-	// order during lowerTarget, which is itself stable.
+	// Append recovered genrules then per-language sub-libraries
+	// then cc_test rules in deterministic order; each slot is
+	// appended in target-walk order during lowerTarget, which is
+	// itself stable.
 	pkg.Targets = append(pkg.Targets, cc.Genrules...)
+	pkg.Targets = append(pkg.Targets, cc.Subs...)
 	pkg.Targets = append(pkg.Targets, cc.Tests...)
 	return pkg, nil
 }
@@ -565,7 +567,182 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 		}
 	}
 
+	// Multi-language structural split: cmake records one
+	// CompileGroup per language with that language's flags. A
+	// single Bazel cc_library can't carry per-source-language
+	// copts, so split into a wrapper cc_library (the user-
+	// visible target name, deps-only) plus one private
+	// sub-library per language with that language's srcs +
+	// flags. Single-language targets stay one cc_library; this
+	// branch only fires for ≥ 2 distinct compile-group
+	// languages.
+	if shouldSplitMultiLanguage(t) {
+		if err := splitMultiLanguage(t, irt, cc); err != nil {
+			return nil, err
+		}
+	}
+
 	return irt, nil
+}
+
+// shouldSplitMultiLanguage reports whether the target carries
+// sources from ≥ 2 distinct compile-group languages and is a
+// rule kind where the per-language flag delta could surface as
+// a build-time correctness issue. Header-only INTERFACE
+// libraries don't compile sources here; UTILITY targets we
+// already filtered out before reaching this point.
+func shouldSplitMultiLanguage(t *fileapi.Target) bool {
+	if len(t.CompileGroups) < 2 {
+		return false
+	}
+	langs := map[string]bool{}
+	for _, cg := range t.CompileGroups {
+		if cg.Language == "" {
+			continue
+		}
+		langs[cg.Language] = true
+	}
+	return len(langs) >= 2
+}
+
+// splitMultiLanguage rewrites irt as a deps-only wrapper and
+// appends one per-language ir.Target to cc.Subs. Each sub-
+// library carries:
+//
+//   - Srcs filtered to the sources cmake assigned to that
+//     compile group.
+//   - Copts + Defines extracted from that compile group's
+//     command fragments (each cmake CG carries its own full
+//     flag set including general flags like -O3, so per-
+//     language flag isolation is automatic).
+//   - The same Hdrs / Includes as the wrapper would have had
+//     (cmake doesn't language-tag headers; the public include
+//     surface is shared).
+//   - Private visibility: only the wrapper consumes them.
+//
+// The wrapper drops Srcs / Copts / Defines, retains the
+// public surface (hdrs, includes, visibility, install
+// metadata), and adds a Deps edge to each sub-library.
+func splitMultiLanguage(t *fileapi.Target, irt *ir.Target, cc *codegenContext) error {
+	// Sort CompileGroups by language for deterministic sub-
+	// library ordering across runs (the codemodel records them
+	// in source-declaration order, which is stable but harder
+	// to reason about).
+	groups := append([]fileapi.CompileGroup(nil), t.CompileGroups...)
+	sort.Slice(groups, func(i, j int) bool { return groups[i].Language < groups[j].Language })
+
+	sharedHdrs := append([]string(nil), irt.Hdrs...)
+	sharedIncludes := append([]string(nil), irt.Includes...)
+	wrapperSrcs := irt.Srcs
+
+	var subDeps []string
+	for _, cg := range groups {
+		if cg.Language == "" {
+			continue
+		}
+		// Source partition: keep the entries the wrapper
+		// already accepted (those that survived
+		// shouldIncludeSource etc.) AND that the codemodel
+		// assigned to this CG.
+		srcIndex := map[int]bool{}
+		for _, idx := range cg.SourceIndexes {
+			srcIndex[idx] = true
+		}
+		var subSrcs []string
+		for i, s := range t.Sources {
+			if !srcIndex[i] {
+				continue
+			}
+			// Only keep srcs that landed on the wrapper's Srcs
+			// slice — the existing source-walk filtering
+			// (.rule files, generated sources we couldn't
+			// recover, etc.) already trimmed them.
+			rel := relForSource(s.Path, t)
+			if !stringSliceContains(wrapperSrcs, rel) {
+				continue
+			}
+			subSrcs = append(subSrcs, rel)
+		}
+		if len(subSrcs) == 0 {
+			continue
+		}
+		copts, defs := splitCompileFragments(cg.CompileCommandFragments)
+		for _, d := range cg.Defines {
+			defs = append(defs, d.Define)
+		}
+
+		sub := ir.Target{
+			Name:       irt.Name + "_" + langSuffix(cg.Language),
+			Kind:       irt.Kind,
+			Srcs:       subSrcs,
+			Hdrs:       sharedHdrs,
+			Includes:   sharedIncludes,
+			Copts:      copts,
+			Defines:    defs,
+			Linkstatic: irt.Linkstatic,
+			Alwayslink: irt.Alwayslink,
+			Visibility: []string{"//visibility:private"},
+		}
+		cc.Subs = append(cc.Subs, sub)
+		subDeps = append(subDeps, ":"+sub.Name)
+	}
+
+	if len(subDeps) == 0 {
+		// Nothing actually split (e.g. all CGs ended up
+		// empty); leave the wrapper alone so the existing
+		// output stays valid.
+		return nil
+	}
+
+	// Wrapper: deps-only. Strip srcs/copts/defines (now on
+	// sub-libs); keep hdrs/includes/visibility/install/etc.
+	irt.Srcs = nil
+	irt.Copts = nil
+	irt.Defines = nil
+	irt.Deps = append(irt.Deps, subDeps...)
+	return nil
+}
+
+// langSuffix maps a cmake compile-group language string to the
+// short suffix used in the synthesized sub-library name.
+func langSuffix(lang string) string {
+	switch lang {
+	case "C":
+		return "c"
+	case "CXX":
+		return "cxx"
+	case "OBJC":
+		return "objc"
+	case "OBJCXX":
+		return "objcxx"
+	case "Fortran":
+		return "fortran"
+	case "ASM":
+		return "asm"
+	}
+	return strings.ToLower(lang)
+}
+
+// relForSource returns the package-relative path the wrapper
+// stored for this codemodel source. Sources are mostly
+// relative paths the codemodel records verbatim; absolute
+// paths are uncommon but possible. Mirrors how the source
+// walk in lowerTarget computes the path used in irt.Srcs.
+func relForSource(p string, t *fileapi.Target) string {
+	_ = t
+	return p
+}
+
+// stringSliceContains is a tiny linear-search helper. The
+// source slices are short enough (typically <50 entries) that
+// a map+rebuild is overkill.
+func stringSliceContains(s []string, v string) bool {
+	for _, e := range s {
+		if e == v {
+			return true
+		}
+	}
+	return false
 }
 
 // stripIDHash returns the CMake target name from a File-API target id of the
