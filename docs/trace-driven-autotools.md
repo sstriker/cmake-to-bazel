@@ -73,44 +73,109 @@ This is parked as a wishlist item for the RBE community —
 trace export from the executor would benefit anyone doing
 build introspection of opaque tools, not just our converter.
 
-## Spike status (`cmd/convert-element-autotools/`)
+## How it runs (single-genrule flow)
 
-What works today:
+```mermaid
+sequenceDiagram
+    participant WA as cmd/write-a
+    participant Bazel as bazel build (project A)
+    participant BT as build-tracer
+    participant Build as ./configure + make + make install
+    participant CEA as convert-element-autotools
 
-- **Parser**: strace text-format input (`-f -e trace=execve
-  -s 4096 -o <path>`); recognizes top-level compiler driver
-  invocations (cc / gcc / g++ / clang) and filters out
-  gcc-internal `cc1` / `as` / `collect2` / `ld` sub-process
-  noise.
-- **Emitter**: single-step compile-and-link invocations
-  (both srcs and `-o <output>`) become `cc_binary`. Cross-
-  event correlation (compile-only `cc -c x.c -o x.o` paired
-  with archive `ar rcs libfoo.a x.o` paired with link
-  `cc -o app app.c -lfoo`) — see follow-ups below.
-- **End-to-end fixture**:
-  `scripts/spike-autotools-trace.sh` against
-  `testdata/meta-project/autotools-greet/sources/`. Builds
-  under strace, parses, emits
-  `cc_binary(name="greet", srcs=["greet.c"], copts=["-O2"])`.
+    WA->>WA: Render install genrule with tracer + converter wired in
+    Bazel->>BT: $(location //tools:build-tracer) --out=$TRACE -- sh -c '...'
+    BT->>Build: fork + ptrace; capture every execve
+    Build-->>BT: install_tree at $INSTALL_ROOT
+    BT-->>Bazel: trace.log (strace-format)
+    Bazel->>CEA: $(location //tools:convert-element-autotools) --trace=$TRACE
+    CEA-->>Bazel: BUILD.bazel.out (cc_library / cc_binary)
+    Bazel->>Bazel: tar install_tree.tar
+    Note over Bazel: Action result cached: srckey + toolchain + tool digests<br/>=> install_tree.tar + BUILD.bazel.out
+```
 
-## Follow-ups
+One Bazel action, two outputs. Bazel's action cache (buildbarn
+in CI, local cache for dev) handles cross-node convergence — same
+source + same toolchain + same converter version => same cache
+key => same outputs.
 
-In rough priority order:
+## Component status
 
-1. Cross-event correlation: pair compile-only / archive /
-   link events into `cc_library` (for archives) +
-   `cc_binary` (for binaries) targets with proper
-   `srcs` / `deps`.
-2. Cross-element dep resolution: link command's `-l<lib>` /
-   `/opt/prefix/lib/lib<X>.so` references → Bazel labels
-   via the existing `imports` manifest (mirrors cmake's
-   STATIC IMPORTED dep recovery).
-3. **Tracer wrapper at action time**: a small Go binary
-   that wraps the build invocation and emits a deterministic
-   trace artifact. Runs inside Bazel's genrule sandbox.
-4. **Trace registry**: REAPI Action Cache entry under
-   `(srckey, tracer_version)`. write-a's render gates on
-   the AC lookup.
-5. **Native handler**: split write-a's `kind:autotools`
-   handler into a coarse-fallback path + a native-render
-   path; AC hit/miss decides.
+- **`cmd/build-tracer`**: native ptrace backend (linux/amd64)
+  + strace fallback (`--strace`). Forks the build with
+  PTRACE_TRACEME, follows fork/vfork/clone, captures every
+  successful execve's argv. Output is strace-compatible text
+  format. Runs inside Bazel's standard linux-sandbox; no host
+  strace dep on linux/amd64.
+- **`cmd/convert-element-autotools`**: parses the trace,
+  classifies events into compile / link / archive, builds a
+  correlation graph, emits BUILD.bazel.out with cc_library
+  (per archive) + cc_binary (per link). `-l<name>` resolves
+  to `:<name>` for in-trace archives or to a cross-element
+  Bazel label via the imports manifest. Default-toolchain
+  flags (`-O2`, `-fPIC`, `-g`, `-DNDEBUG`) stripped;
+  `-D<name>=<val>` routes to the rule's `defines`.
+- **`cmd/write-a`** (`autotoolsHandler`): when
+  `--convert-element-autotools` + `--build-tracer-bin` are
+  set, renders the install genrule with the tracer wrap +
+  converter step inline. Emits `imports.json` next to the
+  BUILD when there are cross-element deps. Without those
+  flags, falls back to the unmodified coarse install_tree.tar
+  pipeline.
+- **End-to-end gate**: `make e2e-meta-autotools-native`
+  drives the full pipeline against
+  `testdata/meta-project/autotools-greet/sources/` through
+  bazel build. Asserts both `install_tree.tar` and a native
+  `BUILD.bazel.out` are produced; the BUILD.bazel.out
+  declares `cc_binary(name="greet", srcs=["greet.c"])`.
+
+## Future directions
+
+### make -p / make-database hint as a second input
+
+Today's converter recovers structure purely from execve
+sequences (compile output `.o` paired with later archive +
+link). For `kind:make` and `kind:autotools`, `make -np`
+(dry-run + print-database) would dump the Makefile's rule
+graph directly: targets, prerequisites, recipes, variables.
+A future pass could:
+
+1. After the actual build completes inside the genrule, run
+   `make -np` to capture the database alongside the trace.
+2. Pass both artifacts to the converter
+   (`--make-db=<path>`).
+3. Use the database for higher-fidelity rule recovery:
+   - Target names from Makefile (`myapp:`) → Bazel rule
+     names, instead of inferring from the link command's
+     `-o` argument.
+   - Phony targets (`install`, `check`) for surfacing
+     install-tree split points.
+   - Per-target variable values (CFLAGS for myapp vs CFLAGS
+     for libfoo) when Makefiles override per-target.
+   - Cross-validate the trace's correlation against the
+     Makefile's declared dep edges.
+
+The execve trace alone is sufficient for the spike. Adding
+make-database hints is additive — same architecture, richer
+introspection. Worth picking up when `kind:autotools` corpus
+expansion surfaces the cases the current correlation misses.
+
+### Native ptrace beyond linux/amd64
+
+The native ptrace backend is amd64-only today (register
+layout, syscall number, calling convention are
+arch-specific). Adding aarch64 / armv7 / ppc64le requires
+roughly 50 lines of arch-specific code per arch
+(`native_linux_<arch>.go` with the right register
+struct field accesses + syscall numbers). Other GOOS/GOARCH
+combos fall back to the strace shim transparently.
+
+### RBE service-managed tracing
+
+If buildbarn / buildgrid / EngFlow / similar RBE services
+expose process tracing as a server-side feature, we'd drop
+the in-action `build-tracer` wrapper entirely and inherit
+the service's deterministic-trace semantics. Wishlist item
+parked for the RBE community — trace export from the
+executor would benefit anyone introspecting opaque tools,
+not just our converter.
