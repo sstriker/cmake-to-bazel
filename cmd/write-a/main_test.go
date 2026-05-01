@@ -2976,3 +2976,137 @@ sources:
 		}
 	}
 }
+
+// TestWriter_PipelineUseFuseSourcesEmitsExtRepoRef proves PR #62:
+// pipeline-shape kinds (autotools/make/manual/script) honor
+// --use-fuse-sources for single non-kind:local sources, emitting
+// a BUILD that pulls srcs from @src_<key>//:tree (the FUSE
+// path) instead of staging into elements/<name>/sources/.
+func TestWriter_PipelineUseFuseSourcesEmitsExtRepoRef(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Stage a fake source-cache hit for the autotools element's
+	// kind:tar source.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	srcMeta := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(srcMeta)
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "configure"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: autotools
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/x/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	for _, want := range []string{
+		`srcs = ["@src_` + wantKey + `//:tree"]`,
+		`rel="$${src##*tree_dir/}"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+	// FUSE mode should not emit the local _sources filegroup.
+	if strings.Contains(got, "x_sources") {
+		t.Errorf("FUSE mode should skip the _sources filegroup:\n%s", got)
+	}
+	// And no on-disk staging.
+	if _, err := os.Stat(filepath.Join(outA, "elements/x/sources")); err == nil {
+		t.Errorf("FUSE mode should not stage sources/ on disk for pipeline kinds")
+	}
+}
+
+// TestWriter_PipelineFuseFallbackForMultiSource proves
+// multi-source pipeline elements take the staging path even
+// with --use-fuse-sources (no repo composition yet for
+// multiple @src_<key>// repos under one element).
+func TestWriter_PipelineFuseFallbackForMultiSource(t *testing.T) {
+	tmp := t.TempDir()
+	cacheDir := filepath.Join(tmp, "src-cache")
+	for _, k := range []struct{ url, ref string }{
+		{"https://example.org/a.tar.gz", "v1"},
+		{"https://example.org/b.tar.gz", "v2"},
+	} {
+		key := sourceKey(resolvedSource{Kind: "tar", URL: k.url, Ref: yaml.Node{Kind: yaml.ScalarNode, Value: k.ref}})
+		root := filepath.Join(cacheDir, key)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bstPath := filepath.Join(tmp, "y.bst")
+	body := `kind: autotools
+sources:
+- kind: tar
+  url: https://example.org/a.tar.gz
+  ref: v1
+- kind: tar
+  url: https://example.org/b.tar.gz
+  ref: v2
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/y/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	if strings.Contains(got, "@src_") {
+		t.Errorf("multi-source pipeline should fall back to staging; BUILD references @src_ unexpectedly:\n%s", got)
+	}
+	if !strings.Contains(got, "y_sources") {
+		t.Errorf("multi-source pipeline should emit local _sources filegroup:\n%s", got)
+	}
+}
