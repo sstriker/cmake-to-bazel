@@ -380,6 +380,107 @@ func extractConditionalsFromVariables(doc *yaml.Node) ([]conditionalBranch, erro
 	return branches, nil
 }
 
+// branchMatchesTuple reports whether a conditional branch fires
+// for a given dispatch tuple. tuple maps dispatch variable
+// names to chosen values for the current select() arm. The
+// branch is keyed off (Varname, Arches): match iff
+// tuple[Varname] is in Arches.
+//
+// Empty Varname (unrecognized expression) never matches —
+// callers skip those branches.
+//
+// Empty tuple (no dispatch dimensions): match iff the branch is
+// keyed on a static-dispatch var whose folded value lies in
+// Arches. v1 of the foldStaticConditionals pass already folded
+// the static-keyed branches into element.Bst.Variables, so by
+// the time we reach this function the surviving branches are
+// dispatch-keyed; the no-tuple case shouldn't fire matches.
+func branchMatchesTuple(b conditionalBranch, tuple map[string]string) bool {
+	if b.Varname == "" {
+		return false
+	}
+	v, ok := tuple[b.Varname]
+	if !ok {
+		return false
+	}
+	for _, a := range b.Arches {
+		if a == v {
+			return true
+		}
+	}
+	return false
+}
+
+// extractConditionalsFromConfig pulls the `config: (?):` block
+// out of a .bst doc tree analogously to
+// extractConditionalsFromVariables. The returned branches'
+// Overrides node is a partial pipelineCfg shape (e.g. just
+// configure-commands) — pipelineHandler's resolveAt merges them
+// per matching tuple.
+//
+// Element-level config: (?): is the FDSDK bootstrap pattern:
+// per-arch configure-commands overrides on the same .bst.
+// Without this extractor, the deep-strip pass drops them (the
+// loader still succeeds, but per-arch overrides don't fire);
+// with it, the pipeline handler resolves the right command set
+// per dispatch tuple.
+func extractConditionalsFromConfig(doc *yaml.Node) ([]conditionalBranch, error) {
+	root := doc
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return nil, nil
+		}
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+	cfgIdx := -1
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "config" {
+			cfgIdx = i + 1
+			break
+		}
+	}
+	if cfgIdx < 0 {
+		return nil, nil
+	}
+	cfgNode := root.Content[cfgIdx]
+	if cfgNode.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+	condIdx := -1
+	for i := 0; i < len(cfgNode.Content); i += 2 {
+		if cfgNode.Content[i].Value == "(?)" {
+			condIdx = i
+			break
+		}
+	}
+	if condIdx < 0 {
+		return nil, nil
+	}
+	condValue := cfgNode.Content[condIdx+1]
+	cfgNode.Content = append(cfgNode.Content[:condIdx], cfgNode.Content[condIdx+2:]...)
+	if condValue.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("config: (?): expected a sequence of branches, got node kind %d", condValue.Kind)
+	}
+	var branches []conditionalBranch
+	for _, branchNode := range condValue.Content {
+		if branchNode.Kind != yaml.MappingNode || len(branchNode.Content) < 2 {
+			return nil, fmt.Errorf("config: (?): branch must be a mapping with one expression key, got node kind %d", branchNode.Kind)
+		}
+		expr := branchNode.Content[0].Value
+		overrides := branchNode.Content[1]
+		varname, arches := parseArchExpression(expr)
+		branches = append(branches, conditionalBranch{
+			Varname:   varname,
+			Arches:    arches,
+			Overrides: overrides,
+		})
+	}
+	return branches, nil
+}
+
 // stripRemainingConditionals walks the post-extract tree and
 // removes any `(?):` keys still present in deeper nested
 // positions (under config:, environment:, public:, …) so the
@@ -592,6 +693,14 @@ func dispatchSpaceForElement(elem *element, options map[string]bstOption) ([]dis
 		}
 	}
 	for _, b := range elem.Bst.Conditionals {
+		if dispatchable(b.Varname, options) {
+			seen[b.Varname] = true
+		}
+	}
+	// config: (?): branches contribute dispatch dimensions too —
+	// per-arch configure-commands overrides need to fire under
+	// the same per-tuple resolution path.
+	for _, b := range elem.Bst.ConfigConditionals {
 		if dispatchable(b.Varname, options) {
 			seen[b.Varname] = true
 		}

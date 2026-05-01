@@ -104,6 +104,13 @@ type bstFile struct {
 	// over @platforms//cpu:* rather than baking write-a's host arch
 	// into the rendered cmd. See conditional.go.
 	Conditionals []conditionalBranch `yaml:"-"`
+	// ConfigConditionals are the per-arch (?): branches extracted
+	// from `config:` (the FDSDK bootstrap pattern: per-arch
+	// configure-commands overrides on the same .bst). Empty when
+	// no config: (?): block is present. The pipeline handler
+	// merges matching branches' partial pipelineCfg overrides
+	// into the per-tuple resolved cfg in resolveAt.
+	ConfigConditionals []conditionalBranch `yaml:"-"`
 	// Public is the BuildStream public-data block: per-element
 	// downstream metadata (split-rules, environment overrides, ...).
 	// 33 % of FDSDK elements declare it. For v1 we decode it as a
@@ -599,12 +606,15 @@ func loadElement(bstPath, includeBase, sourceCache string, options map[string]bs
 	if err != nil {
 		return nil, fmt.Errorf("extract conditionals from %s: %w", bstPath, err)
 	}
-	// Strip any (?): blocks that survived past the variables:
-	// extraction (e.g. inside config:, environment:, public:).
-	// v1 doesn't act on conditionals at those depths, but the
-	// struct-decode pass would barf on the list-of-mapping shape
-	// landing in a strict-typed slot. Per-arch config: branches
-	// land a typed extractor when an FDSDK fixture forces it.
+	configConditionals, err := extractConditionalsFromConfig(doc)
+	if err != nil {
+		return nil, fmt.Errorf("extract config conditionals from %s: %w", bstPath, err)
+	}
+	// Strip any (?): blocks that survived past the typed
+	// extractors (variables: + config:). Branches under
+	// environment: / public: aren't honored today; the strip
+	// just keeps the loader from barfing on the list-of-mapping
+	// shape landing in a strict-typed slot.
 	stripRemainingConditionals(doc)
 	var f bstFile
 	if err := doc.Decode(&f); err != nil {
@@ -618,6 +628,11 @@ func loadElement(bstPath, includeBase, sourceCache string, options map[string]bs
 	foldedVars, foldedConds := foldStaticConditionals(f.Variables, conditionals, staticDispatchVars, optionTypedSet(options))
 	f.Variables = foldedVars
 	f.Conditionals = foldedConds
+	// config: (?): branches don't have a "fold against static
+	// vars" path today (no static overrides for config commands
+	// — every per-arch override survives for the dispatch loop).
+	// Stash on bstFile and let pipelineHandler consume.
+	f.ConfigConditionals = configConditionals
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")
 
 	// Load <element>.read-paths.txt sibling if present. Absent

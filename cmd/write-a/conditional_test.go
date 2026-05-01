@@ -251,3 +251,62 @@ func TestDefaultStaticDispatchVars_SeededFromGOARCH(t *testing.T) {
 		t.Errorf("the three defaults should match (same host CPU): %+v", got)
 	}
 }
+
+// TestExtractConditionalsFromConfig covers PR's typed extractor
+// for `config: (?):` blocks — the FDSDK bootstrap pattern of
+// per-arch configure-commands overrides.
+func TestExtractConditionalsFromConfig(t *testing.T) {
+	tmp := t.TempDir()
+	bstPath := tmp + "/x.bst"
+	body := `kind: autotools
+config:
+  configure-commands:
+  - "./configure --prefix=/usr"
+  (?):
+  - target_arch == "x86_64":
+      configure-commands:
+      - "./configure --prefix=/usr --x86"
+  - target_arch == "aarch64":
+      configure-commands:
+      - "./configure --prefix=/usr --aarch64"
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	confConds := g.Elements[0].Bst.ConfigConditionals
+	if len(confConds) != 2 {
+		t.Fatalf("ConfigConditionals: got %d branches, want 2 (%+v)", len(confConds), confConds)
+	}
+	if confConds[0].Varname != "target_arch" || confConds[0].Arches[0] != "x86_64" {
+		t.Errorf("branch 0: got %+v", confConds[0])
+	}
+	if confConds[1].Varname != "target_arch" || confConds[1].Arches[0] != "aarch64" {
+		t.Errorf("branch 1: got %+v", confConds[1])
+	}
+}
+
+// TestBranchMatchesTuple covers the dispatch-tuple matcher.
+func TestBranchMatchesTuple(t *testing.T) {
+	b := conditionalBranch{Varname: "target_arch", Arches: []string{"x86_64", "aarch64"}}
+	if !branchMatchesTuple(b, map[string]string{"target_arch": "x86_64"}) {
+		t.Errorf("x86_64 should match")
+	}
+	if !branchMatchesTuple(b, map[string]string{"target_arch": "aarch64"}) {
+		t.Errorf("aarch64 should match")
+	}
+	if branchMatchesTuple(b, map[string]string{"target_arch": "ppc64le"}) {
+		t.Errorf("ppc64le should not match")
+	}
+	if branchMatchesTuple(b, map[string]string{}) {
+		t.Errorf("empty tuple should not match a target_arch branch")
+	}
+	// Empty Varname (unrecognized expression) never matches.
+	bad := conditionalBranch{Varname: "", Arches: []string{"x86_64"}}
+	if branchMatchesTuple(bad, map[string]string{"target_arch": "x86_64"}) {
+		t.Errorf("empty Varname should never match")
+	}
+}

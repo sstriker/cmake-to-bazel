@@ -135,20 +135,53 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 			return pipelinePhases{}, fmt.Errorf("element %q (kind:%s) resolve variables%s: %w",
 				elem.Name, h.kindName, tupleSuffix(tuple), err)
 		}
+		// Apply config: (?): per-arch overrides for the matching
+		// branches. Each branch's Overrides is a partial pipelineCfg
+		// shape (e.g. just configure-commands); decode and replace
+		// fields where the override pointer is non-nil.
+		tupleConfigure := rawConfigure
+		tupleBuild := rawBuild
+		tupleInstall := rawInstall
+		tupleStrip := rawStrip
+		for _, b := range elem.Bst.ConfigConditionals {
+			if !branchMatchesTuple(b, tuple) {
+				continue
+			}
+			var override pipelineCfg
+			if err := b.Overrides.Decode(&override); err != nil {
+				return pipelinePhases{}, fmt.Errorf("element %q (kind:%s) decode config:(?): branch%s: %w",
+					elem.Name, h.kindName, tupleSuffix(tuple), err)
+			}
+			if override.ConfigureCommands != nil {
+				tupleConfigure = *override.ConfigureCommands
+			}
+			if override.BuildCommands != nil {
+				tupleBuild = *override.BuildCommands
+			}
+			if override.InstallCommands != nil {
+				tupleInstall = *override.InstallCommands
+			}
+			if override.StripCommands != nil {
+				tupleStrip = *override.StripCommands
+			}
+			if override.Commands != nil {
+				tupleInstall = *override.Commands
+			}
+		}
 		var p pipelinePhases
-		p.Configure, err = substituteCmds(rawConfigure, vars, elem.Name, h.kindName, "configure-commands")
+		p.Configure, err = substituteCmds(tupleConfigure, vars, elem.Name, h.kindName, "configure-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}
-		p.Build, err = substituteCmds(rawBuild, vars, elem.Name, h.kindName, "build-commands")
+		p.Build, err = substituteCmds(tupleBuild, vars, elem.Name, h.kindName, "build-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}
-		p.Install, err = substituteCmds(rawInstall, vars, elem.Name, h.kindName, "install-commands")
+		p.Install, err = substituteCmds(tupleInstall, vars, elem.Name, h.kindName, "install-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}
-		p.Strip, err = substituteCmds(rawStrip, vars, elem.Name, h.kindName, "strip-commands")
+		p.Strip, err = substituteCmds(tupleStrip, vars, elem.Name, h.kindName, "strip-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}

@@ -339,15 +339,17 @@ Other follow-ups (none on the critical path for `write-a render`):
   fetcher reshapes into a `module_extension` per the design in
   `docs/sources-design.md`; aliases + environment now parsed so
   the data is ready when the extension lands.
-- **`(?):` outside variables:** — partial. The extractor still
-  only handles `variables:` (?):, but a follow-up
-  `stripRemainingConditionals` pass now removes any other
-  `(?):` blocks (under `config:`, `environment:`, `public:`, …)
-  before struct-decode so the loader doesn't error out on the
-  list-of-mapping shape landing in a strict-typed slot. v1
-  silently drops the per-config / per-environment branches;
-  honoring them as per-arch overrides on the corresponding
-  bstFile fields lands when an FDSDK fixture forces it.
+- **`(?):` outside variables:** — `variables:` and `config:`
+  are now both handled. `extractConditionalsFromConfig` pulls
+  per-arch configure-/build-/install-/strip-commands overrides
+  out of the YAML tree onto `bstFile.ConfigConditionals`; the
+  pipeline handler's `resolveAt` merges matching branches'
+  partial pipelineCfg into the per-tuple resolved cfg, so per-
+  arch command overrides flow through the same dispatch path
+  variable overrides do. `environment:` and `public:` (?):
+  blocks still fall through `stripRemainingConditionals` —
+  the loader doesn't error, but the per-branch overrides at
+  those depths aren't honored. Lands when a fixture forces it.
 - **richer `(?):` expression syntax** — partial: `host_arch` /
   `build_arch` / `bootstrap_build_arch` references already
   worked (the parser is variable-agnostic for `==` / `in` / `or`-
