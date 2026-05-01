@@ -53,6 +53,36 @@ jobs:
       - uses: ./.github/actions/post-failure-tail
         if: failure()
 
+  cas-fuse-e2e:
+    # Exercises internal/casfuse against a fake REAPI CAS server
+    # (in-process), via a real FUSE mount. Runs the test suite's
+    # fusermount-gated cases by installing fuse3 first; without
+    # this job those tests skip silently on developer machines
+    # too. Cheap (no docker, no bwrap, no bazel) so it sits next
+    # to unit and gates the main e2e jobs.
+    name: End-to-end (cas-fuse against fake CAS)
+    runs-on: ubuntu-24.04
+    needs: unit
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install fuse3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3
+          fusermount3 --version || true
+
+      - name: cas-fuse mount test (FUSE-gated cases)
+        run: go test -v ./internal/casfuse/... -run TestMount 2>&1 | tee -a /tmp/cijob.log
+
+      - uses: ./.github/actions/post-failure-tail
+        if: failure()
+
   e2e:
     name: End-to-end (cmake + bwrap)
     runs-on: ubuntu-24.04
