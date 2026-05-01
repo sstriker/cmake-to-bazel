@@ -36,9 +36,28 @@ record_one() {
     : >"$build/.cmake/api/v1/query/cmakeFiles-v1"
     : >"$build/.cmake/api/v1/query/cache-v2"
 
-    cmake -S "$src" -B "$build" -G Ninja \
+    # consumer/+producer/ convention: a fixture testing
+    # cross-element behavior (e.g. macro-from-import) puts the
+    # consumer cmake project in `consumer/` and producer-shipped
+    # cmake macros in `producer/`. cmake `-S` points at
+    # `consumer/`; `producer/` goes onto CMAKE_MODULE_PATH so
+    # `include(<name>)` resolves to a path OUTSIDE the consumer
+    # source root — which is the whole point: trace records
+    # those calls with the producer module as `file`, exercising
+    # lower's known-target rescue path.
+    local cmake_src="$src"
+    local extra_args=()
+    if [[ -d "$src/consumer" && -f "$src/consumer/CMakeLists.txt" ]]; then
+        cmake_src="$src/consumer"
+        if [[ -d "$src/producer" ]]; then
+            extra_args+=(-DCMAKE_MODULE_PATH="$src/producer")
+        fi
+    fi
+
+    cmake -S "$cmake_src" -B "$build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        "${extra_args[@]}" \
         --trace-expand --trace-format=json-v1 \
         --trace-redirect="$build/trace.jsonl" \
         >"$build/cmake.stdout" 2>"$build/cmake.stderr"

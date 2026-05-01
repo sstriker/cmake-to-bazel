@@ -20,7 +20,7 @@ const traceMixed = `{"args":["t","PUBLIC","inc","PRIVATE","inc/priv"],"cmd":"tar
 `
 
 func TestExtractTargetIncludes(t *testing.T) {
-	got := ExtractTargetIncludes([]byte(traceMixed), "/src")
+	got := ExtractTargetIncludes([]byte(traceMixed), "/src", nil)
 	if len(got) != 1 {
 		t.Fatalf("want 1 user call, got %d (%+v)", len(got), got)
 	}
@@ -40,7 +40,7 @@ func TestExtractTargetIncludes(t *testing.T) {
 }
 
 func TestExtractTargetLinks_PublicPrivate(t *testing.T) {
-	got := ExtractTargetLinks([]byte(traceMixed), "/src")
+	got := ExtractTargetLinks([]byte(traceMixed), "/src", nil)
 	// 2 user calls: t (with PUBLIC/PRIVATE), t2 (legacy
 	// positional). The cmTC_xxx scratch-target call is filtered
 	// out (file is in build dir, not source).
@@ -93,7 +93,7 @@ func TestExtractTargetIncludes_SystemAndOrder(t *testing.T) {
 	// the visibility group.
 	trace := `{"args":["t","SYSTEM","BEFORE","INTERFACE","sys/inc"],"cmd":"target_include_directories","file":"/src/CMakeLists.txt","line":1}
 `
-	got := ExtractTargetIncludes([]byte(trace), "/src")
+	got := ExtractTargetIncludes([]byte(trace), "/src", nil)
 	if len(got) != 1 || len(got[0].Groups) != 1 {
 		t.Fatalf("got %+v", got)
 	}
@@ -109,13 +109,36 @@ func TestExtractTargetIncludes_PositionalDirs(t *testing.T) {
 	// historical default.
 	trace := `{"args":["t","inc1","inc2"],"cmd":"target_include_directories","file":"/src/CMakeLists.txt","line":1}
 `
-	got := ExtractTargetIncludes([]byte(trace), "/src")
+	got := ExtractTargetIncludes([]byte(trace), "/src", nil)
 	if len(got) != 1 || len(got[0].Groups) != 1 {
 		t.Fatalf("got %+v", got)
 	}
 	g := got[0].Groups[0]
 	if g.Visibility != "PRIVATE" || len(g.Dirs) != 2 {
 		t.Errorf("group: %+v", g)
+	}
+}
+
+// TestExtractTargetLinks_KnownTargetsRescue covers the
+// macro-from-import case: a producer element's .cmake module
+// (outside the consumer source root) calls
+// target_link_libraries on a consumer-defined target. The
+// strict file-path filter would drop that call; the
+// knownTargets second arm keeps it.
+func TestExtractTargetLinks_KnownTargetsRescue(t *testing.T) {
+	trace := `{"args":["consumer_target","PUBLIC","ZLIB::ZLIB"],"cmd":"target_link_libraries","file":"/opt/producer-modules/Helpers.cmake","line":3}
+{"args":["producer_internal","libfoo"],"cmd":"target_link_libraries","file":"/opt/producer-modules/Helpers.cmake","line":7}
+`
+	if got := ExtractTargetLinks([]byte(trace), "/src", nil); len(got) != 0 {
+		t.Errorf("nil knownTargets: want 0 calls, got %d (%+v)", len(got), got)
+	}
+	known := map[string]bool{"consumer_target": true}
+	got := ExtractTargetLinks([]byte(trace), "/src", known)
+	if len(got) != 1 || got[0].Target != "consumer_target" {
+		t.Fatalf("with knownTargets: want 1 call on consumer_target, got %+v", got)
+	}
+	if len(got[0].Groups) != 1 || got[0].Groups[0].Libs[0] != "ZLIB::ZLIB" {
+		t.Errorf("rescued call libs: %+v", got[0].Groups[0])
 	}
 }
 
@@ -153,10 +176,10 @@ func TestExtract_RealCmakeTrace(t *testing.T) {
 		`{"args":["t","PUBLIC","ZLIB::ZLIB"],"cmd":"target_link_libraries","file":"/src/CMakeLists.txt","frame":1,"global_frame":1,"line":6,"time":1777633549.3724971}`,
 		`{"args":["in.h.in","out.h","@ONLY"],"cmd":"configure_file","file":"/src/CMakeLists.txt","frame":1,"global_frame":1,"line":7,"line_end":7,"time":1777633549.3725619}`,
 	}, "\n") + "\n"
-	if len(ExtractTargetIncludes([]byte(real), "/src")) != 1 {
+	if len(ExtractTargetIncludes([]byte(real), "/src", nil)) != 1 {
 		t.Errorf("missed target_include_directories with extra fields")
 	}
-	if len(ExtractTargetLinks([]byte(real), "/src")) != 1 {
+	if len(ExtractTargetLinks([]byte(real), "/src", nil)) != 1 {
 		t.Errorf("missed target_link_libraries with extra fields")
 	}
 	if len(ExtractConfigureFiles([]byte(real), "/src")) != 1 {

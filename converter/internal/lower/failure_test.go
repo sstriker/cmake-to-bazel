@@ -14,10 +14,10 @@ import (
 // either exercised here or marked (M2)/reserved in the doc.
 
 func TestFailure_UnsupportedTargetType(t *testing.T) {
-	// OBJECT_LIBRARY isn't lowered yet; UTILITY (M2) is silently skipped
-	// since the underlying add_custom_command is recovered separately, so
-	// we use OBJECT_LIBRARY here to exercise the unsupported-target-type
-	// emission point.
+	// UTILITY is silently skipped (the underlying add_custom_command
+	// is recovered separately). OBJECT_LIBRARY is now supported via
+	// alwayslink=True. Use a fabricated target type unknown to the
+	// switch to exercise the unsupported-target-type emission point.
 	r := &fileapi.Reply{
 		Codemodel: fileapi.Codemodel{
 			Configurations: []fileapi.Configuration{{
@@ -28,7 +28,7 @@ func TestFailure_UnsupportedTargetType(t *testing.T) {
 		Targets: map[string]fileapi.Target{
 			"obj::@1": {
 				Name: "obj",
-				Type: "OBJECT_LIBRARY",
+				Type: "GLOBAL_TARGET",
 			},
 		},
 	}

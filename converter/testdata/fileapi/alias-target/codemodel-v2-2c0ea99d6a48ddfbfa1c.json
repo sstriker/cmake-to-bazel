@@ -1,0 +1,70 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Release-02b3cb109d39741cfabe.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"name" : "Release",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "aliaslib",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "aliaslib::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-aliaslib-Release-f9cd7e4e75c1761b2b08.json",
+					"name" : "aliaslib",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "aliaslib_demo::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-aliaslib_demo-Release-c4ed8058b9aa39b76df7.json",
+					"name" : "aliaslib_demo",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/tmp/tmp.kDeGkkkaGs",
+		"source" : "/home/user/cmake-to-bazel/converter/testdata/sample-projects/alias-target"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 6
+	}
+}

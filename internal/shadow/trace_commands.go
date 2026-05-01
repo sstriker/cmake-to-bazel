@@ -87,10 +87,18 @@ type ConfigureFileCall struct {
 
 // ExtractTargetIncludes returns one entry per user-written
 // target_include_directories trace event whose `file` is
-// inside sourceRoot. cmake-internal calls (those in
-// /usr/share/cmake-* or under buildDir/CMakeFiles/CMakeScratch)
-// are filtered out.
-func ExtractTargetIncludes(traceRaw []byte, sourceRoot string) []TargetIncludeCall {
+// inside sourceRoot OR whose target name is in
+// knownTargets. The second arm catches calls invoked from
+// producer-element cmake macros (e.g. ECM's ecm_add_library)
+// that act on consumer-defined targets — those macros live
+// outside the consumer source tree, so the file-path filter
+// alone would drop them. cmake-internal calls (TryCompile
+// scratch in build dir, /usr/share/cmake-* modules, etc.)
+// don't act on consumer targets and so are still filtered.
+//
+// knownTargets may be nil; nil disables the second arm and
+// the filter behaves as a strict source-tree check.
+func ExtractTargetIncludes(traceRaw []byte, sourceRoot string, knownTargets map[string]bool) []TargetIncludeCall {
 	var out []TargetIncludeCall
 	for _, line := range bytes.Split(traceRaw, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
@@ -104,10 +112,10 @@ func ExtractTargetIncludes(traceRaw []byte, sourceRoot string) []TargetIncludeCa
 		if !strings.EqualFold(ev.Cmd, "target_include_directories") {
 			continue
 		}
-		if !inSourceTree(ev.File, sourceRoot) {
+		if len(ev.Args) < 2 {
 			continue
 		}
-		if len(ev.Args) < 2 {
+		if !inScopeForTarget(ev.File, sourceRoot, ev.Args[0], knownTargets) {
 			continue
 		}
 		call := TargetIncludeCall{Target: ev.Args[0]}
@@ -179,14 +187,22 @@ func ExtractTargetIncludes(traceRaw []byte, sourceRoot string) []TargetIncludeCa
 }
 
 // ExtractTargetLinks returns one entry per user-written
-// target_link_libraries trace event in the source tree. Same
-// filtering shape as ExtractTargetIncludes.
+// target_link_libraries trace event whose `file` is inside
+// sourceRoot OR whose target name is in knownTargets. The
+// macro-from-import case (a producer element's cmake module
+// calls target_link_libraries on a consumer target) needs
+// the second arm — the macro lives outside the consumer
+// source tree so the file-path filter alone would drop the
+// call.
+//
+// knownTargets may be nil; nil disables the second arm and
+// the filter behaves as a strict source-tree check.
 //
 // The legacy positional shape `target_link_libraries(target
 // libA libB)` (no visibility keyword) groups all libs under
 // Visibility="" so consumers can match on Visibility==""
 // without writing a special case.
-func ExtractTargetLinks(traceRaw []byte, sourceRoot string) []TargetLinkCall {
+func ExtractTargetLinks(traceRaw []byte, sourceRoot string, knownTargets map[string]bool) []TargetLinkCall {
 	var out []TargetLinkCall
 	for _, line := range bytes.Split(traceRaw, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
@@ -200,10 +216,10 @@ func ExtractTargetLinks(traceRaw []byte, sourceRoot string) []TargetLinkCall {
 		if !strings.EqualFold(ev.Cmd, "target_link_libraries") {
 			continue
 		}
-		if !inSourceTree(ev.File, sourceRoot) {
+		if len(ev.Args) < 2 {
 			continue
 		}
-		if len(ev.Args) < 2 {
+		if !inScopeForTarget(ev.File, sourceRoot, ev.Args[0], knownTargets) {
 			continue
 		}
 		call := TargetLinkCall{Target: ev.Args[0]}
@@ -265,6 +281,27 @@ func ExtractConfigureFiles(traceRaw []byte, sourceRoot string) []ConfigureFileCa
 		})
 	}
 	return out
+}
+
+// inScopeForTarget combines two checks for whether a trace
+// event is part of the user's project intent:
+//
+//  1. The call's `file` lives inside the project source tree
+//     (the typical CMakeLists case).
+//  2. The call's first argument names a target the consumer
+//     defined (the macro-from-import case: a producer
+//     element's .cmake module, staged outside the consumer
+//     source tree, modifies a consumer-defined target).
+//
+// Returns true when either check passes. Used by the
+// target_include_directories / target_link_libraries
+// extractors to keep producer-macro calls that the strict
+// file-path filter alone would drop.
+func inScopeForTarget(file, sourceRoot, target string, knownTargets map[string]bool) bool {
+	if inSourceTree(file, sourceRoot) {
+		return true
+	}
+	return target != "" && knownTargets[target]
 }
 
 // inSourceTree reports whether the trace event's `file` (the

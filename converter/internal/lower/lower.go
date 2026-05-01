@@ -107,15 +107,34 @@ var headerExts = map[string]bool{
 // disable (M1-style behavior — generated sources then trigger
 // unsupported-custom-command).
 func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
+	if got := len(r.Codemodel.Configurations); got != 1 {
+		return nil, failure.New(failure.UnsupportedTargetType,
+			"M1 supports exactly one configuration; got %d", got)
+	}
+	cfg := r.Codemodel.Configurations[0]
+
 	// Pre-parse trace records once so lowerTarget can consult
 	// per-target maps without re-walking the trace bytes per
 	// target. Empty TraceRaw → empty maps, no behavior change.
+	//
+	// knownTargets lets the trace extractors keep calls that
+	// originate in producer-element cmake macros (outside the
+	// consumer source tree) but act on consumer-defined
+	// targets — the macro-from-import case. Without this,
+	// inSourceTree alone would drop those calls and lower
+	// would lose visibility/link-libs information they
+	// contribute.
+	knownTargets := map[string]bool{}
+	for _, tref := range cfg.Targets {
+		knownTargets[tref.Name] = true
+	}
+
 	var privateIncludeDirs map[string]map[string]bool // target → set of absolute private dir paths
 	var traceLinkLibs map[string][]string             // target → ordered list of cmake lib names from target_link_libraries (all visibility arms, dedup-preserved)
 	if len(opts.TraceRaw) > 0 {
 		cmakeSrcForTrace := r.Codemodel.Paths.Source
 		privateIncludeDirs = map[string]map[string]bool{}
-		for _, call := range shadow.ExtractTargetIncludes(opts.TraceRaw, cmakeSrcForTrace) {
+		for _, call := range shadow.ExtractTargetIncludes(opts.TraceRaw, cmakeSrcForTrace, knownTargets) {
 			for _, grp := range call.Groups {
 				if grp.Visibility != "PRIVATE" {
 					continue
@@ -129,7 +148,7 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 			}
 		}
 		traceLinkLibs = map[string][]string{}
-		for _, call := range shadow.ExtractTargetLinks(opts.TraceRaw, cmakeSrcForTrace) {
+		for _, call := range shadow.ExtractTargetLinks(opts.TraceRaw, cmakeSrcForTrace, knownTargets) {
 			seen := map[string]bool{}
 			for _, grp := range call.Groups {
 				for _, lib := range grp.Libs {
@@ -142,11 +161,6 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 			}
 		}
 	}
-	if got := len(r.Codemodel.Configurations); got != 1 {
-		return nil, failure.New(failure.UnsupportedTargetType,
-			"M1 supports exactly one configuration; got %d", got)
-	}
-	cfg := r.Codemodel.Configurations[0]
 
 	cmakeSrc := r.Codemodel.Paths.Source
 	cmakeBuild := r.Codemodel.Paths.Build
@@ -232,6 +246,18 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 	case "STATIC_LIBRARY":
 		irt.Kind = ir.KindCCLibrary
 		irt.Linkstatic = true
+	case "OBJECT_LIBRARY":
+		// cmake OBJECT libs compile sources to .o without
+		// archiving. Consumers reference $<TARGET_OBJECTS:t>
+		// to inline the objects into a downstream artifact.
+		// Bazel analog: cc_library with alwayslink=True so
+		// the objects always link into transitive consumers
+		// (matches cmake's "every consumer drags every
+		// object" semantics). linkstatic stays false — there's
+		// no archive; alwayslink is what carries the inline
+		// behavior.
+		irt.Kind = ir.KindCCLibrary
+		irt.Alwayslink = true
 	case "SHARED_LIBRARY", "MODULE_LIBRARY":
 		irt.Kind = ir.KindCCLibrary
 	case "EXECUTABLE":
@@ -257,6 +283,18 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 		}
 
 		if src.IsGenerated {
+			// $<TARGET_OBJECTS:other_target> shows up in
+			// codemodel as "<build>/CMakeFiles/<other>.dir/<src>.o"
+			// generated sources. The other target's compile is
+			// already captured as its own cc_library; the
+			// inlining relationship surfaces via t.Dependencies
+			// + the OBJECT lib's alwayslink=True. Skip these
+			// here — passing them through recoverGenrule would
+			// fail because cmake's C compile rule isn't a
+			// CUSTOM_COMMAND.
+			if isTargetObjectsRef(src.Path, cmakeBuild, idToName) {
+				continue
+			}
 			relOut, _, err := cc.recoverGenrule(src.Path, cmakeSrc, cmakeBuild, g)
 			if err != nil {
 				return nil, err
@@ -538,6 +576,38 @@ func stripIDHash(id string) string {
 		return id[:i]
 	}
 	return id
+}
+
+// isTargetObjectsRef reports whether srcPath is a
+// $<TARGET_OBJECTS:t> reference — cmake records these in a
+// consumer's sources[] as "<buildDir>/CMakeFiles/<t>.dir/.../*.o".
+// We recognize that shape and check whether <t> is a known
+// in-codebase target. When it is, the consumer's deps already
+// carry an edge to <t>; lower's OBJECT_LIBRARY emit gives that
+// target alwayslink=True, so the objects flow into the consumer
+// archive transitively. The .o path itself shouldn't go through
+// recoverGenrule (cmake's compile rule isn't a CUSTOM_COMMAND).
+func isTargetObjectsRef(srcPath, buildDir string, idToName map[string]string) bool {
+	rel, ok := relativeIfInsideRelaxed(buildDir, srcPath)
+	if !ok {
+		return false
+	}
+	const prefix = "CMakeFiles/"
+	if !strings.HasPrefix(rel, prefix) {
+		return false
+	}
+	tail := rel[len(prefix):]
+	dirEnd := strings.Index(tail, ".dir/")
+	if dirEnd < 0 {
+		return false
+	}
+	otherName := tail[:dirEnd]
+	for _, name := range idToName {
+		if name == otherName {
+			return true
+		}
+	}
+	return false
 }
 
 // isPathPrefix reports whether prefix is an ancestor of (or

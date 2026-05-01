@@ -420,6 +420,229 @@ func TestEmit_FindPackageStatic_Golden(t *testing.T) {
 	}
 }
 
+// TestEmit_AliasTarget_Golden covers cmake's
+// add_library(... ALIAS ...) shape. cmake's File API
+// codemodel records ONLY the underlying real target in
+// configurations[].targets[] — the alias is invisible.
+// When a consumer does target_link_libraries(t
+// aliaslib::aliaslib), cmake resolves the alias and emits
+// the dep edge as if it were against the real target.
+// Lower's dep resolution sees the resolved id and produces
+// a clean :aliaslib reference. No special-case code in lower
+// — this test is a regression guard against future changes.
+func TestEmit_AliasTarget_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/alias-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/alias-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceRaw, err := os.ReadFile("../../../testdata/fileapi/alias-target/trace.jsonl")
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src, TraceRaw: traceRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "alias-target", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("updated %s", goldenPath)
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestEmit_ObjectLibrary_Golden covers cmake's
+// add_library(... OBJECT). cmake compiles the sources to
+// .o files without archiving; consumers reference
+// $<TARGET_OBJECTS:t> in their srcs to inline the objects
+// into a downstream artifact. Codemodel emits an
+// OBJECT_LIBRARY target with CompileGroups but no Link.
+// Lower maps it to cc_library with alwayslink=True; the
+// downstream archive's deps reference it, and the inlined
+// objects flow naturally via Bazel's link-once-per-consumer
+// shape.
+func TestEmit_ObjectLibrary_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/object-library")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/object-library")
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceRaw, err := os.ReadFile("../../../testdata/fileapi/object-library/trace.jsonl")
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src, TraceRaw: traceRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "object-library", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("updated %s", goldenPath)
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestEmit_InterfaceLibrary_Golden exercises a consumer of
+// an INTERFACE_LIBRARY. cmake's codemodel doesn't emit
+// pure-INTERFACE targets in configurations[].targets[]
+// (verified against cmake 3.28 — INTERFACE libs without
+// buildable artifacts are invisible to the File API). What
+// IS visible: the consumer's CompileGroups[].Includes
+// records the flattened INTERFACE_INCLUDE_DIRECTORIES the
+// INTERFACE lib propagated. So the test covers "consumer
+// gets the right includes after cmake flattens the
+// INTERFACE chain", not "INTERFACE lib emitted as a
+// standalone Bazel target".
+//
+// Cross-element exposure of an INTERFACE library (via
+// install(EXPORT)) is a separate concern — the
+// orchestrator's cmakecfg-bundle path covers that.
+func TestEmit_InterfaceLibrary_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/interface-library")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/interface-library")
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceRaw, err := os.ReadFile("../../../testdata/fileapi/interface-library/trace.jsonl")
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src, TraceRaw: traceRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "interface-library", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("updated %s", goldenPath)
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestEmit_MacroFromImport_Golden exercises the
+// macro-from-import case: the consumer cmake project
+// includes a macro shipped by a producer element. The
+// macro lives outside the consumer source root (in the
+// fixture's `producer/` sibling, simulating a producer
+// element's installed cmake module). When the macro calls
+// target_link_libraries(consumer_target ...) cmake records
+// the call with `file` pointing at the producer module —
+// outside the consumer source root. lower's trace filter
+// keeps the call via the known-target rescue path
+// (knownTargets[args[0]]), so STATIC IMPORTED dep recovery
+// still fires.
+//
+// Golden expectation: the cc_library has a `deps` entry
+// for ZLIB even though the target_link_libraries call lives
+// in the producer's Helpers.cmake.
+func TestEmit_MacroFromImport_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/macro-from-import/consumer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/macro-from-import")
+	if err != nil {
+		t.Fatal(err)
+	}
+	importsPath, err := filepath.Abs("../../../testdata/sample-projects/macro-from-import/imports.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	imports, err := manifest.Load(importsPath)
+	if err != nil {
+		t.Fatalf("load imports manifest: %v", err)
+	}
+	traceRaw, err := os.ReadFile("../../../testdata/fileapi/macro-from-import/trace.jsonl")
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src, Imports: imports, TraceRaw: traceRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "macro-from-import", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("updated %s", goldenPath)
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestEmit_GeneratorExpressions_Golden exercises cmake's $<...>
 // generator expressions. The codemodel resolves them at
 // configure time, so what surfaces in CompileGroups[].Includes
