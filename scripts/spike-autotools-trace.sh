@@ -34,8 +34,16 @@ trap 'rm -rf "$work_dir"' EXIT
 
 bin="$work_dir/convert-element-autotools"
 tracer="$work_dir/build-tracer"
+cache_cli="$work_dir/trace-cache"
 CGO_ENABLED=0 go build -o "$bin" ./cmd/convert-element-autotools
 CGO_ENABLED=0 go build -o "$tracer" ./cmd/build-tracer
+CGO_ENABLED=0 go build -o "$cache_cli" ./cmd/trace-cache
+
+# Stand-in REAPI Action Cache root. Production swaps this for
+# real RBE storage so distributed builders share traces.
+cache_root="$work_dir/trace-cache-root"
+mkdir -p "$cache_root"
+tracer_version="strace-v1"
 
 # run_fixture stages, traces, converts, asserts.
 #
@@ -61,18 +69,39 @@ run_fixture() {
     trace="$work_dir/$name-trace.log"
     build_out="$work_dir/$name-BUILD.bazel.out"
 
-    # build-tracer wraps the build under strace and writes the
-    # trace artifact to --out. Future iterations replace this
-    # shim with a native ptrace implementation (no host strace
-    # dependency); for the spike, the contract — "trace artifact
-    # captures every execve from the build" — is what matters.
-    (cd "$src" && "$tracer" --out="$trace" -- \
-        sh -c './configure --prefix=/usr >/dev/null 2>&1 && make >/dev/null 2>&1') \
-        || {
-        echo "spike-autotools-trace[$name]: build failed under tracer" >&2
-        head -100 "$trace" >&2
-        exit 1
-    }
+    # Round 1: project B builds the element under build-tracer.
+    # The trace artifact gets registered in the cache keyed by
+    # the element's srckey + tracer_version. (For the spike we
+    # use the fixture name as a stand-in srckey; production
+    # passes the content-addressed @src_<key>// digest.)
+    srckey="$name"
+
+    if "$cache_cli" has --root="$cache_root" \
+        --srckey="$srckey" --tracer-version="$tracer_version" >/dev/null; then
+        # Round 2 (or later): cache hit. Skip the build; pull the
+        # trace from the cache. This is the path where
+        # convert-element-autotools renders native targets
+        # without needing project B to re-run.
+        "$cache_cli" lookup --root="$cache_root" \
+            --srckey="$srckey" --tracer-version="$tracer_version" \
+            --out="$trace"
+        echo "spike-autotools-trace[$name]: cache hit; reused trace from $cache_root"
+    else
+        # Round 1: cache miss. Run the build under build-tracer
+        # (today: strace shim; future: in-action ptrace). On
+        # success, register the trace for future rounds.
+        (cd "$src" && "$tracer" --out="$trace" -- \
+            sh -c './configure --prefix=/usr >/dev/null 2>&1 && make >/dev/null 2>&1') \
+            || {
+            echo "spike-autotools-trace[$name]: build failed under tracer" >&2
+            head -100 "$trace" >&2
+            exit 1
+        }
+        "$cache_cli" register --root="$cache_root" \
+            --srckey="$srckey" --tracer-version="$tracer_version" \
+            --trace="$trace"
+        echo "spike-autotools-trace[$name]: cache miss; ran tracer + registered trace"
+    fi
 
     if [ -n "$imports" ]; then
         "$bin" --trace "$trace" --out-build "$build_out" --imports-manifest "$imports"
@@ -123,3 +152,21 @@ deps = ["//elements/zlib:zlib", ":foo"]
 EOF
 run_fixture autotools-libapp "$libapp_asserts" \
     "testdata/meta-project/autotools-libapp/imports.json"
+
+# Round 2: re-run the same fixture. The cache is now populated;
+# run_fixture should hit the cache instead of running build-tracer
+# again. Asserts the round-2 BUILD.bazel.out is byte-identical to
+# round 1 (the convergence guarantee — same trace, same converter
+# version, same output).
+echo
+echo "=== round 2: re-run with populated cache ==="
+round1_libapp="$work_dir/autotools-libapp-BUILD.bazel.out"
+cp "$round1_libapp" "$work_dir/round1-libapp.txt"
+run_fixture autotools-libapp "$libapp_asserts" \
+    "testdata/meta-project/autotools-libapp/imports.json"
+if ! cmp -s "$work_dir/round1-libapp.txt" "$round1_libapp"; then
+    echo "spike-autotools-trace: round-2 BUILD.bazel.out diverged from round 1" >&2
+    diff "$work_dir/round1-libapp.txt" "$round1_libapp" >&2
+    exit 1
+fi
+echo "spike-autotools-trace: round 2 byte-identical to round 1 (convergence ok)"
