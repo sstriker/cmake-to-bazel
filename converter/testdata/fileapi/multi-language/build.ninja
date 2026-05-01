@@ -39,7 +39,7 @@ include CMakeFiles/rules.ninja
 #############################################
 # Logical path to working directory; prefix for absolute paths.
 
-cmake_ninja_workdir = /tmp/tmp.RqALgxczZe/
+cmake_ninja_workdir = /tmp/tmp.aWTzvqwnlv/
 # =============================================================================
 # Object build statements for STATIC_LIBRARY target multilang
 
@@ -89,7 +89,7 @@ build libmultilang.a: CXX_STATIC_LIBRARY_LINKER__multilang_Release CMakeFiles/mu
 # Utility command for edit_cache
 
 build CMakeFiles/edit_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.RqALgxczZe && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
+  COMMAND = cd /tmp/tmp.aWTzvqwnlv && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
   DESC = No interactive CMake dialog available...
   restat = 1
 
@@ -100,7 +100,7 @@ build edit_cache: phony CMakeFiles/edit_cache.util
 # Utility command for rebuild_cache
 
 build CMakeFiles/rebuild_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.RqALgxczZe && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/multi-language -B/tmp/tmp.RqALgxczZe
+  COMMAND = cd /tmp/tmp.aWTzvqwnlv && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/multi-language -B/tmp/tmp.aWTzvqwnlv
   DESC = Running CMake to regenerate build system...
   pool = console
   restat = 1
@@ -118,7 +118,7 @@ build list_install_components: phony
 # Utility command for install
 
 build CMakeFiles/install.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.RqALgxczZe && /usr/bin/cmake -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.aWTzvqwnlv && /usr/bin/cmake -P cmake_install.cmake
   DESC = Install the project...
   pool = console
   restat = 1
@@ -130,7 +130,7 @@ build install: phony CMakeFiles/install.util
 # Utility command for install/local
 
 build CMakeFiles/install/local.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.RqALgxczZe && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.aWTzvqwnlv && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
   DESC = Installing only the local directory...
   pool = console
   restat = 1
@@ -142,7 +142,7 @@ build install/local: phony CMakeFiles/install/local.util
 # Utility command for install/strip
 
 build CMakeFiles/install/strip.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.RqALgxczZe && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.aWTzvqwnlv && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
   DESC = Installing the project stripped...
   pool = console
   restat = 1
@@ -160,7 +160,7 @@ build multilang: phony libmultilang.a
 # =============================================================================
 
 #############################################
-# Folder: /tmp/tmp.RqALgxczZe
+# Folder: /tmp/tmp.aWTzvqwnlv
 
 build all: phony libmultilang.a
 

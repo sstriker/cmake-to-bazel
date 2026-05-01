@@ -42,7 +42,7 @@ rule CUSTOM_COMMAND
 # Rule for re-running cmake.
 
 rule RERUN_CMAKE
-  command = /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target -B/tmp/tmp.1OoNOxgoxb
+  command = /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target -B/tmp/tmp.eoWyEt6Vo2
   description = Re-running CMake...
   generator = 1
 

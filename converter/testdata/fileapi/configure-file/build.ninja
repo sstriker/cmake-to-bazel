@@ -39,7 +39,7 @@ include CMakeFiles/rules.ninja
 #############################################
 # Logical path to working directory; prefix for absolute paths.
 
-cmake_ninja_workdir = /tmp/tmp.S6LVLQEBC5/
+cmake_ninja_workdir = /tmp/tmp.6AOPucGsJ3/
 # =============================================================================
 # Object build statements for STATIC_LIBRARY target cfglib
 
@@ -52,7 +52,7 @@ build cmake_object_order_depends_target_cfglib: phony || CMakeFiles/cfglib.dir
 build CMakeFiles/cfglib.dir/src/cfglib.c.o: C_COMPILER__cfglib_unscanned_Release /home/user/cmake-to-bazel/converter/testdata/sample-projects/configure-file/src/cfglib.c || cmake_object_order_depends_target_cfglib
   DEP_FILE = CMakeFiles/cfglib.dir/src/cfglib.c.o.d
   FLAGS = -O3 -DNDEBUG
-  INCLUDES = -I/home/user/cmake-to-bazel/converter/testdata/sample-projects/configure-file/src -I/tmp/tmp.S6LVLQEBC5
+  INCLUDES = -I/home/user/cmake-to-bazel/converter/testdata/sample-projects/configure-file/src -I/tmp/tmp.6AOPucGsJ3
   OBJECT_DIR = CMakeFiles/cfglib.dir
   OBJECT_FILE_DIR = CMakeFiles/cfglib.dir/src
   TARGET_COMPILE_PDB = CMakeFiles/cfglib.dir/cfglib.pdb
@@ -80,7 +80,7 @@ build libcfglib.a: C_STATIC_LIBRARY_LINKER__cfglib_Release CMakeFiles/cfglib.dir
 # Utility command for edit_cache
 
 build CMakeFiles/edit_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.S6LVLQEBC5 && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
+  COMMAND = cd /tmp/tmp.6AOPucGsJ3 && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
   DESC = No interactive CMake dialog available...
   restat = 1
 
@@ -91,7 +91,7 @@ build edit_cache: phony CMakeFiles/edit_cache.util
 # Utility command for rebuild_cache
 
 build CMakeFiles/rebuild_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.S6LVLQEBC5 && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/configure-file -B/tmp/tmp.S6LVLQEBC5
+  COMMAND = cd /tmp/tmp.6AOPucGsJ3 && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/configure-file -B/tmp/tmp.6AOPucGsJ3
   DESC = Running CMake to regenerate build system...
   pool = console
   restat = 1
@@ -109,7 +109,7 @@ build list_install_components: phony
 # Utility command for install
 
 build CMakeFiles/install.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.S6LVLQEBC5 && /usr/bin/cmake -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.6AOPucGsJ3 && /usr/bin/cmake -P cmake_install.cmake
   DESC = Install the project...
   pool = console
   restat = 1
@@ -121,7 +121,7 @@ build install: phony CMakeFiles/install.util
 # Utility command for install/local
 
 build CMakeFiles/install/local.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.S6LVLQEBC5 && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.6AOPucGsJ3 && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
   DESC = Installing only the local directory...
   pool = console
   restat = 1
@@ -133,7 +133,7 @@ build install/local: phony CMakeFiles/install/local.util
 # Utility command for install/strip
 
 build CMakeFiles/install/strip.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.S6LVLQEBC5 && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.6AOPucGsJ3 && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
   DESC = Installing the project stripped...
   pool = console
   restat = 1
@@ -151,7 +151,7 @@ build cfglib: phony libcfglib.a
 # =============================================================================
 
 #############################################
-# Folder: /tmp/tmp.S6LVLQEBC5
+# Folder: /tmp/tmp.6AOPucGsJ3
 
 build all: phony libcfglib.a
 

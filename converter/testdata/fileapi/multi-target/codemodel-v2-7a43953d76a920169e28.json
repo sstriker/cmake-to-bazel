@@ -1,0 +1,79 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Release-80c675534b384bbf2348.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Release",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "multi",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "multibin::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-multibin-Release-1310d2160c662c1975c4.json",
+					"name" : "multibin",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "multishared::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-multishared-Release-cef2dc1a27d854a7a896.json",
+					"name" : "multishared",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "multistatic::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-multistatic-Release-7b573dfb8f1b0737171b.json",
+					"name" : "multistatic",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/tmp/tmp.PGbk44WBxe",
+		"source" : "/home/user/cmake-to-bazel/converter/testdata/sample-projects/multi-target"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 6
+	}
+}

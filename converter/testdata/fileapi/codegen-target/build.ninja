@@ -39,7 +39,7 @@ include CMakeFiles/rules.ninja
 #############################################
 # Logical path to working directory; prefix for absolute paths.
 
-cmake_ninja_workdir = /tmp/tmp.1OoNOxgoxb/
+cmake_ninja_workdir = /tmp/tmp.eoWyEt6Vo2/
 
 #############################################
 # Utility command for gen_version
@@ -58,7 +58,7 @@ build cmake_object_order_depends_target_codegen: phony || gen_version version.h
 build CMakeFiles/codegen.dir/src/codegen.c.o: C_COMPILER__codegen_unscanned_Release /home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target/src/codegen.c || cmake_object_order_depends_target_codegen
   DEP_FILE = CMakeFiles/codegen.dir/src/codegen.c.o.d
   FLAGS = -O3 -DNDEBUG
-  INCLUDES = -I/tmp/tmp.1OoNOxgoxb
+  INCLUDES = -I/tmp/tmp.eoWyEt6Vo2
   OBJECT_DIR = CMakeFiles/codegen.dir
   OBJECT_FILE_DIR = CMakeFiles/codegen.dir/src
   TARGET_COMPILE_PDB = CMakeFiles/codegen.dir/codegen.pdb
@@ -86,7 +86,7 @@ build libcodegen.a: C_STATIC_LIBRARY_LINKER__codegen_Release CMakeFiles/codegen.
 # Utility command for edit_cache
 
 build CMakeFiles/edit_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.1OoNOxgoxb && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
+  COMMAND = cd /tmp/tmp.eoWyEt6Vo2 && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
   DESC = No interactive CMake dialog available...
   restat = 1
 
@@ -97,7 +97,7 @@ build edit_cache: phony CMakeFiles/edit_cache.util
 # Utility command for rebuild_cache
 
 build CMakeFiles/rebuild_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.1OoNOxgoxb && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target -B/tmp/tmp.1OoNOxgoxb
+  COMMAND = cd /tmp/tmp.eoWyEt6Vo2 && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target -B/tmp/tmp.eoWyEt6Vo2
   DESC = Running CMake to regenerate build system...
   pool = console
   restat = 1
@@ -115,7 +115,7 @@ build list_install_components: phony
 # Utility command for install
 
 build CMakeFiles/install.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.1OoNOxgoxb && /usr/bin/cmake -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.eoWyEt6Vo2 && /usr/bin/cmake -P cmake_install.cmake
   DESC = Install the project...
   pool = console
   restat = 1
@@ -127,7 +127,7 @@ build install: phony CMakeFiles/install.util
 # Utility command for install/local
 
 build CMakeFiles/install/local.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.1OoNOxgoxb && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.eoWyEt6Vo2 && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
   DESC = Installing only the local directory...
   pool = console
   restat = 1
@@ -139,7 +139,7 @@ build install/local: phony CMakeFiles/install/local.util
 # Utility command for install/strip
 
 build CMakeFiles/install/strip.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.1OoNOxgoxb && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.eoWyEt6Vo2 && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
   DESC = Installing the project stripped...
   pool = console
   restat = 1
@@ -157,7 +157,7 @@ build CMakeFiles/gen_version | ${cmake_ninja_workdir}CMakeFiles/gen_version: pho
 # Custom command for version.h
 
 build version.h | ${cmake_ninja_workdir}version.h: CUSTOM_COMMAND /home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target/scripts/gen_version.py
-  COMMAND = cd /tmp/tmp.1OoNOxgoxb && /usr/bin/python3 /home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target/scripts/gen_version.py /tmp/tmp.1OoNOxgoxb/version.h 0.1.0
+  COMMAND = cd /tmp/tmp.eoWyEt6Vo2 && /usr/bin/python3 /home/user/cmake-to-bazel/converter/testdata/sample-projects/codegen-target/scripts/gen_version.py /tmp/tmp.eoWyEt6Vo2/version.h 0.1.0
   DESC = Generating version.h
   restat = 1
 
@@ -172,7 +172,7 @@ build codegen: phony libcodegen.a
 # =============================================================================
 
 #############################################
-# Folder: /tmp/tmp.1OoNOxgoxb
+# Folder: /tmp/tmp.eoWyEt6Vo2
 
 build all: phony libcodegen.a
 

@@ -219,24 +219,35 @@ func contains(haystack, needle string) bool {
 // at cmake-configure time. The cc_library compiles a .c that
 // includes the generated header.
 //
-// Known delta captured by the golden: the generated config.h
-// dependency isn't represented in the BUILD output. cfglib.c
-// includes config.h, but the cc_library has neither an `hdrs`
-// reference nor a `deps` to a genrule that produces it.
-// Bazel-build of the converted output would fail because Bazel
-// doesn't know where config.h comes from. Real fix: emit a
-// genrule for configure_file (template substitution) + reference
-// it in the cc_library's hdrs.
+// Lower's recovery path: trace records configure_file calls'
+// (input, output) pairs; the recording script stashes the
+// rendered output bytes in the fixture mirroring the build-dir
+// layout. lower reads those bytes, emits a genrule that
+// base64-decodes them at Bazel build time, and attaches the
+// output to the consuming cc_library's hdrs (matched by the
+// target's codemodel-recorded build-dir include).
 func TestEmit_ConfigureFile_Golden(t *testing.T) {
 	src, err := filepath.Abs("../../../testdata/sample-projects/configure-file")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := fileapi.Load("../../../testdata/fileapi/configure-file")
+	replyDir, err := filepath.Abs("../../../testdata/fileapi/configure-file")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src})
+	r, err := fileapi.Load(replyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceRaw, err := os.ReadFile(filepath.Join(replyDir, "trace.jsonl"))
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{
+		HostSourceRoot: src,
+		BuildDir:       replyDir,
+		TraceRaw:       traceRaw,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,6 +367,59 @@ func TestEmit_FindPackage_Golden(t *testing.T) {
 	}
 }
 
+// TestEmit_FindPackageStatic_Golden exercises the STATIC
+// IMPORTED-dep recovery path. For STATIC archives cmake's
+// codemodel records no `dependencies` and no Link
+// (no link step for an .a), so an IMPORTED target like
+// ZLIB::ZLIB used via target_link_libraries is invisible
+// from the codemodel alone. Lower's STATIC fallback
+// consults the trace's target_link_libraries call to
+// surface the dep.
+func TestEmit_FindPackageStatic_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/find-package-static")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/find-package-static")
+	if err != nil {
+		t.Fatal(err)
+	}
+	imports, err := manifest.Load(filepath.Join(src, "imports.json"))
+	if err != nil {
+		t.Fatalf("load imports manifest: %v", err)
+	}
+	traceRaw, err := os.ReadFile("../../../testdata/fileapi/find-package-static/trace.jsonl")
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src, Imports: imports, TraceRaw: traceRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "find-package-static", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("updated %s", goldenPath)
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestEmit_GeneratorExpressions_Golden exercises cmake's $<...>
 // generator expressions. The codemodel resolves them at
 // configure time, so what surfaces in CompileGroups[].Includes
@@ -449,20 +513,13 @@ func TestEmit_MultiLanguage_Golden(t *testing.T) {
 // TestEmit_Visibility_Golden exercises target_include_directories'
 // PUBLIC vs PRIVATE distinction. The codemodel doesn't tag
 // individual include entries with visibility — both arms flatten
-// into compileGroups[].includes[]. lower can't differentiate
-// from the codemodel alone, so PRIVATE includes leak as
-// consumer-visible.
-//
-// Known delta captured by the golden:
-//   - hdrs = [..., "include/private/internal.h"] — PRIVATE
-//     header surfaces alongside PUBLIC ones.
-//   - includes = ["include", "include/private"] — PRIVATE
-//     dir surfaces in cc_library's consumer-visible includes.
-//
-// Fix shape (deferred — needs trace-expand parser; same parser
-// closes configure_file + STATIC IMPORTED deps): parse cmake's
-// --trace-expand output for target_include_directories calls'
-// PUBLIC/PRIVATE keywords. See docs/cmake-conversion-deltas.md.
+// into compileGroups[].includes[]. lower recovers the keyword
+// arms from cmake's --trace-expand output (parsed in
+// internal/shadow). PUBLIC dirs flow into cc_library.includes
+// (consumer-visible); PRIVATE dirs flow into copts as
+// `-I<dir>` (compile-only, not propagated). PRIVATE-only
+// headers don't surface in `hdrs` because discoverHeaders
+// only walks the public include set.
 func TestEmit_Visibility_Golden(t *testing.T) {
 	src, err := filepath.Abs("../../../testdata/sample-projects/visibility")
 	if err != nil {
@@ -472,7 +529,11 @@ func TestEmit_Visibility_Golden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src})
+	traceRaw, err := os.ReadFile("../../../testdata/fileapi/visibility/trace.jsonl")
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src, TraceRaw: traceRaw})
 	if err != nil {
 		t.Fatal(err)
 	}

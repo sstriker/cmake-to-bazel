@@ -158,11 +158,42 @@ func run(a cli.Args) error {
 		}
 	}
 
+	// Trace bytes drive lower's PUBLIC/PRIVATE-aware include
+	// partition, IMPORTED-target dep recovery for static libs,
+	// and configure_file genrule emission. Read from the
+	// build dir (where cmake just wrote it) when running cmake
+	// ourselves, or from the reply dir's sibling location for
+	// the offline --reply-dir fixture path.
+	var traceRaw []byte
+	tracePath := ""
+	if hostBuildDir != "" {
+		tracePath = filepath.Join(hostBuildDir, "trace.jsonl")
+	} else if a.ReplyDir != "" {
+		tracePath = filepath.Join(a.ReplyDir, "trace.jsonl")
+	}
+	if tracePath != "" {
+		if body, readErr := os.ReadFile(tracePath); readErr == nil {
+			traceRaw = body
+		}
+	}
+
+	// BuildDir is where lower's configure_file recovery reads
+	// rendered output bytes. Live cmake build dir in production;
+	// the fixture reply dir mirrors the build-dir layout (the
+	// recording script stashes configure_file outputs at their
+	// build-relative paths) for offline test runs.
+	hostBuildOrReply := hostBuildDir
+	if hostBuildOrReply == "" {
+		hostBuildOrReply = a.ReplyDir
+	}
+
 	pkg, err := lower.ToIR(r, g, lower.Options{
 		HostSourceRoot: a.SourceRoot,
 		HostPrefixDir:  prefixAbs,
+		BuildDir:       hostBuildOrReply,
 		Imports:        imports,
 		CTest:          testRegistry,
+		TraceRaw:       traceRaw,
 	})
 	if err != nil {
 		return err

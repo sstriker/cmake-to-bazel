@@ -39,7 +39,7 @@ include CMakeFiles/rules.ninja
 #############################################
 # Logical path to working directory; prefix for absolute paths.
 
-cmake_ninja_workdir = /tmp/tmp.o4NIeF5ikc/
+cmake_ninja_workdir = /tmp/tmp.PGbk44WBxe/
 # =============================================================================
 # Object build statements for STATIC_LIBRARY target multistatic
 
@@ -111,7 +111,7 @@ build libmultishared.so.0.1.0: C_SHARED_LIBRARY_LINKER__multishared_Release CMak
   SONAME_FLAG = -Wl,-soname,
   TARGET_COMPILE_PDB = CMakeFiles/multishared.dir/
   TARGET_FILE = libmultishared.so.0.1.0
-  TARGET_IMPLIB = /tmp/tmp.o4NIeF5ikc/
+  TARGET_IMPLIB = /tmp/tmp.PGbk44WBxe/
   TARGET_PDB = libmultishared.pdb
 
 
@@ -162,7 +162,7 @@ build multibin: C_EXECUTABLE_LINKER__multibin_Release CMakeFiles/multibin.dir/sr
 # Utility command for edit_cache
 
 build CMakeFiles/edit_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.o4NIeF5ikc && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
+  COMMAND = cd /tmp/tmp.PGbk44WBxe && /usr/bin/cmake -E echo No\ interactive\ CMake\ dialog\ available.
   DESC = No interactive CMake dialog available...
   restat = 1
 
@@ -173,7 +173,7 @@ build edit_cache: phony CMakeFiles/edit_cache.util
 # Utility command for rebuild_cache
 
 build CMakeFiles/rebuild_cache.util: CUSTOM_COMMAND
-  COMMAND = cd /tmp/tmp.o4NIeF5ikc && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/multi-target -B/tmp/tmp.o4NIeF5ikc
+  COMMAND = cd /tmp/tmp.PGbk44WBxe && /usr/bin/cmake --regenerate-during-build -S/home/user/cmake-to-bazel/converter/testdata/sample-projects/multi-target -B/tmp/tmp.PGbk44WBxe
   DESC = Running CMake to regenerate build system...
   pool = console
   restat = 1
@@ -191,7 +191,7 @@ build list_install_components: phony
 # Utility command for install
 
 build CMakeFiles/install.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.o4NIeF5ikc && /usr/bin/cmake -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.PGbk44WBxe && /usr/bin/cmake -P cmake_install.cmake
   DESC = Install the project...
   pool = console
   restat = 1
@@ -203,7 +203,7 @@ build install: phony CMakeFiles/install.util
 # Utility command for install/local
 
 build CMakeFiles/install/local.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.o4NIeF5ikc && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.PGbk44WBxe && /usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
   DESC = Installing only the local directory...
   pool = console
   restat = 1
@@ -215,7 +215,7 @@ build install/local: phony CMakeFiles/install/local.util
 # Utility command for install/strip
 
 build CMakeFiles/install/strip.util: CUSTOM_COMMAND all
-  COMMAND = cd /tmp/tmp.o4NIeF5ikc && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+  COMMAND = cd /tmp/tmp.PGbk44WBxe && /usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
   DESC = Installing the project stripped...
   pool = console
   restat = 1
@@ -235,7 +235,7 @@ build multistatic: phony libmultistatic.a
 # =============================================================================
 
 #############################################
-# Folder: /tmp/tmp.o4NIeF5ikc
+# Folder: /tmp/tmp.PGbk44WBxe
 
 build all: phony libmultistatic.a libmultishared.so multibin
 

@@ -21,6 +21,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ir"
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
+	"github.com/sstriker/cmake-to-bazel/internal/shadow"
 )
 
 // Options controls behavior that the orchestrator (M3) overrides per-package.
@@ -51,6 +52,37 @@ type Options struct {
 	// dir; nil means no test classification (every EXECUTABLE stays
 	// cc_binary, matching pre-CTest-support behavior).
 	CTest *ctest.Registry
+
+	// BuildDir is the host-real path of the cmake build directory
+	// where configured outputs (configure_file's targets, version
+	// headers cmake writes at configure time, etc.) live on this
+	// machine. Used together with TraceRaw to read the rendered
+	// bytes of configure_file outputs and embed them into Bazel
+	// genrules. Empty disables configure_file recovery.
+	//
+	// Production: the live cmake build dir convert-element just
+	// configured.
+	// Offline tests: the fixture dir, which record-fileapi.sh
+	// stashes configured outputs into mirroring the build-dir
+	// layout.
+	BuildDir string
+
+	// TraceRaw is cmake's --trace-expand --trace-format=json-v1
+	// output (one JSON event per line). When non-empty, lower
+	// uses it to surface signals the codemodel doesn't expose:
+	//   - target_include_directories PUBLIC/PRIVATE arms
+	//     (visibility delta — the codemodel flattens both
+	//     into compileGroups[].includes[]).
+	//   - target_link_libraries IMPORTED-target deps for
+	//     STATIC libs (find-package STATIC delta — codemodel
+	//     records nothing for static-lib link inputs).
+	//   - configure_file(<input> <output> ...) input/output
+	//     pairings (configure_file delta — cmakeFiles records
+	//     the input only).
+	//
+	// Empty disables the trace-driven enrichment paths;
+	// codemodel-only behavior matches pre-trace lower output.
+	TraceRaw []byte
 }
 
 // manifestPrefixAnchor is the canonical token the orchestrator's imports
@@ -75,6 +107,41 @@ var headerExts = map[string]bool{
 // disable (M1-style behavior — generated sources then trigger
 // unsupported-custom-command).
 func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
+	// Pre-parse trace records once so lowerTarget can consult
+	// per-target maps without re-walking the trace bytes per
+	// target. Empty TraceRaw → empty maps, no behavior change.
+	var privateIncludeDirs map[string]map[string]bool // target → set of absolute private dir paths
+	var traceLinkLibs map[string][]string             // target → ordered list of cmake lib names from target_link_libraries (all visibility arms, dedup-preserved)
+	if len(opts.TraceRaw) > 0 {
+		cmakeSrcForTrace := r.Codemodel.Paths.Source
+		privateIncludeDirs = map[string]map[string]bool{}
+		for _, call := range shadow.ExtractTargetIncludes(opts.TraceRaw, cmakeSrcForTrace) {
+			for _, grp := range call.Groups {
+				if grp.Visibility != "PRIVATE" {
+					continue
+				}
+				if _, ok := privateIncludeDirs[call.Target]; !ok {
+					privateIncludeDirs[call.Target] = map[string]bool{}
+				}
+				for _, dir := range grp.Dirs {
+					privateIncludeDirs[call.Target][dir] = true
+				}
+			}
+		}
+		traceLinkLibs = map[string][]string{}
+		for _, call := range shadow.ExtractTargetLinks(opts.TraceRaw, cmakeSrcForTrace) {
+			seen := map[string]bool{}
+			for _, grp := range call.Groups {
+				for _, lib := range grp.Libs {
+					if seen[lib] {
+						continue
+					}
+					seen[lib] = true
+					traceLinkLibs[call.Target] = append(traceLinkLibs[call.Target], lib)
+				}
+			}
+		}
+	}
 	if got := len(r.Codemodel.Configurations); got != 1 {
 		return nil, failure.New(failure.UnsupportedTargetType,
 			"M1 supports exactly one configuration; got %d", got)
@@ -94,6 +161,17 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 	}
 
 	cc := newCodegenContext()
+
+	// Recover configure_file outputs from trace before lowering
+	// targets. Each call surfaces as an ir.Target{KindGenrule}
+	// on cc.Genrules; the returned slice tells lowerTarget which
+	// recorded outputs (and their build-dir-relative paths) to
+	// attach to consuming targets that include the cmake build
+	// dir in their codemodel-recorded Includes.
+	configureFiles, err := recoverConfigureFiles(opts.TraceRaw, opts.BuildDir, cmakeSrc, cmakeBuild, cc)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build the in-codebase id -> Bazel-rule-name map up front so dep
 	// lowering can map t.Dependencies[].Id to a label without re-walking
@@ -118,7 +196,7 @@ func ToIR(r *fileapi.Reply, g *ninja.Graph, opts Options) (*ir.Package, error) {
 			return nil, failure.New(failure.FileAPIMalformed,
 				"target id %q in codemodel but not loaded", tref.Id)
 		}
-		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, opts.HostPrefixDir, g, cc, idToName, utilityIDs, opts.Imports, opts.CTest)
+		irt, err := lowerTarget(&t, cmakeSrc, cmakeBuild, hostSrc, opts.HostPrefixDir, g, cc, idToName, utilityIDs, opts.Imports, opts.CTest, privateIncludeDirs[tref.Name], traceLinkLibs[tref.Name], configureFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +225,7 @@ func projectName(r *fileapi.Reply) string {
 	return ""
 }
 
-func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix string, g *ninja.Graph, cc *codegenContext, idToName map[string]string, utilityIDs map[string]bool, imports *manifest.Resolver, tests *ctest.Registry) (*ir.Target, error) {
+func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix string, g *ninja.Graph, cc *codegenContext, idToName map[string]string, utilityIDs map[string]bool, imports *manifest.Resolver, tests *ctest.Registry, privateIncludeDirs map[string]bool, traceLinkLibs []string, configureFiles []configureFileOut) (*ir.Target, error) {
 	irt := &ir.Target{Name: t.Name}
 
 	switch t.Type {
@@ -210,6 +288,14 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 		irt.Tags = append(irt.Tags, "has-cmake-codegen")
 	}
 
+	// Build-dir-rooted includes (relative to the cmake build
+	// dir). Populated alongside the source-tree includes in
+	// the CompileGroup walk; used afterward for configure_file
+	// consumer attribution. Empty for targets that don't
+	// include any build-dir path — they consume no
+	// configure_file outputs.
+	targetBuildIncs := map[string]bool{}
+
 	if len(t.CompileGroups) > 0 {
 		// M1 assumption: at most one language per target. Aggregate the
 		// first compile group's flags/includes/defines.
@@ -230,8 +316,29 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 		// accepts duplicates but they're cosmetic noise. Dedup-while-
 		// preserving-order at IR-build time so any downstream
 		// consumer of irt.Includes sees a clean list.
+		//
+		// PRIVATE-include partition: when a trace record (loaded
+		// in ToIR) marks an absolute include path as PRIVATE for
+		// this target, the dir flows into the cc_library's compile-
+		// only `copts = ["-I<dir>"]` rather than the
+		// consumer-visible `includes` attribute. cmake's PUBLIC
+		// keyword propagates to consumers; PRIVATE doesn't —
+		// Bazel's `includes` is consumer-visible by default, so
+		// PRIVATE has to ride on -I in copts to preserve
+		// encapsulation.
 		seenInc := map[string]bool{}
 		for _, inc := range cg.Includes {
+			if rel, ok := relativeIfInsideRelaxed(cmakeBuild, inc.Path); ok {
+				// Build-dir include — codemodel records this
+				// for targets that target_include_directories'd
+				// $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+				// (typical configure_file consumer pattern).
+				// Track for the configure_file consumer
+				// attribution below; don't surface in
+				// irt.Includes (source-tree-relative only).
+				targetBuildIncs[rel] = true
+				continue
+			}
 			rel, ok := relativeIfInside(cmakeSrc, inc.Path)
 			if !ok {
 				continue
@@ -240,7 +347,36 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 				continue
 			}
 			seenInc[rel] = true
+			if privateIncludeDirs[inc.Path] {
+				// Compile-only — don't propagate to consumers.
+				irt.Copts = append(irt.Copts, "-I"+rel)
+				continue
+			}
 			irt.Includes = append(irt.Includes, rel)
+		}
+	}
+
+	// configure_file consumer attribution. Any target whose
+	// codemodel-recorded includes contain the cmake build dir
+	// (or a subdir thereof) is a candidate consumer of
+	// configure_file outputs that landed inside that include
+	// path. We add each matching output to the target's hdrs;
+	// the genrule that produces it is already on cc.Genrules
+	// from recoverConfigureFiles. cmake-codegen tag mirrors the
+	// existing CUSTOM_COMMAND-recovered consumer's shape.
+	if len(configureFiles) > 0 && len(targetBuildIncs) > 0 {
+		var addedHdrs []string
+		for _, cfgOut := range configureFiles {
+			for inc := range targetBuildIncs {
+				if isPathPrefix(inc, cfgOut.RelOutput) {
+					addedHdrs = append(addedHdrs, cfgOut.RelOutput)
+					break
+				}
+			}
+		}
+		if len(addedHdrs) > 0 {
+			irt.Hdrs = append(irt.Hdrs, addedHdrs...)
+			irt.Tags = append(irt.Tags, "has-cmake-codegen")
 		}
 	}
 
@@ -303,6 +439,31 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 				path = manifestPrefixAnchor + path[len(hostPrefix)+1:]
 			}
 			if export := imports.LookupLinkPath(path); export != nil {
+				if !seen[export.BazelLabel] {
+					seen[export.BazelLabel] = true
+					irt.Deps = append(irt.Deps, export.BazelLabel)
+				}
+			}
+		}
+	}
+
+	// STATIC IMPORTED dep recovery from trace. STATIC archives don't
+	// run a link step at build time, so cmake's codemodel records
+	// no Link.CommandFragments and no IMPORTED-target Dependencies
+	// for them — both upstream channels are empty. Trace's
+	// target_link_libraries calls are the only ground truth for a
+	// static lib's IMPORTED deps. For each lib name the trace
+	// records, look it up in the imports manifest; resolve hits
+	// are appended (deduped). Non-IMPORTED libs (in-codebase target
+	// names) already came in via t.Dependencies above and are
+	// covered by the seen-map.
+	if t.Type == "STATIC_LIBRARY" && len(traceLinkLibs) > 0 {
+		seen := map[string]bool{}
+		for _, d := range irt.Deps {
+			seen[d] = true
+		}
+		for _, lib := range traceLinkLibs {
+			if export := imports.LookupCMakeTarget(lib); export != nil {
 				if !seen[export.BazelLabel] {
 					seen[export.BazelLabel] = true
 					irt.Deps = append(irt.Deps, export.BazelLabel)
@@ -377,6 +538,24 @@ func stripIDHash(id string) string {
 		return id[:i]
 	}
 	return id
+}
+
+// isPathPrefix reports whether prefix is an ancestor of (or
+// equal to the parent dir of) path, where both are
+// slash-separated path strings. Empty prefix matches anything
+// (means "the whole containing dir"). Used by the configure_file
+// consumer attribution to test whether a target's build-dir
+// include covers a configured-file output. Pure path semantics —
+// no filesystem access.
+func isPathPrefix(prefix, path string) bool {
+	if prefix == "" || prefix == "." {
+		return true
+	}
+	prefix = strings.TrimSuffix(prefix, "/")
+	if path == prefix {
+		return true
+	}
+	return strings.HasPrefix(path, prefix+"/")
 }
 
 // dedupeStrings returns a copy of in with consecutive duplicates removed. The

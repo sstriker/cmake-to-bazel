@@ -39,6 +39,8 @@ record_one() {
     cmake -S "$src" -B "$build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        --trace-expand --trace-format=json-v1 \
+        --trace-redirect="$build/trace.jsonl" \
         >"$build/cmake.stdout" 2>"$build/cmake.stderr"
 
     rm -rf "$out"
@@ -52,6 +54,37 @@ record_one() {
     if [[ -f "$build/CMakeFiles/rules.ninja" ]]; then
         mkdir -p "$out/CMakeFiles"
         cp "$build/CMakeFiles/rules.ninja" "$out/CMakeFiles/rules.ninja"
+    fi
+    # Capture cmake's --trace-expand output. Used by lower's
+    # PUBLIC/PRIVATE-aware include partitioner, IMPORTED-target
+    # dep recovery for static libs, and configure_file genrule
+    # emission. See internal/shadow/trace_commands.go.
+    #
+    # Trace events embed absolute paths (the recording machine's
+    # source + build dirs). Lower's inSourceTree check uses
+    # codemodel's Paths.Source — also a recorded absolute path —
+    # so the in-tree filter compares recorded-vs-recorded. Both
+    # baked-in paths stay consistent across replays; tests on a
+    # different checkout work because the same recorded prefix
+    # is used to extract relative paths from both.
+    if [[ -f "$build/trace.jsonl" ]]; then
+        cp "$build/trace.jsonl" "$out/trace.jsonl"
+
+        # Stash configure_file outputs into the fixture mirroring
+        # the build-dir layout. lower's configure_file recovery
+        # reads each output's bytes from the build dir at convert-
+        # element time; offline test runs need those bytes
+        # captured here. Outputs outside the build dir (rare —
+        # configure_file with absolute non-build dest) are
+        # skipped because lower can't anchor them anyway.
+        while IFS= read -r abs_out; do
+            [[ -z "$abs_out" ]] && continue
+            [[ "$abs_out" == "$build/"* ]] || continue
+            [[ -f "$abs_out" ]] || continue
+            rel="${abs_out#"$build/"}"
+            mkdir -p "$out/$(dirname "$rel")"
+            cp "$abs_out" "$out/$rel"
+        done < <(jq -r 'select(.cmd == "configure_file") | .args[1] // empty' "$build/trace.jsonl")
     fi
 
     echo "    -> $(find "$out" -type f | wc -l) files in $out"

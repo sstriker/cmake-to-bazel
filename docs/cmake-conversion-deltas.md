@@ -60,41 +60,6 @@ diff, not a build-time correctness issue.
 
 This delta stays open as documentation; no fix is planned.
 
-### configure-file — generated header dependency missing (correctness)
-
-**Fixture**: `converter/testdata/sample-projects/configure-file/`
-(`configure_file(config.h.in config.h)` produces a build-tree
-header; `cfglib.c` includes it).
-
-**Surfaced**: the emitted `cc_library(name = "cfglib")` has
-neither an `hdrs` reference to `config.h` nor a `deps` to a
-genrule that produces it. Bazel-build of the converted output
-would fail at compile time because the include path resolves to
-nothing — Bazel doesn't know where `config.h` comes from.
-
-**Why heuristics aren't safe here**: cmakeFiles-v1's `inputs`
-records `.in` files but doesn't record their output paths
-(configure_file's `output` arg is arbitrary, not derivable
-from the input name). Walking the build dir for files whose
-basename matches an `.in` input's basename-without-`.in`
-false-positives on unrelated build artifacts that happen to
-share the name.
-
-**Fix shape (high confidence)**: extend cmake's trace-expand
-infrastructure (already wired for read-paths narrowing) to
-parse `configure_file(<input> <output> ...)` calls. The trace
-JSON records the literal arguments resolved to cmake's
-variable scope — exactly the input/output pairing we need,
-with no inference. With that pairing in hand:
-1. Read the resolved generated file from the build dir.
-2. Emit a Bazel genrule whose cmd writes the resolved bytes
-   verbatim (snapshotting cmake-configure-time state).
-3. Reference the genrule's output in the consuming
-   cc_library's `hdrs`.
-
-The trace-expand approach also closes the find-package STATIC
-delta below — same parser, different command.
-
 ### multi-language — only first compile group's flags emitted (correctness)
 
 **Fixture**: `converter/testdata/sample-projects/multi-language/`
@@ -125,71 +90,80 @@ mapping. Defer until FDSDK actually surfaces multi-language
 targets in the curated probe set (most kind:cmake elements are
 single-language); track here so a future PR can pick it up.
 
-### visibility — PRIVATE includes / headers leak as consumer-visible
-
-**Fixture**: `converter/testdata/sample-projects/visibility/`
-(one cc_library with PUBLIC `include/` + PRIVATE `include/private/`).
-
-**Surfaced**: emitted `cc_library(name = "visi")`:
-- `hdrs = ["include/private/internal.h", "include/visi.h"]` —
-  the PRIVATE `internal.h` lands alongside the PUBLIC `visi.h`.
-  Consumer `#include "internal.h"` would resolve, leaking the
-  encapsulation cmake's PRIVATE keyword was meant to enforce.
-- `includes = ["include", "include/private"]` — both dirs
-  surface in cc_library's `includes`, which Bazel propagates
-  to every consumer's compile command.
-
-The codemodel doesn't tag visibility on individual entries
-(verified empirically — `compileGroups[].includes[]` records
-both PUBLIC and PRIVATE arms flat with no distinguishing
-field). lower can't differentiate PUBLIC vs PRIVATE from the
-codemodel alone.
-
-**Fix shape (high confidence)**: same trace-expand parser as
-configure_file + STATIC-IMPORTED-deps. cmake's trace records
-`target_include_directories(<target> PUBLIC <a> ... PRIVATE
-<b> ...)` calls with the keywords intact; lower can split the
-codemodel's flat include list into PUBLIC vs PRIVATE arms by
-matching paths to the trace-recorded keyword groups. Then:
-emit only PUBLIC dirs in cc_library.includes; PRIVATE dirs
-become per-source `copts = ["-Iinclude/private"]` (compile-only,
-not consumer-visible).
-
-This trace-expand work is now justified by THREE deltas
-converging on it: configure_file, STATIC IMPORTED deps,
-and visibility. Worth doing when the FDSDK reality-check
-probe surfaces a case where any of the three actually breaks
-a build.
-
-### find-package STATIC — IMPORTED deps don't surface (correctness)
-
-**Fixture**: `converter/testdata/sample-projects/find-package/`
-(uses `find_package(ZLIB REQUIRED)` + a SHARED cc_library that
-links against `ZLIB::ZLIB`; the imports manifest maps the link
-path to a Bazel label).
-
-**Surfaced**: ✓ works correctly for SHARED libraries (codemodel
-records the link fragment for libz.so; lower matches against
-imports.json's link_paths and rewrites to
-`//elements/zlib:zlib`). But: STATIC libraries' codemodel has
-empty `target.dependencies[]` AND empty `target.link.commandFragments[]`
-(verified empirically against `add_library(t STATIC ...)
-target_link_libraries(t PUBLIC ZLIB::ZLIB)`) — cmake doesn't
-materialize the IMPORTED INTERFACE dep anywhere in the codemodel
-for static targets, because no actual link happens at archive
-time. So `target_link_libraries(staticLib SomeImport)`
-doesn't produce a dep edge in the converted BUILD.
-
-**Fix shape (high confidence)**: same trace-expand parser as
-configure_file. cmake's trace records every
-`target_link_libraries(<target> ... <ImportedTarget>)` call
-with arguments resolved; lower can read those records to
-surface IMPORTED-target deps that the codemodel drops on the
-floor for static libs. Map each `<ImportedTarget>` through
-`imports.LookupCMakeTarget` exactly like the existing dep-
-resolution path does for SHARED targets.
-
 ## Resolved deltas
+
+### configure-file — generated header dependency missing ✓
+
+**Fixture**: `converter/testdata/sample-projects/configure-file/`.
+
+**Was**: the emitted `cc_library(name = "cfglib")` had no `hdrs`
+reference to `config.h` and no genrule to produce it.
+Bazel-build of the converted output would fail at compile time
+because the include path resolved to nothing.
+
+**Now**: lower walks cmake's `--trace-expand` JSON for
+`configure_file(<input> <output> ...)` calls, reads the
+rendered output bytes from the build dir (live in production;
+captured in the fixture by `tools/fixtures/record-fileapi.sh`
+mirroring the build-dir layout), and emits a Bazel genrule
+whose cmd `base64 -d`'s the bytes into `$@`. Targets whose
+codemodel-recorded includes contain the build dir get the
+genrule's output added to their `hdrs` (with a
+`has-cmake-codegen` tag). See
+`converter/internal/lower/configure_file.go` and the
+`gen_config_h` rule in
+`converter/testdata/golden/configure-file/BUILD.bazel.golden`.
+
+### visibility — PRIVATE includes leak as consumer-visible ✓
+
+**Fixture**: `converter/testdata/sample-projects/visibility/`.
+
+**Was**: `includes = ["include", "include/private"]` —
+both PUBLIC and PRIVATE dirs surfaced in cc_library's
+consumer-visible `includes`, propagating to every dependent's
+compile command.
+
+**Now**: lower walks the trace's
+`target_include_directories(<target> PUBLIC ... PRIVATE ...)`
+calls and partitions: PUBLIC dirs stay in `includes`
+(consumer-visible), PRIVATE dirs become per-target
+`copts = ["-I<dir>"]` (compile-only, not propagated). See the
+`privateIncludeDirs` map populated in `lower.ToIR` and the
+`includes` / `copts` split in
+`converter/testdata/golden/visibility/BUILD.bazel.golden`.
+
+Note: the PRIVATE *header* `include/private/internal.h` still
+appears in `hdrs` because it's path-reachable through the
+PUBLIC `include/` dir (cmake's PRIVATE keyword scopes the
+include path, not which files live where on disk —
+encapsulation is enforced by `install(... PATTERN "private"
+EXCLUDE)`). Build-tree visibility is what the codemodel +
+trace describe; that's what we faithfully encode.
+
+### find-package STATIC — IMPORTED deps don't surface ✓
+
+**Fixtures**: `converter/testdata/sample-projects/find-package/`
+(SHARED — codemodel-driven path) and
+`converter/testdata/sample-projects/find-package-static/`
+(STATIC — trace-driven fallback).
+
+**Was**: STATIC libraries' codemodel has empty
+`target.dependencies[]` AND empty `target.link.commandFragments[]`
+because no link step runs at archive time. So
+`target_link_libraries(staticLib ZLIB::ZLIB)` produced no dep
+edge in the converted BUILD.
+
+**Now**: when `t.Type == "STATIC_LIBRARY"`, lower falls back
+to the trace's `target_link_libraries` call records and
+resolves IMPORTED target names through `imports.LookupCMakeTarget`.
+The dedup against existing `t.Dependencies` keeps in-codebase
+deps from double-counting. SHARED targets keep using the
+codemodel link fragments (already covered by
+`imports.LookupLinkPath`); the trace fallback only fires for
+STATIC. Both paths are exercised by the find-package fixtures
+above.
+
+## Previously resolved deltas
 
 ### subdir-library — includes dedup ✓
 
