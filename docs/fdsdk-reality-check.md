@@ -350,15 +350,17 @@ Other follow-ups (none on the critical path for `write-a render`):
   blocks still fall through `stripRemainingConditionals` —
   the loader doesn't error, but the per-branch overrides at
   those depths aren't honored. Lands when a fixture forces it.
-- **richer `(?):` expression syntax** — partial: `host_arch` /
-  `build_arch` / `bootstrap_build_arch` references already
-  worked (the parser is variable-agnostic for `==` / `in` / `or`-
-  chains; only `!=` is target_arch-only because the closed-set
-  complement is well-defined there). Now adds outer parens
-  (single layer) and `and`-combinators over the same LHS
-  variable (the dominant FDSDK shape: negation chains
-  `var != "X" and var != "Y"` interpret as set intersection of
-  the per-conjunct complements). Mixed-LHS `and`-chains require
-  multi-dimensional constraint dispatch and still return
-  ("", nil) — silently skipped — pending the dispatch-model
-  expansion.
+- **richer `(?):` expression syntax** — done. `host_arch` /
+  `build_arch` / `bootstrap_build_arch` references work (the
+  parser is variable-agnostic for `==` / `in` / `or`-chains;
+  `!=` is target_arch-only because the closed-set complement is
+  well-defined there). Outer parens (single layer) supported.
+  `and`-combinators supported in both shapes:
+  - same-LHS (`var != "X" and var != "Y"`) interprets as set
+    intersection of the per-conjunct complements.
+  - mixed-LHS (`target_arch == "x86_64" and bootstrap_build_arch == "aarch64"`)
+    populates `conditionalBranch.Constraints` — a slice of
+    `(Varname, Values)` pairs; `branchMatchesTuple` requires
+    every constraint to match for the branch to fire, and
+    `dispatchSpaceForElement` collects every constraint's
+    Varname as a dispatch dimension.

@@ -310,3 +310,102 @@ func TestBranchMatchesTuple(t *testing.T) {
 		t.Errorf("empty Varname should never match")
 	}
 }
+
+func TestParseMixedLHSAndChain(t *testing.T) {
+	// Standard mixed-LHS shape — different vars, each ==.
+	got := parseMixedLHSAndChain(`target_arch == "x86_64" and bootstrap_build_arch == "aarch64"`)
+	if len(got) != 2 {
+		t.Fatalf("want 2 constraints; got %d (%+v)", len(got), got)
+	}
+	if got[0].Varname != "target_arch" || got[0].Values[0] != "x86_64" {
+		t.Errorf("constraint 0 wrong: %+v", got[0])
+	}
+	if got[1].Varname != "bootstrap_build_arch" || got[1].Values[0] != "aarch64" {
+		t.Errorf("constraint 1 wrong: %+v", got[1])
+	}
+
+	// Same-LHS conjuncts intersect within one mixed-LHS expression.
+	got = parseMixedLHSAndChain(`target_arch != "x86_64" and target_arch != "i686" and bootstrap_build_arch == "x86_64"`)
+	if len(got) != 2 {
+		t.Fatalf("want 2 constraints; got %+v", got)
+	}
+	if got[0].Varname != "target_arch" || len(got[0].Values) != 4 {
+		// excluded x86_64 and i686 → aarch64, ppc64le, riscv64, loongarch64
+		t.Errorf("target_arch constraint should be 4 arches; got %+v", got[0])
+	}
+	if got[1].Varname != "bootstrap_build_arch" || got[1].Values[0] != "x86_64" {
+		t.Errorf("bootstrap_build_arch constraint wrong: %+v", got[1])
+	}
+
+	// Pure single-LHS expression → not a mixed-LHS chain.
+	if got := parseMixedLHSAndChain(`target_arch == "x86_64" and target_arch == "aarch64"`); got == nil {
+		t.Errorf("same-LHS should still parse as a single-Varname constraint, got nil")
+	} else if len(got) != 1 {
+		t.Errorf("same-LHS and-chain should produce 1 constraint after dedup; got %+v", got)
+	}
+
+	// or-chain inside isn't supported — return nil.
+	if got := parseMixedLHSAndChain(`target_arch == "x86_64" and (host_arch == "x86_64" or host_arch == "aarch64")`); got != nil {
+		t.Errorf("or-chain inside mixed-LHS should return nil; got %+v", got)
+	}
+
+	// No `and` → not a mixed-LHS chain.
+	if got := parseMixedLHSAndChain(`target_arch == "x86_64"`); got != nil {
+		t.Errorf("non-and expression should return nil; got %+v", got)
+	}
+}
+
+func TestBranchMatchesTuple_MultiConstraint(t *testing.T) {
+	b := conditionalBranch{
+		Constraints: []conditionalConstraint{
+			{Varname: "target_arch", Values: []string{"x86_64"}},
+			{Varname: "bootstrap_build_arch", Values: []string{"aarch64"}},
+		},
+	}
+	// Both match → fires.
+	if !branchMatchesTuple(b, map[string]string{"target_arch": "x86_64", "bootstrap_build_arch": "aarch64"}) {
+		t.Errorf("both-match tuple should fire")
+	}
+	// One mismatch → doesn't fire.
+	if branchMatchesTuple(b, map[string]string{"target_arch": "x86_64", "bootstrap_build_arch": "x86_64"}) {
+		t.Errorf("one-mismatch should not fire")
+	}
+	// Missing dim → doesn't fire.
+	if branchMatchesTuple(b, map[string]string{"target_arch": "x86_64"}) {
+		t.Errorf("missing dim should not fire")
+	}
+}
+
+// TestExtractConditionalsFromVariables_MixedLHS asserts the
+// end-to-end loader path: a .bst with a mixed-LHS and-chain
+// branch surfaces as a Constraints-populated branch in
+// element.Bst.Conditionals.
+func TestExtractConditionalsFromVariables_MixedLHS(t *testing.T) {
+	tmp := t.TempDir()
+	bstPath := tmp + "/x.bst"
+	body := `kind: autotools
+variables:
+  prefix: /usr
+  (?):
+  - target_arch == "x86_64" and bootstrap_build_arch == "aarch64":
+      cross_flags: "-march=armv8-a"
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	conds := g.Elements[0].Bst.Conditionals
+	if len(conds) != 1 {
+		t.Fatalf("want 1 branch, got %d (%+v)", len(conds), conds)
+	}
+	if len(conds[0].Constraints) != 2 {
+		t.Errorf("mixed-LHS branch should have 2 constraints; got %+v", conds[0])
+	}
+	// Single-LHS view (Varname/Arches) stays empty for mixed-LHS.
+	if conds[0].Varname != "" || conds[0].Arches != nil {
+		t.Errorf("single-LHS fields should stay empty on mixed-LHS branch; got %+v", conds[0])
+	}
+}

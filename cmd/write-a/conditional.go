@@ -94,20 +94,43 @@ func archConstraintLabel(arch string) string {
 	}
 }
 
-// conditionalBranch is one entry in a (?): block's list. Varname
-// is the LHS variable the expression dispatches on (`target_arch`,
-// `bootstrap_build_arch`, ...); Arches is the set of values the
-// branch matches. Overrides is the variable-overrides yaml.Node
-// the branch contributes when one of its values matches.
+// conditionalBranch is one entry in a (?): block's list.
 //
-// `target_arch`-keyed branches lower to project-B select() over
-// @platforms//cpu:*. Branches keyed by other variables get
-// statically evaluated against the staticDispatchVars map at
-// graph-load time and folded into the parent variable layer.
+// Single-LHS branches (the dominant shape) populate Varname +
+// Arches: the LHS variable the expression dispatches on plus the
+// values the branch matches. `target_arch`-keyed single-LHS
+// branches lower to project-B select() over @platforms//cpu:*;
+// other LHS variables get statically evaluated against
+// staticDispatchVars at graph-load time and folded into the
+// parent variable layer.
+//
+// Mixed-LHS `and`-chains
+// (`target_arch == X and bootstrap_build_arch == Y`) populate
+// Constraints: a slice with one entry per LHS variable, each
+// carrying the values that variable must take for the branch
+// to fire. All constraints in the slice must match for the
+// branch to apply (intersection semantics). Varname/Arches stay
+// empty in this case so existing single-LHS callers cleanly
+// skip mixed-LHS branches; multi-LHS-aware callers
+// (branchMatchesTuple, dispatchSpaceForElement) iterate
+// Constraints.
+//
+// Overrides is the yaml.Node carrying the variable-overrides /
+// partial-pipelineCfg the branch contributes when matching.
 type conditionalBranch struct {
-	Varname   string
-	Arches    []string
-	Overrides *yaml.Node
+	Varname     string
+	Arches      []string
+	Constraints []conditionalConstraint
+	Overrides   *yaml.Node
+}
+
+// conditionalConstraint is one (Varname, Values) pair inside a
+// mixed-LHS branch's Constraints slice. The branch matches a
+// dispatch tuple iff every constraint's Varname maps to a value
+// in its Values set.
+type conditionalConstraint struct {
+	Varname string
+	Values  []string
 }
 
 // varEqualsRE matches `<var> == "X"` (with single-quote alternative).
@@ -371,13 +394,79 @@ func extractConditionalsFromVariables(doc *yaml.Node) ([]conditionalBranch, erro
 		expr := branchNode.Content[0].Value
 		overrides := branchNode.Content[1]
 		varname, arches := parseArchExpression(expr)
+		var constraints []conditionalConstraint
+		if varname == "" {
+			// Mixed-LHS and-chain fallback: produces multi-
+			// constraint branches; Varname/Arches stay empty
+			// so single-LHS callers cleanly skip this branch.
+			constraints = parseMixedLHSAndChain(expr)
+		}
 		branches = append(branches, conditionalBranch{
-			Varname:   varname,
-			Arches:    arches,
-			Overrides: overrides,
+			Varname:     varname,
+			Arches:      arches,
+			Constraints: constraints,
+			Overrides:   overrides,
 		})
 	}
 	return branches, nil
+}
+
+// parseMixedLHSAndChain handles the `and`-joined chain shape
+// where conjuncts target different LHS variables, e.g.
+// `target_arch == "x86_64" and bootstrap_build_arch == "aarch64"`.
+// Same-LHS conjuncts intersect; different-LHS conjuncts each
+// produce a constraint.
+//
+// Returns nil for any expression that isn't a pure
+// and-chain-of-recognized-conjuncts (caller falls through to
+// the silently-skipped behaviour for unrecognized syntax).
+func parseMixedLHSAndChain(expr string) []conditionalConstraint {
+	expr = strings.TrimSpace(expr)
+	// Strip a single layer of outer parens (same logic as
+	// parseArchExpression's prelude).
+	if strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
+		depth := 0
+		ok := true
+		for i, c := range expr {
+			switch c {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 && i != len(expr)-1 {
+					ok = false
+				}
+			}
+			if !ok {
+				break
+			}
+		}
+		if ok {
+			expr = strings.TrimSpace(expr[1 : len(expr)-1])
+		}
+	}
+	if !strings.Contains(expr, " and ") || strings.Contains(expr, " or ") {
+		return nil
+	}
+	byVar := map[string][]string{}
+	order := []string{}
+	for _, part := range strings.Split(expr, " and ") {
+		v, vs := parseArchExpression(strings.TrimSpace(part))
+		if v == "" {
+			return nil
+		}
+		if _, seen := byVar[v]; !seen {
+			order = append(order, v)
+			byVar[v] = vs
+		} else {
+			byVar[v] = intersectArches(byVar[v], vs)
+		}
+	}
+	out := make([]conditionalConstraint, 0, len(order))
+	for _, v := range order {
+		out = append(out, conditionalConstraint{Varname: v, Values: byVar[v]})
+	}
+	return out
 }
 
 // branchMatchesTuple reports whether a conditional branch fires
@@ -396,6 +485,27 @@ func extractConditionalsFromVariables(doc *yaml.Node) ([]conditionalBranch, erro
 // the time we reach this function the surviving branches are
 // dispatch-keyed; the no-tuple case shouldn't fire matches.
 func branchMatchesTuple(b conditionalBranch, tuple map[string]string) bool {
+	// Mixed-LHS path: every constraint must match.
+	if len(b.Constraints) > 0 {
+		for _, c := range b.Constraints {
+			v, ok := tuple[c.Varname]
+			if !ok {
+				return false
+			}
+			matched := false
+			for _, val := range c.Values {
+				if val == v {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+		return true
+	}
+	// Single-LHS path.
 	if b.Varname == "" {
 		return false
 	}
@@ -472,10 +582,18 @@ func extractConditionalsFromConfig(doc *yaml.Node) ([]conditionalBranch, error) 
 		expr := branchNode.Content[0].Value
 		overrides := branchNode.Content[1]
 		varname, arches := parseArchExpression(expr)
+		var constraints []conditionalConstraint
+		if varname == "" {
+			// Mixed-LHS and-chain fallback: produces multi-
+			// constraint branches; Varname/Arches stay empty
+			// so single-LHS callers cleanly skip this branch.
+			constraints = parseMixedLHSAndChain(expr)
+		}
 		branches = append(branches, conditionalBranch{
-			Varname:   varname,
-			Arches:    arches,
-			Overrides: overrides,
+			Varname:     varname,
+			Arches:      arches,
+			Constraints: constraints,
+			Overrides:   overrides,
 		})
 	}
 	return branches, nil
@@ -687,23 +805,31 @@ type dispatchVar struct {
 // across runs).
 func dispatchSpaceForElement(elem *element, options map[string]bstOption) ([]dispatchVar, error) {
 	seen := map[string]bool{}
-	for _, b := range elem.ProjectConfConditionals {
+	collect := func(b conditionalBranch) {
+		// Mixed-LHS: each constraint contributes a dim.
+		if len(b.Constraints) > 0 {
+			for _, c := range b.Constraints {
+				if dispatchable(c.Varname, options) {
+					seen[c.Varname] = true
+				}
+			}
+			return
+		}
 		if dispatchable(b.Varname, options) {
 			seen[b.Varname] = true
 		}
 	}
+	for _, b := range elem.ProjectConfConditionals {
+		collect(b)
+	}
 	for _, b := range elem.Bst.Conditionals {
-		if dispatchable(b.Varname, options) {
-			seen[b.Varname] = true
-		}
+		collect(b)
 	}
 	// config: (?): branches contribute dispatch dimensions too —
 	// per-arch configure-commands overrides need to fire under
 	// the same per-tuple resolution path.
 	for _, b := range elem.Bst.ConfigConditionals {
-		if dispatchable(b.Varname, options) {
-			seen[b.Varname] = true
-		}
+		collect(b)
 	}
 	if len(seen) == 0 {
 		return nil, nil
