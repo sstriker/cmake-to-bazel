@@ -61,6 +61,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -428,14 +429,44 @@ func stripCondNode(node *yaml.Node) {
 // they're configuration knobs whose value is fixed at build-graph-
 // load time.
 //
-// Defaults below match a host-arch-x86_64 build of FDSDK. The
-// --build-arch flag overrides build_arch and bootstrap_build_arch
-// together, since they typically share the host's CPU
-// architecture.
-var staticDispatchVars = map[string]string{
-	"build_arch":           "x86_64",
-	"host_arch":            "x86_64",
-	"bootstrap_build_arch": "x86_64",
+// Auto-detected from runtime.GOARCH at init time so write-a
+// produces correct branches on aarch64 / ppc64le / etc. dev
+// hosts without manual configuration. CLI flags
+// (--host-arch / --build-arch / --bootstrap-build-arch) override
+// per-variable for cross-compile scenarios.
+var staticDispatchVars = defaultStaticDispatchVars()
+
+func defaultStaticDispatchVars() map[string]string {
+	a := bstArchFromGOARCH(runtime.GOARCH)
+	return map[string]string{
+		"build_arch":           a,
+		"host_arch":            a,
+		"bootstrap_build_arch": a,
+	}
+}
+
+// bstArchFromGOARCH maps Go's runtime.GOARCH names to BuildStream
+// arch names (which in turn map onto Bazel's @platforms//cpu:*
+// via archConstraintLabel). Unknown GOARCHes pass through
+// unchanged — better than silently stamping the wrong arch onto
+// every dispatch.
+func bstArchFromGOARCH(goarch string) string {
+	switch goarch {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	case "386":
+		return "i686"
+	case "ppc64le":
+		return "ppc64le"
+	case "riscv64":
+		return "riscv64"
+	case "loong64":
+		return "loongarch64"
+	default:
+		return goarch
+	}
 }
 
 // foldStaticConditionals partitions branches into:

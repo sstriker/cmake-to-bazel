@@ -220,3 +220,34 @@ func TestStripCondNode_RecursesIntoNestedMappings(t *testing.T) {
 		t.Errorf("strip removed too much: regular: gone")
 	}
 }
+
+func TestBstArchFromGOARCH(t *testing.T) {
+	cases := map[string]string{
+		"amd64":   "x86_64",
+		"arm64":   "aarch64",
+		"386":     "i686",
+		"ppc64le": "ppc64le",
+		"riscv64": "riscv64",
+		"loong64": "loongarch64",
+		// Unknown GOARCHes pass through.
+		"sparc64": "sparc64",
+	}
+	for goarch, want := range cases {
+		if got := bstArchFromGOARCH(goarch); got != want {
+			t.Errorf("bstArchFromGOARCH(%q) = %q, want %q", goarch, got, want)
+		}
+	}
+}
+
+func TestDefaultStaticDispatchVars_SeededFromGOARCH(t *testing.T) {
+	got := defaultStaticDispatchVars()
+	for _, k := range []string{"build_arch", "host_arch", "bootstrap_build_arch"} {
+		if got[k] == "" {
+			t.Errorf("%s defaulted to empty; want auto-detected from runtime.GOARCH", k)
+		}
+	}
+	// All three should auto-detect to the same value (host CPU).
+	if got["build_arch"] != got["host_arch"] || got["host_arch"] != got["bootstrap_build_arch"] {
+		t.Errorf("the three defaults should match (same host CPU): %+v", got)
+	}
+}

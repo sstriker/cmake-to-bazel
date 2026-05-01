@@ -335,6 +335,9 @@ func main() {
 	convertBin := flag.String("convert-element", "", "path to the convert-element binary (will be referenced from project-A's tools/)")
 	sourceCache := flag.String("source-cache", "", "optional: directory of pre-fetched source trees, indexed by source-key. Non-kind:local sources whose key (SHA of kind+url+ref) hits a directory under this cache stage as if they were kind:local at that path. Callers populate the cache via the orchestrator's source-checkout layer or by hand for tests; write-a itself doesn't fetch.")
 	useFuseSources := flag.Bool("use-fuse-sources", false, "experimental: render kind:cmake elements to consume sources via @src_<key>//:tree (the FUSE-mounted CAS path) rather than staging files into elements/<name>/sources/. Requires cas-fuse running and CAS_FUSE_MOUNT passed to bazel via --repo_env.")
+	hostArch := flag.String("host-arch", "", "override the static host_arch dispatch variable (default: auto-detected from the build host).")
+	buildArch := flag.String("build-arch", "", "override the static build_arch dispatch variable (default: auto-detected from the build host).")
+	bootstrapBuildArch := flag.String("bootstrap-build-arch", "", "override the static bootstrap_build_arch dispatch variable (default: auto-detected from the build host).")
 	flag.Parse()
 
 	if len(bstPaths) == 0 || *outA == "" || *convertBin == "" {
@@ -362,6 +365,22 @@ func main() {
 	}
 
 	useFuseSourcesGlobal = *useFuseSources
+
+	// Apply CLI overrides for the static dispatch vars.
+	// Auto-detected defaults from runtime.GOARCH cover the
+	// common case (a dev host that matches the build host);
+	// these flags are for cross-compile / host-emulation
+	// scenarios where the operator knows better than the
+	// detected GOARCH.
+	if *hostArch != "" {
+		staticDispatchVars["host_arch"] = *hostArch
+	}
+	if *buildArch != "" {
+		staticDispatchVars["build_arch"] = *buildArch
+	}
+	if *bootstrapBuildArch != "" {
+		staticDispatchVars["bootstrap_build_arch"] = *bootstrapBuildArch
+	}
 
 	if err := writeProjectA(g, *outA, convertAbs); err != nil {
 		log.Fatalf("write project A: %v", err)
