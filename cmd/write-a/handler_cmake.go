@@ -126,12 +126,15 @@ filegroup(name = "BUILD_NOT_YET_STAGED", srcs = [])
 // partitionSources walks the element's source tree and decides which
 // paths flow as real files vs zero stubs into project A.
 //
-//   - With no read-set feedback (HasFeedback==false), every file is
-//     real. First-run / no-narrowing shape.
-//   - With feedback, the real set = the feedback set, plus all
-//     CMakeLists.txt files in the source tree (cmake parses the entry
-//     CMakeLists before any trace event fires; auto-including them
-//     keeps cmake configure correct after narrowing).
+//   - With no <element>.read-paths.txt patterns file
+//     (elem.Patterns == nil), every file is real. The conservative
+//     "no narrowing" default; matches pre-#61 behaviour without
+//     opt-in.
+//   - With patterns present, applyReadPathsPatterns partitions the
+//     source-relative path universe per the include / exclude
+//     rules. CMakeLists.txt files always stay real (cmake parses
+//     the entry CMakeLists before any narrowing has a chance to
+//     matter; auto-including them keeps cmake configure correct).
 //
 // Caller (cmakeHandler.RenderA) gates this on the single-source-no-
 // directory case (cmakeMultiSource(elem) == false), so reading
@@ -158,31 +161,7 @@ func partitionSources(elem *element) error {
 	}
 	sort.Strings(universe)
 
-	// Reset to handle re-renders cleanly.
-	elem.RealPaths = nil
-	elem.ZeroPaths = nil
-
-	if !elem.HasFeedback {
-		elem.RealPaths = universe
-		return nil
-	}
-
-	real := map[string]struct{}{}
-	for _, p := range elem.ReadSet {
-		real[p] = struct{}{}
-	}
-	for _, p := range universe {
-		if filepath.Base(p) == "CMakeLists.txt" {
-			real[p] = struct{}{}
-		}
-	}
-	for _, p := range universe {
-		if _, ok := real[p]; ok {
-			elem.RealPaths = append(elem.RealPaths, p)
-		} else {
-			elem.ZeroPaths = append(elem.ZeroPaths, p)
-		}
-	}
+	elem.RealPaths, elem.ZeroPaths = applyReadPathsPatterns(elem.Patterns, universe)
 	return nil
 }
 

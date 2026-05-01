@@ -2840,3 +2840,139 @@ func TestWriter_UseFuseSourcesFallbackForKindLocal(t *testing.T) {
 		t.Errorf("kind:local BUILD should not reference @src_<key>//: %s", build)
 	}
 }
+
+// TestWriter_ReadPathsPatternsApply asserts the full PR #61
+// flow: a kind:cmake element with a sibling
+// <element>.read-paths.txt drives partitioning of source files
+// into the staged real set vs zero stubs. Checks the rendered
+// project A's BUILD references the zero_files target with
+// exactly the excluded paths.
+func TestWriter_ReadPathsPatternsApply(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "hello-src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "include", "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "include", "api.h"), []byte("// api\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "include", "internal", "private.h"), []byte("// private\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(`kind: cmake
+sources:
+- kind: local
+  path: hello-src
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patternsPath := filepath.Join(tmp, "hello.read-paths.txt")
+	if err := os.WriteFile(patternsPath, []byte(`include CMakeLists.txt
+include include/**/*.h
+exclude include/internal/*
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Patterns == nil {
+		t.Fatal("Patterns not loaded")
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	// CMakeLists.txt + include/api.h should be staged real;
+	// main.c (not in any include rule) and include/internal/private.h
+	// (excluded) should not.
+	for _, want := range []string{"sources/CMakeLists.txt", "sources/include/api.h"} {
+		if _, err := os.Stat(filepath.Join(outA, "elements/hello", want)); err != nil {
+			t.Errorf("expected %s staged real: %v", want, err)
+		}
+	}
+	for _, dontWant := range []string{"sources/main.c", "sources/include/internal/private.h"} {
+		if _, err := os.Stat(filepath.Join(outA, "elements/hello", dontWant)); err == nil {
+			t.Errorf("expected %s NOT staged (zero-stub'd); but it exists", dontWant)
+		}
+	}
+
+	// BUILD.bazel should reference zero_files with both
+	// excluded paths.
+	build, err := os.ReadFile(filepath.Join(outA, "elements/hello/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	for _, want := range []string{
+		`load("//rules:zero_files.bzl", "zero_files")`,
+		`"sources/main.c"`,
+		`"sources/include/internal/private.h"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestWriter_NoReadPathsPatternsStagesEverything asserts the
+// default-when-absent behaviour: with no <element>.read-paths.txt,
+// every source file flows as real (no zero_files).
+func TestWriter_NoReadPathsPatternsStagesEverything(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "hello-src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(`kind: cmake
+sources:
+- kind: local
+  path: hello-src
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatal(err)
+	}
+	build, err := os.ReadFile(filepath.Join(outA, "elements/hello/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(build), "zero_files") {
+		t.Errorf("default-no-patterns should not emit zero_files:\n%s", build)
+	}
+	for _, want := range []string{"sources/CMakeLists.txt", "sources/main.c"} {
+		if _, err := os.Stat(filepath.Join(outA, "elements/hello", want)); err != nil {
+			t.Errorf("expected %s staged real: %v", want, err)
+		}
+	}
+}

@@ -19,23 +19,25 @@
 // driver script's stage step is a no-op for them.
 //
 // Shadow-tree narrowing (kind:cmake):
-//   - With --read-paths-feedback unset: every source file is staged
-//     real. First-run / no-feedback shape.
-//   - With --read-paths-feedback pointing at a prior run's
-//     read_paths.json: only files in the read set (plus all
-//     CMakeLists.txt files in the source tree, which the trace
-//     never captures because cmake's parser opens them before any
-//     trace event fires) get staged. Everything else becomes a
-//     zero_files entry — present at the same path inside the
-//     genrule's exec root, but with empty content. cmake's
-//     directory walks see the entries; reads against zero stubs
-//     would be hits on empty files. The action input merkle is
-//     content-stable across edits to non-read source files.
+//   - Default (no <element>.read-paths.txt sibling): every source
+//     file is staged real. Conservative; matches pre-narrowing
+//     behaviour.
+//   - With <element>.read-paths.txt: include / exclude glob
+//     patterns partition the source tree. Matched files stage
+//     real; the rest stage as zero stubs (empty content via the
+//     zero_files starlark rule). cmake's directory walks see the
+//     entries; reads against zero stubs hit empty files. The
+//     action input merkle is content-stable across edits to
+//     non-included source files.
+//
+// CMakeLists.txt files always stay real regardless of the
+// patterns — cmake parses the entry CMakeLists before any trace
+// event could fire, so auto-including them keeps cmake configure
+// correct.
 package main
 
 import (
 	_ "embed"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -259,12 +261,12 @@ type element struct {
 	// Deps are the resolved depends-on edges of this element. Populated
 	// during loadGraph; parents reference children.
 	Deps []*element
-	// ReadSet is the source-relative paths a prior run's
-	// read_paths.json reported. Populated when
-	// --read-paths-feedback is set; empty (and HasFeedback false)
-	// otherwise. Only consumed by kind:cmake's handler.
-	ReadSet     []string
-	HasFeedback bool
+	// Patterns is the parsed <element>.read-paths.txt content
+	// (committed alongside the .bst). Nil when the file is
+	// absent — that's the default "entire tree real" case. Only
+	// consumed by kind:cmake's handler today; pipeline-shape
+	// handlers stage everything regardless.
+	Patterns *readPathsPatterns
 
 	// RealPaths / ZeroPaths are derived during the cmake handler's
 	// per-element rendering: real files staged on disk, zero paths
@@ -331,7 +333,6 @@ func main() {
 	outA := flag.String("out", "", "output directory for project A (the meta workspace whose genrules run convert-element)")
 	outB := flag.String("out-b", "", "optional: output directory for project B (the consumer workspace built against project A's outputs). When unset, only project A is rendered.")
 	convertBin := flag.String("convert-element", "", "path to the convert-element binary (will be referenced from project-A's tools/)")
-	readPathsFeedback := flag.String("read-paths-feedback", "", "optional: path to a prior run's read_paths.json. When set, narrows kind:cmake elements' source-tree staging to that set + CMakeLists.txt files; everything else becomes a zero_files stub. Currently single-element only — multi-element feedback gets a per-element flag in a follow-up.")
 	sourceCache := flag.String("source-cache", "", "optional: directory of pre-fetched source trees, indexed by source-key. Non-kind:local sources whose key (SHA of kind+url+ref) hits a directory under this cache stage as if they were kind:local at that path. Callers populate the cache via the orchestrator's source-checkout layer or by hand for tests; write-a itself doesn't fetch.")
 	useFuseSources := flag.Bool("use-fuse-sources", false, "experimental: render kind:cmake elements to consume sources via @src_<key>//:tree (the FUSE-mounted CAS path) rather than staging files into elements/<name>/sources/. Requires cas-fuse running and CAS_FUSE_MOUNT passed to bazel via --repo_env.")
 	flag.Parse()
@@ -358,23 +359,6 @@ func main() {
 	}
 	if _, err := os.Stat(convertAbs); err != nil {
 		log.Fatalf("convert-element binary at %s: %v", convertAbs, err)
-	}
-
-	if *readPathsFeedback != "" {
-		feedback, err := loadReadPaths(*readPathsFeedback)
-		if err != nil {
-			log.Fatalf("load --read-paths-feedback: %v", err)
-		}
-		// Phase 2 still applies feedback to all kind:cmake elements
-		// uniformly. Multi-element feedback (one read_paths.json per
-		// element) lands when the FDSDK fixture forces the issue; for
-		// now, single-element fixtures are the only consumers.
-		for _, elem := range g.Elements {
-			if elem.Bst.Kind == "cmake" {
-				elem.ReadSet = feedback
-				elem.HasFeedback = true
-			}
-		}
 	}
 
 	useFuseSourcesGlobal = *useFuseSources
@@ -578,20 +562,6 @@ func topoSort(elems []*element) ([]*element, error) {
 	return out, nil
 }
 
-// loadReadPaths parses a convert-element-emitted read_paths.json
-// (a JSON array of source-relative paths).
-func loadReadPaths(path string) ([]string, error) {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	return out, nil
-}
-
 // loadElement parses one .bst into an *element. includeBase is the
 // directory (@): include paths resolve against (the project root,
 // matching BuildStream semantics). When no project.conf was found
@@ -624,7 +594,15 @@ func loadElement(bstPath, includeBase, sourceCache string, options map[string]bs
 	f.Conditionals = foldedConds
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")
 
-	elem := &element{Name: name, Bst: &f}
+	// Load <element>.read-paths.txt sibling if present. Absent
+	// → nil patterns → "entire tree real" default in the cmake
+	// handler.
+	patterns, err := loadReadPathsPatterns(bstPath)
+	if err != nil {
+		return nil, fmt.Errorf("load read-paths patterns for %s: %w", bstPath, err)
+	}
+
+	elem := &element{Name: name, Bst: &f, Patterns: patterns}
 
 	// Source resolution is per-kind. cmake / manual / autotools /
 	// import / … pull a kind:local source tree from disk; stack /
