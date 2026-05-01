@@ -222,10 +222,11 @@ func TestWriter_CmakeElementStagesDepBundles(t *testing.T) {
 	got := string(consBuild)
 	for _, marker := range []string{
 		`"//elements/prod:cmake_config_bundle"`,
-		`mkdir -p "$$PREFIX/lib/cmake/prod"`,
 		`for tar in $(locations //elements/prod:cmake_config_bundle); do`,
-		`tar -xf "$$tar" -C "$$PREFIX/lib/cmake/prod"`,
+		`tar -xf "$$tar" -C "$$PREFIX"`,
 		`--prefix-dir="$$PREFIX"`,
+		`"imports.json"`,
+		`--imports-manifest="$(location imports.json)"`,
 	} {
 		if !strings.Contains(got, marker) {
 			t.Errorf("consumer BUILD missing marker %q\n--body--\n%s", marker, got)
@@ -248,6 +249,31 @@ func TestWriter_CmakeElementStagesDepBundles(t *testing.T) {
 	// its BUILD should NOT carry the prefix-dir flag.
 	if strings.Contains(string(prodBuild), `--prefix-dir`) {
 		t.Errorf("producer BUILD wrongly carries --prefix-dir (no deps):\n%s", prodBuild)
+	}
+
+	// imports.json is rendered next to the consumer's
+	// BUILD.bazel and maps the dep's IMPORTED-target name to
+	// its in-meta-project Bazel label. Convention-bound:
+	// <dep>::<dep> → //elements/<dep>:<dep>.
+	importsPath := filepath.Join(outA, "elements/cons/imports.json")
+	importsBody, err := os.ReadFile(importsPath)
+	if err != nil {
+		t.Fatalf("imports.json missing: %v", err)
+	}
+	for _, marker := range []string{
+		`"cmake_target": "prod::prod"`,
+		`"bazel_label": "//elements/prod:prod"`,
+	} {
+		if !strings.Contains(string(importsBody), marker) {
+			t.Errorf("consumer imports.json missing marker %q\n--body--\n%s", marker, importsBody)
+		}
+	}
+
+	// And the producer (no deps) should NOT have an
+	// imports.json — the writer skips it for elements with no
+	// kind:cmake deps.
+	if _, err := os.Stat(filepath.Join(outA, "elements/prod/imports.json")); err == nil {
+		t.Errorf("producer wrongly got an imports.json (has no deps)")
 	}
 }
 

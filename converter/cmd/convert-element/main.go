@@ -29,6 +29,7 @@ import (
 	"github.com/sstriker/cmake-to-bazel/converter/internal/ninja"
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/internal/shadow"
+	"github.com/sstriker/cmake-to-bazel/internal/synthprefix"
 )
 
 // timings is the on-disk schema for --out-timings. Captured per-phase
@@ -214,14 +215,40 @@ func run(a cli.Args) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(a.OutBundleDir, 0o755); err != nil {
+		// Stage cmakecfg's flat <Pkg>*.cmake files into a temp
+		// dir, then run synthprefix.Build to lay them out in
+		// the cross-element synth-prefix shape — bundle .cmake
+		// files at lib/cmake/<Pkg>/, plus zero-byte stubs at
+		// every IMPORTED_LOCATION_<CONFIG> path the bundle
+		// references and mkdir'd INTERFACE_INCLUDE_DIRECTORIES.
+		// Downstream consumers can then `tar -xf <bundle> -C
+		// $PREFIX` to materialize the slice; cmake's
+		// find_package(<Pkg> CONFIG) resolves and the
+		// imported-target EXISTS checks pass against the
+		// stubs.
+		flatDir, err := os.MkdirTemp("", "convert-element-bundle-flat-*")
+		if err != nil {
 			return err
 		}
+		defer os.RemoveAll(flatDir)
 		for name, body := range bundle.Files {
-			dst := filepath.Join(a.OutBundleDir, name)
-			if err := os.WriteFile(dst, body, 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(flatDir, name), body, 0o644); err != nil {
 				return err
 			}
+		}
+		// synthprefix.Build refuses to write into an existing
+		// dir; it owns its dst. The CLI lets callers point
+		// --out-bundle-dir at a fresh path (Bazel genrules
+		// hand us one), so removing the empty dir Bazel may
+		// have created is safe and keeps the contract.
+		if err := os.RemoveAll(a.OutBundleDir); err != nil {
+			return err
+		}
+		if err := synthprefix.Build(a.OutBundleDir, []synthprefix.DepBundle{{
+			Pkg:       pkg.Name,
+			SourceDir: flatDir,
+		}}); err != nil {
+			return err
 		}
 	}
 

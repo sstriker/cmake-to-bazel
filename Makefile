@@ -137,6 +137,17 @@ e2e-meta-hello: check-tools converter
 e2e-meta-stack: check-tools converter
 	scripts/meta-stack.sh
 
+# Cross-element kind:cmake dep gate. Two kind:cmake elements where
+# the consumer (cons) depends on the producer (prod) via
+# find_package(prod CONFIG REQUIRED) + target_link_libraries(prod::prod).
+# Asserts: write-a renders the cross-element bundle staging + an
+# imports.json synthesis file; bazel build of cons resolves the
+# dep against the staged bundle; convert-element's STATIC IMPORTED
+# dep recovery emits deps = ["//elements/prod:prod"] in the
+# converted output.
+e2e-meta-cross-cmake: check-tools converter
+	scripts/meta-cross-cmake.sh
+
 # Phase 3 first-cut acceptance gate. Single kind:manual element
 # (testdata/meta-project/manual-greet/) whose install-commands
 # stage a greeting file under %{install-root}%{prefix}/share/.

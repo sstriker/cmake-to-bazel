@@ -90,6 +90,9 @@ func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 		if err := stageAllSources(elem, srcStage); err != nil {
 			return err
 		}
+		if err := writeCmakeImportsManifest(elem, elemPkg); err != nil {
+			return err
+		}
 		return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), cmakeElementBuild(elem))
 	}
 
@@ -109,7 +112,56 @@ func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 			return fmt.Errorf("stage real source %s: %w", rel, err)
 		}
 	}
+	if err := writeCmakeImportsManifest(elem, elemPkg); err != nil {
+		return err
+	}
 	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), cmakeElementBuild(elem))
+}
+
+// writeCmakeImportsManifest renders an imports.json next to the
+// element's BUILD.bazel when the element has kind:cmake deps.
+// One Element entry per dep, with a single Export per dep
+// following the convention `<dep>::<dep>` → //elements/<dep>:<dep>.
+//
+// This is a best-effort convention bind. Real-world cmake
+// projects whose namespace/target shape diverges from
+// `<elem>::<elem>` won't resolve. A follow-up pass should let
+// convert-element emit per-element exports metadata that
+// write-a stitches in here at action time, replacing the
+// convention guess.
+func writeCmakeImportsManifest(elem *element, elemPkg string) error {
+	deps := cmakeDepBundleLabels(elem)
+	if len(deps) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(`{
+  "version": 1,
+  "elements": [
+`)
+	for i, dep := range deps {
+		if i > 0 {
+			b.WriteString(",\n")
+		}
+		fmt.Fprintf(&b, `    {
+      "name": %q,
+      "exports": [
+        {
+          "cmake_target": %q,
+          "bazel_label": "//elements/%s:%s",
+          "link_paths": ["${_IMPORT_PREFIX}/lib/lib%s.a"]
+        }
+      ]
+    }`, dep.DepName,
+			dep.DepName+"::"+dep.DepName,
+			dep.DepName, dep.DepName,
+			dep.DepName)
+	}
+	b.WriteString(`
+  ]
+}
+`)
+	return writeFile(filepath.Join(elemPkg, "imports.json"), b.String())
 }
 
 // cmakeMultiSource reports whether this cmake element's sources
@@ -285,28 +337,41 @@ filegroup(
 	for _, depLabel := range cmakeDepLabels {
 		srcsList += fmt.Sprintf(`, %q`, depLabel.Label)
 	}
+	if len(cmakeDepLabels) > 0 {
+		// imports.json was rendered at write-a time
+		// alongside this BUILD; stage it into the action so
+		// convert-element's manifest lookup resolves
+		// IMPORTED-target names from the consumer's deps to
+		// the right Bazel labels.
+		srcsList += `, "imports.json"`
+	}
 
-	// Per-dep extraction lines: one `tar -xf <bundle> -C
-	// $PREFIX/lib/cmake/<dep>/` per cmake dep. Each dep's
-	// bundle file enters the genrule via $(locations
-	// //elements/<dep>:cmake_config_bundle), which resolves
-	// to the cmake-config-bundle.tar that the dep's own
-	// genrule produced. Empty when the element has no
-	// kind:cmake deps — keeps the simple-case BUILD pristine.
+	// Cross-element bundle extraction: every kind:cmake dep's
+	// cmake-config-bundle.tar already carries its full synth-
+	// prefix slice (lib/cmake/<DepPkg>/*.cmake plus zero-byte
+	// IMPORTED_LOCATION stubs and INTERFACE_INCLUDE_DIRECTORIES
+	// directories — produced by synthprefix.Build inside
+	// convert-element). One `tar -xf` per dep into a shared
+	// $PREFIX overlays each slice; cmake's
+	// find_package(<DepPkg> CONFIG) resolves against the
+	// stitched tree and the IMPORTED-target EXISTS checks
+	// pass against the stubs.
 	var depExtract strings.Builder
 	prefixFlag := ""
+	importsFlag := ""
 	if len(cmakeDepLabels) > 0 {
 		depExtract.WriteString(`        PREFIX="$$(mktemp -d)"
 `)
 		for _, dep := range cmakeDepLabels {
-			fmt.Fprintf(&depExtract, `        mkdir -p "$$PREFIX/lib/cmake/%[1]s"
-        for tar in $(locations %[2]s); do
-            tar -xf "$$tar" -C "$$PREFIX/lib/cmake/%[1]s"
+			fmt.Fprintf(&depExtract, `        for tar in $(locations %s); do
+            tar -xf "$$tar" -C "$$PREFIX"
         done
-`, dep.DepName, dep.Label)
+`, dep.Label)
 		}
 		prefixFlag = ` \
             --prefix-dir="$$PREFIX"`
+		importsFlag = ` \
+            --imports-manifest="$(location imports.json)"`
 	}
 
 	fmt.Fprintf(&b, `
@@ -330,21 +395,22 @@ genrule(
         for src in $(SRCS); do
             case "$$src" in
                 *cmake-config-bundle.tar) continue ;;
+                */imports.json) continue ;;
             esac
             rel="$${src##*sources/}"
             mkdir -p "$$SHADOW/$$(dirname "$$rel")"
             cp -L "$$src" "$$SHADOW/$$rel"
         done
-        # Stage each kind:cmake dep's synth bundle under
-        # $$PREFIX/lib/cmake/<dep>/ so find_package(<Pkg> CONFIG)
-        # in this consumer's CMakeLists resolves against it. No-op
-        # when the element has no kind:cmake deps.
+        # Stage each kind:cmake dep's synth bundle under $$PREFIX
+        # so find_package(<Pkg> CONFIG) in this consumer's
+        # CMakeLists resolves against it. No-op when the element
+        # has no kind:cmake deps.
 %[3]s        BUNDLE_DIR="$$(mktemp -d)"
         $(location //tools:convert-element) \\
             --source-root="$$SHADOW" \\
             --out-build="$(location BUILD.bazel.out)" \\
             --out-bundle-dir="$$BUNDLE_DIR" \\
-            --out-read-paths="$(location read_paths.json)"%[4]s
+            --out-read-paths="$(location read_paths.json)"%[4]s%[5]s
         tar -cf "$(location cmake-config-bundle.tar)" -C "$$BUNDLE_DIR" .
     """,
     tools = ["//tools:convert-element"],
@@ -355,8 +421,7 @@ genrule(
 # the typed slices (cmake_config / pkg_config / headers / libs).
 filegroup(
     name = "build_bazel",
-    srcs = [":%[1]s_converted"],
-    output_group = "BUILD.bazel.out",
+    srcs = ["BUILD.bazel.out"],
 )
 
 # Cross-element handle: downstream cmake elements reference this
@@ -364,10 +429,9 @@ filegroup(
 # $PREFIX/lib/cmake/<this>/ at convert-element action time.
 filegroup(
     name = "cmake_config_bundle",
-    srcs = [":%[1]s_converted"],
-    output_group = "cmake-config-bundle.tar",
+    srcs = ["cmake-config-bundle.tar"],
 )
-`, elem.Name, srcsList, depExtract.String(), prefixFlag)
+`, elem.Name, srcsList, depExtract.String(), prefixFlag, importsFlag)
 	return b.String()
 }
 
@@ -515,8 +579,12 @@ genrule(
 
 filegroup(
     name = "build_bazel",
-    srcs = [":%[1]s_converted"],
-    output_group = "BUILD.bazel.out",
+    srcs = ["BUILD.bazel.out"],
+)
+
+filegroup(
+    name = "cmake_config_bundle",
+    srcs = ["cmake-config-bundle.tar"],
 )
 `, elem.Name, sourceKey, srcsList)
 	return b.String()
