@@ -83,6 +83,43 @@ jobs:
       - uses: ./.github/actions/post-failure-tail
         if: failure()
 
+  hello-fuse-e2e:
+    # PR #60's verification target. Walks the full pipeline
+    # source-push → cas-fuse → write-a --use-fuse-sources and
+    # asserts: (a) generated BUILD.bazel references @src_<key>//:tree,
+    # (b) sources.json carries the digest, (c) cas-fuse mount
+    # actually serves the source tree under /blobs/directory/<d>/,
+    # (d) the user.bazel.cas.digest xattr is readable. The bazel-
+    # build leg is gated behind RUN_BAZEL=1 in tools/e2e-hello-fuse.sh
+    # — left off here pending host-toolchain wiring. Continue-on-
+    # error so the structural failures surface cleanly without
+    # blocking the rest of CI while we iterate.
+    name: End-to-end (hello-fuse pipeline)
+    runs-on: ubuntu-24.04
+    needs: unit
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install fuse3 + getfattr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3 attr
+
+      - name: Build custom bb-runner image
+        run: docker compose -f deploy/buildbarn/docker-compose.yml build bb-runner-bare 2>&1 | tee -a /tmp/cijob.log
+
+      - name: e2e-hello-fuse (structural)
+        run: make e2e-hello-fuse 2>&1 | tee -a /tmp/cijob.log
+
+      - uses: ./.github/actions/post-failure-tail
+        if: failure()
+
   e2e:
     name: End-to-end (cmake + bwrap)
     runs-on: ubuntu-24.04

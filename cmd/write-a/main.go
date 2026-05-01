@@ -309,6 +309,15 @@ type graph struct {
 	Options map[string]bstOption
 }
 
+// useFuseSourcesGlobal is the package-wide toggle for the
+// PR #60 fuse-sources path. Set from main()'s --use-fuse-sources
+// flag; consulted by handler_cmake.RenderA. Lives at package
+// scope because the handler interface (RenderA(elem, elemPkg))
+// has no plumbing for per-render config; threading it through
+// would touch every handler. Acceptable singleton for a flag
+// that's structurally process-wide anyway.
+var useFuseSourcesGlobal bool
+
 // stringList is a flag.Value for repeated flags (--bst foo.bst --bst bar.bst).
 type stringList []string
 
@@ -324,6 +333,7 @@ func main() {
 	convertBin := flag.String("convert-element", "", "path to the convert-element binary (will be referenced from project-A's tools/)")
 	readPathsFeedback := flag.String("read-paths-feedback", "", "optional: path to a prior run's read_paths.json. When set, narrows kind:cmake elements' source-tree staging to that set + CMakeLists.txt files; everything else becomes a zero_files stub. Currently single-element only — multi-element feedback gets a per-element flag in a follow-up.")
 	sourceCache := flag.String("source-cache", "", "optional: directory of pre-fetched source trees, indexed by source-key. Non-kind:local sources whose key (SHA of kind+url+ref) hits a directory under this cache stage as if they were kind:local at that path. Callers populate the cache via the orchestrator's source-checkout layer or by hand for tests; write-a itself doesn't fetch.")
+	useFuseSources := flag.Bool("use-fuse-sources", false, "experimental: render kind:cmake elements to consume sources via @src_<key>//:tree (the FUSE-mounted CAS path) rather than staging files into elements/<name>/sources/. Requires cas-fuse running and CAS_FUSE_MOUNT passed to bazel via --repo_env.")
 	flag.Parse()
 
 	if len(bstPaths) == 0 || *outA == "" || *convertBin == "" {
@@ -366,6 +376,8 @@ func main() {
 			}
 		}
 	}
+
+	useFuseSourcesGlobal = *useFuseSources
 
 	if err := writeProjectA(g, *outA, convertAbs); err != nil {
 		log.Fatalf("write project A: %v", err)

@@ -480,3 +480,11 @@ e2e-source-push: source-push buildbarn-up
 	  ec=$$?; \
 	  $(MAKE) buildbarn-down; \
 	  exit $$ec
+
+# e2e-hello-fuse: PR #60's verification target. Walks the full
+# pipeline (source-push → cas-fuse → write-a --use-fuse-sources
+# → structural verification of the generated project A). The
+# bazel-build step is gated behind RUN_BAZEL=1 — set it when the
+# host has bazel + cmake + ninja + bwrap.
+e2e-hello-fuse: converter cas-fuse source-push write-a
+	./tools/e2e-hello-fuse.sh

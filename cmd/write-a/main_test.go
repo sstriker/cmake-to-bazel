@@ -2719,3 +2719,124 @@ sources:
 		t.Errorf("entries without a source-cache hit should omit digest:\n%s", raw)
 	}
 }
+
+// TestWriter_UseFuseSourcesEmitsExtRepoRef asserts the
+// PR #60 wiring: with --use-fuse-sources, a kind:cmake element
+// whose source resolves through --source-cache renders a
+// project-A BUILD that pulls srcs from @src_<key>//:tree
+// instead of staging into elements/<name>/sources/.
+func TestWriter_UseFuseSourcesEmitsExtRepoRef(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Stage a fake source-cache hit for a kind:tar source.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	srcMeta := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(srcMeta)
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Sources[0].AbsPath == "" {
+		t.Fatal("source-cache hit did not populate AbsPath; test setup error")
+	}
+
+	// Toggle the flag for this test, restore on exit.
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/x/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	for _, want := range []string{
+		`srcs = ["@src_` + wantKey + `//:tree"]`,
+		`rel="$${src##*tree_dir/}"`,
+		`--use-fuse-sources`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+
+	// Ensure the on-disk staging directory was NOT created — the
+	// whole point of fuse-sources mode is that bytes live in CAS
+	// and are served via FUSE.
+	if _, err := os.Stat(filepath.Join(outA, "elements/x/sources")); err == nil {
+		t.Errorf("fuse-sources mode should not stage into elements/x/sources/")
+	}
+}
+
+// TestWriter_UseFuseSourcesFallbackForKindLocal asserts that
+// --use-fuse-sources gracefully degrades for kind:local
+// elements (which have no source-key, so can't be served via
+// @src_<key>//): they take the normal staging path.
+func TestWriter_UseFuseSourcesFallbackForKindLocal(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(sampleCmakeBst), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	// Staging dir should exist (kind:local fallback).
+	if _, err := os.Stat(filepath.Join(outA, "elements/hello/sources/CMakeLists.txt")); err != nil {
+		t.Errorf("kind:local should still stage even with --use-fuse-sources: %v", err)
+	}
+	build, err := os.ReadFile(filepath.Join(outA, "elements/hello/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(build), "@src_") {
+		t.Errorf("kind:local BUILD should not reference @src_<key>//: %s", build)
+	}
+}
