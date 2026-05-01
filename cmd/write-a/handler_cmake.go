@@ -345,6 +345,7 @@ genrule(
         BUNDLE_DIR="$$(mktemp -d)"
         $(location //tools:convert-element) \\
             --source-root="$$SHADOW" \\
+            --source-key="%[2]s" \\
             --out-build="$(location BUILD.bazel.out)" \\
             --out-bundle-dir="$$BUNDLE_DIR" \\
             --out-read-paths="$(location read_paths.json)"

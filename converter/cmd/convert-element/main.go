@@ -167,7 +167,7 @@ func run(a cli.Args) error {
 	if err != nil {
 		return err
 	}
-	out, err := bazel.Emit(pkg)
+	out, err := bazel.EmitWithOptions(pkg, bazel.Options{SourceKey: a.SourceKey})
 	if err != nil {
 		return err
 	}

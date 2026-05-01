@@ -2783,6 +2783,7 @@ sources:
 		`srcs = ["@src_` + wantKey + `//:tree"]`,
 		`rel="$${src##*tree_dir/}"`,
 		`--use-fuse-sources`,
+		`--source-key="` + wantKey + `"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("BUILD missing %q:\n%s", want, got)

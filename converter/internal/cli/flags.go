@@ -87,6 +87,24 @@ type Args struct {
 	// probe — a measurable per-conversion latency win at project
 	// scale.
 	ToolchainCMakeFile string
+
+	// SourceKey, when non-empty, names the @src_<key>// external
+	// repository the FUSE-sources path declared for this element's
+	// source tree. The Bazel emitter prefixes every relative source
+	// path in cc_library/cc_binary `srcs = [...]` with
+	// "@src_<SourceKey>//:" so project B references sources by
+	// digest-stable Bazel label rather than by symlinked filesystem
+	// path. Empty leaves the legacy behaviour (relative paths
+	// resolved against the local package).
+	//
+	// The label form is what makes project B's compile actions
+	// fully BwoB: the executor reads source bytes from CAS by
+	// digest reference; the dev machine never materialises them
+	// (no FUSE crutch downstream of the converter). FUSE remains
+	// the mechanism that fed the converter itself — cmake walks
+	// the filesystem so it needs the symlinked tree — but stops
+	// being necessary once we have a precise file list.
+	SourceKey string
 }
 
 // Parse reads argv (without program name), populates Args, and prints usage
@@ -106,6 +124,7 @@ func Parse(argv []string, stderr io.Writer) (Args, int) {
 	fs.BoolVar(&a.AllowCMakeVersionMismatch, "allow-cmake-version-mismatch", false, "let convert-element run with cmake older than the codemodel-v2 floor (local-dev escape hatch)")
 	fs.StringVar(&a.PrefixDir, "prefix-dir", "", "directory added to CMAKE_PREFIX_PATH (out-of-tree synth-prefix; orchestrator-driven)")
 	fs.StringVar(&a.ToolchainCMakeFile, "toolchain-cmake-file", "", "CMake toolchain file (typically derive-toolchain's toolchain.cmake); skips per-conversion compiler probing")
+	fs.StringVar(&a.SourceKey, "source-key", "", "when set, prefix every source path in emitted cc_library/cc_binary srcs with @src_<key>//: (the FUSE-sources Bazel-label path)")
 
 	if err := fs.Parse(argv); err != nil {
 		return a, ExitUsage
