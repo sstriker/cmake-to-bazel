@@ -222,11 +222,24 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 		}
 		irt.Defines = defs
 
+		// Dedup includes: cmake's codemodel emits one entry per
+		// PUBLIC include propagation, so a target whose own
+		// target_include_directories names "include" plus a PUBLIC
+		// dep that also names "include" surfaces with two identical
+		// entries. The emitter sorts but doesn't dedup; bazel
+		// accepts duplicates but they're cosmetic noise. Dedup-while-
+		// preserving-order at IR-build time so any downstream
+		// consumer of irt.Includes sees a clean list.
+		seenInc := map[string]bool{}
 		for _, inc := range cg.Includes {
 			rel, ok := relativeIfInside(cmakeSrc, inc.Path)
 			if !ok {
 				continue
 			}
+			if seenInc[rel] {
+				continue
+			}
+			seenInc[rel] = true
 			irt.Includes = append(irt.Includes, rel)
 		}
 	}

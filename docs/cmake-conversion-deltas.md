@@ -13,30 +13,25 @@ won't find.
 
 ## Open deltas
 
-### subdir-library — duplicate / over-broad include + hdr collection
+### subdir-library — over-broad hdr collection
 
 **Fixture**: `converter/testdata/sample-projects/subdir-library/`
 (top-level CMakeLists adds `src/util/` via `add_subdirectory`;
 both define cc_library targets).
 
 **Surfaced**:
-- `cc_library(name = "toplib")` emits `includes = ["include", "include"]`
-  — the same path repeated. The dedup happens neither in lower
-  (which builds the IR-level include list) nor at emit time
-  (which sorts but doesn't dedup).
-- `cc_library(name = "util")` emits
-  `hdrs = ["include/toplib.h", "include/util.h"]` — every `.h`
-  file in the project, even though `util.c` only uses `util.h`.
-  Header attribution is over-inclusive across multi-CMakeLists
-  projects: the converter folds every header that any target's
-  `target_include_directories` exposes into every cc_library's
-  `hdrs`. Should partition by which target's include-dirs
-  actually own each header path.
+`cc_library(name = "util")` emits
+`hdrs = ["include/toplib.h", "include/util.h"]` — every `.h`
+file in the project, even though `util.c` only uses `util.h`.
+Header attribution is over-inclusive across multi-CMakeLists
+projects: the converter folds every header that any target's
+`target_include_directories` exposes into every cc_library's
+`hdrs`. Should partition by which target's include-dirs
+actually own each header path.
 
-**Fix shape**: lower-pass dedup on the IR's per-target include
-slice; lower-pass partition of headers by whose
-target_include_directories declared the path. Both fixes are
-local to `converter/internal/lower/`.
+**Fix shape**: lower-pass partition of headers by whose
+target_include_directories declared the path. Local to
+`converter/internal/lower/`.
 
 ### configure-file — generated header dependency missing
 
@@ -87,7 +82,13 @@ just by link path).
 
 ## Resolved deltas
 
-(none yet — initial seeding of the corpus)
+### subdir-library — includes dedup ✓
+
+`converter/internal/lower/lower.go` now dedups the includes
+slice at IR-build time (preserving order). Before:
+`includes = ["include", "include"]` for a target whose own
+`target_include_directories` named "include" plus a PUBLIC dep
+that also named "include". After: `includes = ["include"]`.
 
 ## Adding a new fixture
 
