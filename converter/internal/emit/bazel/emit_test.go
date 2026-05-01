@@ -420,6 +420,60 @@ func TestEmit_FindPackageStatic_Golden(t *testing.T) {
 	}
 }
 
+// TestEmit_PkgConfig_Golden covers the pkg-config IMPORTED_TARGET
+// shape: pkg_check_modules(... IMPORTED_TARGET ...) synthesizes
+// a PkgConfig::<NAME> IMPORTED interface target carrying the
+// pkg-config-derived cflags/ldflags. Consumers
+// target_link_libraries against it; cmake records the dep via
+// the link-fragment path same as find_package's IMPORTED
+// targets. Imports manifest maps the PkgConfig::<NAME> name to
+// the same Bazel label that ZLIB::ZLIB would resolve to —
+// alternative names, same underlying system lib.
+func TestEmit_PkgConfig_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/pkg-config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/pkg-config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	imports, err := manifest.Load(filepath.Join(src, "imports.json"))
+	if err != nil {
+		t.Fatalf("load imports manifest: %v", err)
+	}
+	traceRaw, err := os.ReadFile("../../../testdata/fileapi/pkg-config/trace.jsonl")
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src, Imports: imports, TraceRaw: traceRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "pkg-config", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("updated %s", goldenPath)
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestEmit_AliasTarget_Golden covers cmake's
 // add_library(... ALIAS ...) shape. cmake's File API
 // codemodel records ONLY the underlying real target in
