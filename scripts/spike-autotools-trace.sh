@@ -33,7 +33,9 @@ work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
 bin="$work_dir/convert-element-autotools"
+tracer="$work_dir/build-tracer"
 CGO_ENABLED=0 go build -o "$bin" ./cmd/convert-element-autotools
+CGO_ENABLED=0 go build -o "$tracer" ./cmd/build-tracer
 
 # run_fixture stages, traces, converts, asserts.
 #
@@ -59,11 +61,15 @@ run_fixture() {
     trace="$work_dir/$name-trace.log"
     build_out="$work_dir/$name-BUILD.bazel.out"
 
-    (cd "$src" && \
-        strace -f -e trace=execve -s 4096 -o "$trace" \
-            -- sh -c './configure --prefix=/usr >/dev/null 2>&1 && make >/dev/null 2>&1') \
+    # build-tracer wraps the build under strace and writes the
+    # trace artifact to --out. Future iterations replace this
+    # shim with a native ptrace implementation (no host strace
+    # dependency); for the spike, the contract — "trace artifact
+    # captures every execve from the build" — is what matters.
+    (cd "$src" && "$tracer" --out="$trace" -- \
+        sh -c './configure --prefix=/usr >/dev/null 2>&1 && make >/dev/null 2>&1') \
         || {
-        echo "spike-autotools-trace[$name]: build failed under strace" >&2
+        echo "spike-autotools-trace[$name]: build failed under tracer" >&2
         head -100 "$trace" >&2
         exit 1
     }
