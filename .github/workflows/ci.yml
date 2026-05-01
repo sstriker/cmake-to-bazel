@@ -85,19 +85,14 @@ jobs:
 
   hello-fuse-e2e:
     # PR #60's verification target. Walks the full pipeline
-    # source-push → cas-fuse → write-a --use-fuse-sources and
-    # asserts: (a) generated BUILD.bazel references @src_<key>//:tree,
-    # (b) sources.json carries the digest, (c) cas-fuse mount
-    # actually serves the source tree under /blobs/directory/<d>/,
-    # (d) the user.bazel.cas.digest xattr is readable. The bazel-
-    # build leg is gated behind RUN_BAZEL=1 in tools/e2e-hello-fuse.sh
-    # — left off here pending host-toolchain wiring. Continue-on-
-    # error so the structural failures surface cleanly without
-    # blocking the rest of CI while we iterate.
+    # source-push → cas-fuse → write-a --use-fuse-sources →
+    # bazel build //elements/hello:hello_converted, asserting
+    # the genrule's $(SRCS) resolves through @src_<key>//:tree
+    # whose backing bytes live in CAS and are served via the
+    # FUSE mount (no source-tree materialisation on dev disk).
     name: End-to-end (hello-fuse pipeline)
     runs-on: ubuntu-24.04
     needs: unit
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
@@ -106,15 +101,34 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install fuse3 + getfattr
+      - name: Install fuse3 + getfattr + bwrap + pinned cmake + bazelisk
+        # Same toolchain stack the existing bazel-e2e job uses,
+        # plus fuse3/attr for the FUSE mount + xattr probe. The
+        # SUID on bwrap is the same workaround the e2e job uses
+        # for Ubuntu 24.04's userns restriction.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fuse3 attr
+          sudo apt-get install -y --no-install-recommends fuse3 attr bubblewrap
+          sudo chmod u+s "$(command -v bwrap)"
+          sudo env PREFIX=/usr/local tools/install-pinned-cmake.sh
+          cmake --version | head -1
+          curl -L --fail -o /tmp/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64
+          sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+          bazel version | head -3 || true
 
       - name: Build custom bb-runner image
         run: docker compose -f deploy/buildbarn/docker-compose.yml build bb-runner-bare 2>&1 | tee -a /tmp/cijob.log
 
-      - name: e2e-hello-fuse (structural)
+      - name: e2e-hello-fuse (structural + bazel build)
+        env:
+          # Flips the bazel-build leg of tools/e2e-hello-fuse.sh
+          # from skip to run. Without this the script only exercises
+          # the structural assertions (generated files / mount /
+          # xattr); with it, bazel build of the converter genrule
+          # runs end-to-end.
+          RUN_BAZEL: "1"
         run: make e2e-hello-fuse 2>&1 | tee -a /tmp/cijob.log
 
       - uses: ./.github/actions/post-failure-tail
