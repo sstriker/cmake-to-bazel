@@ -9,6 +9,19 @@ in `docs/whole-project-plan.md`. Eleven fixtures so far:
   elements (`lib-a.bst`, `lib-b.bst`) plus one `kind: stack`
   (`runtime.bst`) bundling them. Phase 2 acceptance gate
   (`make e2e-meta-stack`).
+- **`cross-cmake/`** — two `kind: cmake` elements where the
+  consumer (`cons.bst`) `depends:` on the producer
+  (`prod.bst`) and uses `find_package(prod CONFIG REQUIRED)`
+  to resolve `prod::prod` from the producer's synthesized
+  cmake-config bundle. write-a's cmake handler stages the
+  producer's `cmake_config_bundle` filegroup as an action
+  input, extracts it under `$PREFIX/lib/cmake/<dep>/` at
+  genrule time, and passes `--prefix-dir=$PREFIX` to
+  convert-element. Render-only Go test in
+  `cmd/write-a/main_test.go`
+  (`TestWriter_CmakeElementStagesDepBundles`); end-to-end
+  bazel-build acceptance is gated on bzlmod-capable bazel
+  and lands as a follow-up shell script.
 - **`manual-greet/`** — single `kind: manual` element with a
   trivial install pipeline. Phase 3 acceptance gate
   (`make e2e-meta-manual`).

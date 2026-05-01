@@ -263,6 +263,16 @@ filegroup(
 )
 `, elem.Name)
 
+	// Cross-cmake-element deps: every kind:cmake dep of this
+	// element exposes a cmake_config_bundle filegroup
+	// (declared at the bottom of its own BUILD); extracting
+	// each into $PREFIX/lib/cmake/<dep>/ at action time makes
+	// `find_package(<Pkg> CONFIG)` resolve against the synth
+	// bundle. Non-cmake deps don't ship a cmake-config bundle
+	// today (Phase 4 typed filegroup work) and are skipped
+	// here.
+	cmakeDepLabels := cmakeDepBundleLabels(elem)
+
 	// Compose the genrule's srcs: real-files filegroup + (when
 	// narrowed) the zero_stubs target. The shadow-merge cmd handles
 	// both sets uniformly: each entry contains "sources/" in its
@@ -271,6 +281,32 @@ filegroup(
 	srcsList := fmt.Sprintf(`":%s_real"`, elem.Name)
 	if len(elem.ZeroPaths) > 0 {
 		srcsList += fmt.Sprintf(`, ":%s_zero_stubs"`, elem.Name)
+	}
+	for _, depLabel := range cmakeDepLabels {
+		srcsList += fmt.Sprintf(`, %q`, depLabel.Label)
+	}
+
+	// Per-dep extraction lines: one `tar -xf <bundle> -C
+	// $PREFIX/lib/cmake/<dep>/` per cmake dep. Each dep's
+	// bundle file enters the genrule via $(locations
+	// //elements/<dep>:cmake_config_bundle), which resolves
+	// to the cmake-config-bundle.tar that the dep's own
+	// genrule produced. Empty when the element has no
+	// kind:cmake deps — keeps the simple-case BUILD pristine.
+	var depExtract strings.Builder
+	prefixFlag := ""
+	if len(cmakeDepLabels) > 0 {
+		depExtract.WriteString(`        PREFIX="$$(mktemp -d)"
+`)
+		for _, dep := range cmakeDepLabels {
+			fmt.Fprintf(&depExtract, `        mkdir -p "$$PREFIX/lib/cmake/%[1]s"
+        for tar in $(locations %[2]s); do
+            tar -xf "$$tar" -C "$$PREFIX/lib/cmake/%[1]s"
+        done
+`, dep.DepName, dep.Label)
+		}
+		prefixFlag = ` \
+            --prefix-dir="$$PREFIX"`
 	}
 
 	fmt.Fprintf(&b, `
@@ -287,19 +323,28 @@ genrule(
         # paths under elements/<name>/sources/) and zero stubs (under
         # bazel-bin/.../sources/) into a fresh shadow dir. Both share
         # a "sources/" segment in their path; strip up to the last one
-        # to recover the source-relative suffix.
+        # to recover the source-relative suffix. Cross-element bundle
+        # tars from kind:cmake deps come in via $(SRCS) too; skip
+        # them here since the dep-extract loop below handles them.
         SHADOW="$$(mktemp -d)"
         for src in $(SRCS); do
+            case "$$src" in
+                *cmake-config-bundle.tar) continue ;;
+            esac
             rel="$${src##*sources/}"
             mkdir -p "$$SHADOW/$$(dirname "$$rel")"
             cp -L "$$src" "$$SHADOW/$$rel"
         done
-        BUNDLE_DIR="$$(mktemp -d)"
+        # Stage each kind:cmake dep's synth bundle under
+        # $$PREFIX/lib/cmake/<dep>/ so find_package(<Pkg> CONFIG)
+        # in this consumer's CMakeLists resolves against it. No-op
+        # when the element has no kind:cmake deps.
+%[3]s        BUNDLE_DIR="$$(mktemp -d)"
         $(location //tools:convert-element) \\
             --source-root="$$SHADOW" \\
             --out-build="$(location BUILD.bazel.out)" \\
             --out-bundle-dir="$$BUNDLE_DIR" \\
-            --out-read-paths="$(location read_paths.json)"
+            --out-read-paths="$(location read_paths.json)"%[4]s
         tar -cf "$(location cmake-config-bundle.tar)" -C "$$BUNDLE_DIR" .
     """,
     tools = ["//tools:convert-element"],
@@ -313,8 +358,50 @@ filegroup(
     srcs = [":%[1]s_converted"],
     output_group = "BUILD.bazel.out",
 )
-`, elem.Name, srcsList)
+
+# Cross-element handle: downstream cmake elements reference this
+# label in their own genrule srcs, which extracts the tar into
+# $PREFIX/lib/cmake/<this>/ at convert-element action time.
+filegroup(
+    name = "cmake_config_bundle",
+    srcs = [":%[1]s_converted"],
+    output_group = "cmake-config-bundle.tar",
+)
+`, elem.Name, srcsList, depExtract.String(), prefixFlag)
 	return b.String()
+}
+
+// cmakeDepBundleLabel pairs a cross-element dep's name with the
+// Bazel label of its `cmake_config_bundle` filegroup. Used by
+// the cmake handler to stage one cmake-config tar per dep
+// under $PREFIX/lib/cmake/<dep>/ inside the consumer's
+// convert-element action.
+type cmakeDepBundleLabel struct {
+	DepName string
+	Label   string
+}
+
+// cmakeDepBundleLabels returns the cross-element bundle labels
+// the consumer's genrule should stage. Filters to kind:cmake
+// deps (the only kind that emits a cmake-config bundle today);
+// pipeline kinds and filegroup-composition kinds don't ship a
+// bundle and are skipped silently. Order is dep-walk order so
+// the rendered BUILD is deterministic.
+func cmakeDepBundleLabels(elem *element) []cmakeDepBundleLabel {
+	var out []cmakeDepBundleLabel
+	for _, dep := range elem.Deps {
+		if dep == nil || dep.Bst == nil {
+			continue
+		}
+		if dep.Bst.Kind != "cmake" {
+			continue
+		}
+		out = append(out, cmakeDepBundleLabel{
+			DepName: dep.Name,
+			Label:   fmt.Sprintf("//elements/%s:cmake_config_bundle", dep.Name),
+		})
+	}
+	return out
 }
 
 // cmakeElementBuildFuse renders the FUSE-sources variant of the

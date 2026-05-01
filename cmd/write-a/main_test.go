@@ -160,6 +160,97 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 	}
 }
 
+// TestWriter_CmakeElementStagesDepBundles covers the cross-
+// cmake-element staging path: a kind:cmake element whose deps
+// list names another kind:cmake element gets the dep's
+// cmake-config bundle staged at convert-element action time
+// under $PREFIX/lib/cmake/<dep>/, with --prefix-dir=$PREFIX
+// passed to convert-element. find_package(<DepPkg> CONFIG)
+// inside the consumer's CMakeLists then resolves against the
+// staged bundle.
+//
+// Asserts on the rendered consumer's BUILD shape — markers for
+// the cross-element label, the per-dep tar extraction loop, and
+// the --prefix-dir flag. End-to-end (bazel build through both
+// projects) is exercised by a follow-up scripts/meta-cross-cmake.sh
+// gate gated on bzlmod-capable bazel.
+func TestWriter_CmakeElementStagesDepBundles(t *testing.T) {
+	tmp := t.TempDir()
+	// Producer cmake element.
+	prodSrc := filepath.Join(tmp, "prod-src")
+	if err := os.MkdirAll(prodSrc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(prodSrc, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(prod)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prodBst := filepath.Join(tmp, "prod.bst")
+	if err := os.WriteFile(prodBst,
+		[]byte("kind: cmake\nsources:\n- kind: local\n  path: "+prodSrc+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Consumer cmake element with a depends edge on prod.
+	consSrc := filepath.Join(tmp, "cons-src")
+	if err := os.MkdirAll(consSrc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(consSrc, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(cons)\nfind_package(prod CONFIG)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	consBst := filepath.Join(tmp, "cons.bst")
+	body := "kind: cmake\ndepends:\n- prod\nsources:\n- kind: local\n  path: " + consSrc + "\n"
+	if err := os.WriteFile(consBst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	g, err := loadGraph([]string{prodBst, consBst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	consBuild, err := os.ReadFile(filepath.Join(outA, "elements/cons/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(consBuild)
+	for _, marker := range []string{
+		`"//elements/prod:cmake_config_bundle"`,
+		`mkdir -p "$$PREFIX/lib/cmake/prod"`,
+		`for tar in $(locations //elements/prod:cmake_config_bundle); do`,
+		`tar -xf "$$tar" -C "$$PREFIX/lib/cmake/prod"`,
+		`--prefix-dir="$$PREFIX"`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("consumer BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+
+	// The producer side: its BUILD must expose a
+	// `cmake_config_bundle` filegroup so consumers can
+	// reference it.
+	prodBuild, err := os.ReadFile(filepath.Join(outA, "elements/prod/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(prodBuild), `name = "cmake_config_bundle"`) {
+		t.Errorf("producer BUILD missing cmake_config_bundle filegroup:\n%s", prodBuild)
+	}
+
+	// Negative check: a no-deps element shouldn't get the
+	// cross-element extract block. Producer has no deps, so
+	// its BUILD should NOT carry the prefix-dir flag.
+	if strings.Contains(string(prodBuild), `--prefix-dir`) {
+		t.Errorf("producer BUILD wrongly carries --prefix-dir (no deps):\n%s", prodBuild)
+	}
+}
+
 // TestWriter_AcceptsNonLocalSourceMetadata covers the source-kind
 // dispatch story: non-kind:local sources (kind:tar, kind:git_repo,
 // etc.) parse cleanly, their URL/Ref/Track metadata is recorded on
