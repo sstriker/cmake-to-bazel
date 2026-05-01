@@ -100,11 +100,12 @@ func TestEmit_WithSourceKey_PrefixesLabels(t *testing.T) {
 	}
 	body := string(got)
 
-	// Every src reference should be a @src_abc123//: label.
-	// The hello-world fixture has hello.c + include/hello.h.
+	// Every src reference should be a @src_abc123//:tree_dir/<path>
+	// label (matching the repo rule's tree_dir/ layout). The
+	// hello-world fixture has hello.c + include/hello.h.
 	for _, want := range []string{
-		`@src_abc123//:hello.c`,
-		`@src_abc123//:include/hello.h`,
+		`@src_abc123//:tree_dir/hello.c`,
+		`@src_abc123//:tree_dir/include/hello.h`,
 	} {
 		if !contains(body, want) {
 			t.Errorf("emitted BUILD missing %q; got:\n%s", want, body)

@@ -269,15 +269,22 @@ func emitCCTargetWithOptions(w *bytes.Buffer, t ir.Target, opts Options) error {
 }
 
 // prefixWithSourceLabel maps relative source paths to
-// @src_<key>//:<path> Bazel labels. Returns a fresh slice so the
-// caller's view stays untouched on the legacy (non-fuse) path.
+// @src_<key>//:tree_dir/<path> Bazel labels. The tree_dir/
+// segment matches the repo rule's layout: rules/sources.bzl's
+// _src_repo_impl ctx.symlinks the FUSE mount under tree_dir/
+// inside the @src_<key>// repo and exports every path under
+// it via exports_files(glob(["tree_dir/**"])). The label form
+// preserves the relative path exactly under that prefix.
+//
+// Returns a fresh slice so the caller's view stays untouched on
+// the legacy (non-fuse) path.
 func prefixWithSourceLabel(paths []string, key string) []string {
 	if len(paths) == 0 {
 		return paths
 	}
 	out := make([]string, len(paths))
 	for i, p := range paths {
-		out[i] = "@src_" + key + "//:" + p
+		out[i] = "@src_" + key + "//:tree_dir/" + p
 	}
 	return out
 }

@@ -2779,8 +2779,13 @@ sources:
 		t.Fatal(err)
 	}
 	got := string(build)
+	// FUSE-mode + narrowing emits enumerated per-file labels:
+	// the source-cache fixture has a single CMakeLists.txt, so
+	// it surfaces as @src_<k>//:tree_dir/CMakeLists.txt. No
+	// zero_stubs since nothing's narrowed away (everything's
+	// real in the no-patterns / default case).
 	for _, want := range []string{
-		`srcs = ["@src_` + wantKey + `//:tree"]`,
+		`@src_` + wantKey + `//:tree_dir/CMakeLists.txt`,
 		`rel="$${src##*tree_dir/}"`,
 		`--use-fuse-sources`,
 		`--source-key="` + wantKey + `"`,
@@ -3109,5 +3114,104 @@ sources:
 	}
 	if !strings.Contains(got, "y_sources") {
 		t.Errorf("multi-source pipeline should emit local _sources filegroup:\n%s", got)
+	}
+}
+
+// TestWriter_UseFuseSourcesAppliesNarrowing asserts that
+// read-paths narrowing applies in FUSE mode: a kind:cmake
+// element with a sibling <element>.read-paths.txt produces a
+// genrule whose srcs explicitly enumerates only the "real" set
+// as @src_<k>//:tree_dir/<path> labels and adds the
+// :<elem>_zero_stubs target for the zero set. cmake walks
+// SHADOW inside the action — real bytes for real files (CAS-
+// served via the labels), empty bytes for zero stubs. Same
+// content-stability property the staging-mode narrowing has.
+func TestWriter_UseFuseSourcesAppliesNarrowing(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Set up a kind:tar source-cache hit with a small tree:
+	// CMakeLists.txt + main.c + include/api.h + include/internal/private.h.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	srcMeta := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(srcMeta)
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(filepath.Join(srcRoot, "include", "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "include", "api.h"), []byte("// api\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "include", "internal", "private.h"), []byte("// private\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "x.bst")
+	if err := os.WriteFile(bstPath, []byte(`kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patternsPath := filepath.Join(tmp, "x.read-paths.txt")
+	if err := os.WriteFile(patternsPath, []byte(`include CMakeLists.txt
+include include/**/*.h
+exclude include/internal/*
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/x/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+
+	// Real set (enumerated as @src_<k>//:tree_dir/<path> labels):
+	for _, want := range []string{
+		`@src_` + wantKey + `//:tree_dir/CMakeLists.txt`,
+		`@src_` + wantKey + `//:tree_dir/include/api.h`,
+		`":x_zero_stubs"`,
+		`load("//rules:zero_files.bzl", "zero_files")`,
+		// zero_files entries are tree_dir/-prefixed so the cmd's
+		// strip pattern recovers the right relative path.
+		`"tree_dir/main.c"`,
+		`"tree_dir/include/internal/private.h"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+
+	// main.c should NOT appear as a real-file label (it's zero-stub'd).
+	if strings.Contains(got, `@src_`+wantKey+`//:tree_dir/main.c`) {
+		t.Errorf("main.c (excluded) should not appear as a real label; got:\n%s", got)
 	}
 }
