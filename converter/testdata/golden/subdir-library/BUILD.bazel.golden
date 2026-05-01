@@ -5,7 +5,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 cc_library(
     name = "toplib",
     srcs = ["src/toplib.c"],
-    hdrs = ["include/toplib.h", "include/util.h"],
+    hdrs = ["include/toplib.h"],
     includes = ["include"],
     copts = ["-O3"],
     defines = ["NDEBUG"],
@@ -17,7 +17,7 @@ cc_library(
 cc_library(
     name = "util",
     srcs = ["src/util/util.c"],
-    hdrs = ["include/toplib.h", "include/util.h"],
+    hdrs = ["include/util.h"],
     includes = ["include"],
     copts = ["-O3"],
     defines = ["NDEBUG"],

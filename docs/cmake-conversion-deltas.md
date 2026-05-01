@@ -13,25 +13,27 @@ won't find.
 
 ## Open deltas
 
-### subdir-library — over-broad hdr collection
+### find-package STATIC — IMPORTED deps don't surface
 
-**Fixture**: `converter/testdata/sample-projects/subdir-library/`
-(top-level CMakeLists adds `src/util/` via `add_subdirectory`;
-both define cc_library targets).
+**Fixture**: `converter/testdata/sample-projects/find-package/`
+(currently SHARED variant; STATIC variant of the same
+`target_link_libraries(... ZLIB::ZLIB)` shape doesn't pick up
+the dep).
 
-**Surfaced**:
-`cc_library(name = "util")` emits
-`hdrs = ["include/toplib.h", "include/util.h"]` — every `.h`
-file in the project, even though `util.c` only uses `util.h`.
-Header attribution is over-inclusive across multi-CMakeLists
-projects: the converter folds every header that any target's
-`target_include_directories` exposes into every cc_library's
-`hdrs`. Should partition by which target's include-dirs
-actually own each header path.
+**Surfaced**: For STATIC libs the codemodel's
+`target.link.commandFragments` is empty (static libs archive
+rather than link), so the imports-manifest rewrite path that
+matches link-fragment paths against the manifest's `link_paths`
+never fires. `target.dependencies[]` is also empty in the
+codemodel for IMPORTED INTERFACE deps because cmake doesn't
+materialize them as edges until something actually links.
 
-**Fix shape**: lower-pass partition of headers by whose
-target_include_directories declared the path. Local to
-`converter/internal/lower/`.
+**Fix shape**: parse cmake's `--trace-expand` output for
+`target_link_libraries(<staticTarget> ... <ImportedTarget>)`
+calls and surface each `<ImportedTarget>` as a dep edge
+through the imports-manifest's `LookupCMakeTarget`. The
+trace-expand infrastructure already exists for read-paths
+narrowing; this would extend its consumer set.
 
 ### configure-file — generated header dependency missing
 
@@ -89,6 +91,24 @@ slice at IR-build time (preserving order). Before:
 `includes = ["include", "include"]` for a target whose own
 `target_include_directories` named "include" plus a PUBLIC dep
 that also named "include". After: `includes = ["include"]`.
+
+### subdir-library — hdrs partition by target-name ownership ✓
+
+`filterHeadersByTargetOwnership` drops a header from a
+target's hdrs when the header's basename-without-extension
+matches a DIFFERENT in-codebase target's name. Before:
+`util.c`'s cc_library emitted
+`hdrs = ["include/toplib.h", "include/util.h"]` — every header
+in the project, because both targets' PUBLIC
+`target_include_directories(... include)` propagated through
+discoverHeaders. After: `hdrs = ["include/util.h"]` for util,
+`hdrs = ["include/toplib.h"]` for toplib.
+
+Conservative narrow: only excludes when the basename match is
+unambiguous. Headers without a target-name basename match stay
+in every target's hdrs (the conservative-but-correct shape —
+shared / interface headers without strong ownership signal
+duplicate rather than disappear).
 
 ## Adding a new fixture
 

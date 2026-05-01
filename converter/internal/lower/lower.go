@@ -248,8 +248,19 @@ func lowerTarget(t *fileapi.Target, cmakeSrc, cmakeBuild, hostSrc, hostPrefix st
 	if err != nil {
 		return nil, err
 	}
-	// Merge filesystem-discovered headers with any generated headers
-	// already appended above; sort+dedupe so the emitter's stable.
+	// Partition discovered headers by likely ownership. The
+	// codemodel's PUBLIC-include propagation makes every target's
+	// include-dir walk return every header in every dir any target
+	// declared — so a target with two cc_library siblings finds
+	// both libraries' headers in its hdrs. The conservative narrow
+	// here: drop a header from this target's hdrs when the header's
+	// basename (sans extension) matches a DIFFERENT in-codebase
+	// target's name. That's a precise signal — a header named
+	// "foo.h" in a project with target "foo" is overwhelmingly
+	// foo's, not bar's. Headers whose basename doesn't match any
+	// target stay (they're shared / interface headers without
+	// strong ownership signal).
+	hdrs = filterHeadersByTargetOwnership(hdrs, t.Name, idToName)
 	merged := append(irt.Hdrs, hdrs...)
 	sort.Strings(merged)
 	irt.Hdrs = dedupeStrings(merged)
@@ -491,4 +502,40 @@ func discoverHeaders(sourceRoot string, includeDirs []string) ([]string, error) 
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// filterHeadersByTargetOwnership drops a header from hdrs when
+// the header's basename-without-extension matches a different
+// in-codebase target's name. The "name match" is the strongest
+// ownership signal short of parsing every #include directive
+// from every source file: a header `util.h` in a project with
+// a `util` target is overwhelmingly `util`'s, not `toplib`'s.
+//
+// Headers whose basename doesn't match any target name stay (no
+// strong signal; emit conservatively in every target's hdrs).
+// Headers matching THIS target's name stay (they're ours).
+//
+// idToName is loadGraph's id→name map (already keyed by
+// in-codebase target ids); we project to a name-set for the
+// O(1) basename-match lookup.
+func filterHeadersByTargetOwnership(hdrs []string, selfName string, idToName map[string]string) []string {
+	otherTargetNames := map[string]bool{}
+	for _, n := range idToName {
+		if n != selfName {
+			otherTargetNames[n] = true
+		}
+	}
+	if len(otherTargetNames) == 0 {
+		return hdrs
+	}
+	out := hdrs[:0]
+	for _, h := range hdrs {
+		base := filepath.Base(h)
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		if otherTargetNames[stem] {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
 }
