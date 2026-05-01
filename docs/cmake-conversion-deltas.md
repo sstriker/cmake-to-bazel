@@ -125,6 +125,42 @@ mapping. Defer until FDSDK actually surfaces multi-language
 targets in the curated probe set (most kind:cmake elements are
 single-language); track here so a future PR can pick it up.
 
+### visibility — PRIVATE includes / headers leak as consumer-visible
+
+**Fixture**: `converter/testdata/sample-projects/visibility/`
+(one cc_library with PUBLIC `include/` + PRIVATE `include/private/`).
+
+**Surfaced**: emitted `cc_library(name = "visi")`:
+- `hdrs = ["include/private/internal.h", "include/visi.h"]` —
+  the PRIVATE `internal.h` lands alongside the PUBLIC `visi.h`.
+  Consumer `#include "internal.h"` would resolve, leaking the
+  encapsulation cmake's PRIVATE keyword was meant to enforce.
+- `includes = ["include", "include/private"]` — both dirs
+  surface in cc_library's `includes`, which Bazel propagates
+  to every consumer's compile command.
+
+The codemodel doesn't tag visibility on individual entries
+(verified empirically — `compileGroups[].includes[]` records
+both PUBLIC and PRIVATE arms flat with no distinguishing
+field). lower can't differentiate PUBLIC vs PRIVATE from the
+codemodel alone.
+
+**Fix shape (high confidence)**: same trace-expand parser as
+configure_file + STATIC-IMPORTED-deps. cmake's trace records
+`target_include_directories(<target> PUBLIC <a> ... PRIVATE
+<b> ...)` calls with the keywords intact; lower can split the
+codemodel's flat include list into PUBLIC vs PRIVATE arms by
+matching paths to the trace-recorded keyword groups. Then:
+emit only PUBLIC dirs in cc_library.includes; PRIVATE dirs
+become per-source `copts = ["-Iinclude/private"]` (compile-only,
+not consumer-visible).
+
+This trace-expand work is now justified by THREE deltas
+converging on it: configure_file, STATIC IMPORTED deps,
+and visibility. Worth doing when the FDSDK reality-check
+probe surfaces a case where any of the three actually breaks
+a build.
+
 ### find-package STATIC — IMPORTED deps don't surface (correctness)
 
 **Fixture**: `converter/testdata/sample-projects/find-package/`

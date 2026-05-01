@@ -445,3 +445,55 @@ func TestEmit_MultiLanguage_Golden(t *testing.T) {
 		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
+
+// TestEmit_Visibility_Golden exercises target_include_directories'
+// PUBLIC vs PRIVATE distinction. The codemodel doesn't tag
+// individual include entries with visibility — both arms flatten
+// into compileGroups[].includes[]. lower can't differentiate
+// from the codemodel alone, so PRIVATE includes leak as
+// consumer-visible.
+//
+// Known delta captured by the golden:
+//   - hdrs = [..., "include/private/internal.h"] — PRIVATE
+//     header surfaces alongside PUBLIC ones.
+//   - includes = ["include", "include/private"] — PRIVATE
+//     dir surfaces in cc_library's consumer-visible includes.
+//
+// Fix shape (deferred — needs trace-expand parser; same parser
+// closes configure_file + STATIC IMPORTED deps): parse cmake's
+// --trace-expand output for target_include_directories calls'
+// PUBLIC/PRIVATE keywords. See docs/cmake-conversion-deltas.md.
+func TestEmit_Visibility_Golden(t *testing.T) {
+	src, err := filepath.Abs("../../../testdata/sample-projects/visibility")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := fileapi.Load("../../../testdata/fileapi/visibility")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := lower.ToIR(r, nil, lower.Options{HostSourceRoot: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := bazel.Emit(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = scrubSourceLine(got, src)
+	goldenPath := filepath.Join("..", "..", "..", "testdata", "golden", "visibility", "BUILD.bazel.golden")
+	if *update {
+		_ = os.MkdirAll(filepath.Dir(goldenPath), 0o755)
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("BUILD.bazel mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
