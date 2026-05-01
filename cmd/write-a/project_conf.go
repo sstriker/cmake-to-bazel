@@ -78,6 +78,24 @@ type projectConf struct {
 	// @platforms//cpu:* pathway; everything else option-typed
 	// gets flag+select.
 	Options map[string]bstOption `yaml:"options"`
+	// Elements is BuildStream's per-kind project-conf override
+	// block: `elements: <kind>: { variables: {...}, config: {...} }`
+	// applies to every element of that kind in the project.
+	// FDSDK uses this heavily — `elements: autotools:` pulls in
+	// _private/autotools-conf.yml which defines `build-dir`,
+	// `conf-cmd`, `conf-host`, `conf-build`, etc. Variables
+	// declared here override the kind's plugin defaults; the
+	// element's own variables: block still wins on a key conflict.
+	Elements map[string]elementKindConf `yaml:"elements"`
+}
+
+// elementKindConf is the per-kind subblock of project.conf's
+// elements: section. Mirrors BuildStream's element-level
+// configuration shape; we currently consume Variables only.
+// Conditionals / config: blocks at this layer land when fixtures
+// surface them.
+type elementKindConf struct {
+	Variables map[string]string `yaml:"variables"`
 }
 
 // bstOption is one declaration in the project.conf options:
@@ -135,6 +153,15 @@ type projectInfo struct {
 	// Options is the project-level options-declaration map
 	// (see projectConf.Options).
 	Options map[string]bstOption
+	// KindVars is the per-kind variable-override map
+	// (`elements: <kind>: variables:` in project.conf). Each
+	// entry overrides the kind's plugin defaults for every
+	// element of that kind in the project. Element-level
+	// variables: still wins on a key conflict (more specific).
+	// FDSDK populates this via include/_private/autotools-conf.yml,
+	// cmake-conf.yml, meson-conf.yml — defining `build-dir`,
+	// `conf-cmd`, etc. that the .bst's commands reference.
+	KindVars map[string]map[string]string
 }
 
 // findProjectConf walks up from startDir looking for a project.conf
@@ -233,6 +260,23 @@ func loadProjectInfoFromBst(bstPath string) (projectInfo, error) {
 		}
 		vars = merged
 	}
+	// Project-conf per-kind variable overrides. Flatten
+	// pc.Elements to a kind→variables map so handlers can layer
+	// the overrides on top of plugin defaults at render time.
+	var kindVars map[string]map[string]string
+	if len(pc.Elements) > 0 {
+		kindVars = make(map[string]map[string]string, len(pc.Elements))
+		for kind, conf := range pc.Elements {
+			if len(conf.Variables) == 0 {
+				continue
+			}
+			kv := make(map[string]string, len(conf.Variables))
+			for k, v := range conf.Variables {
+				kv[k] = v
+			}
+			kindVars[kind] = kv
+		}
+	}
 	return projectInfo{
 		ProjectRoot:  root,
 		ElementRoot:  elementRoot,
@@ -241,6 +285,7 @@ func loadProjectInfoFromBst(bstPath string) (projectInfo, error) {
 		Aliases:      pc.Aliases,
 		Environment:  pc.Environment,
 		Options:      pc.Options,
+		KindVars:     kindVars,
 	}, nil
 }
 

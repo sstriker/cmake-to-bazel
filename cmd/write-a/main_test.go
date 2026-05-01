@@ -620,8 +620,8 @@ func TestWriter_FilterRejectsMultipleDeps(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for filter with 2 deps, got nil")
 	}
-	if !strings.Contains(err.Error(), "expected exactly 1 dep") {
-		t.Errorf("error should name the single-dep invariant; got: %v", err)
+	if !strings.Contains(err.Error(), "expected exactly 1 build-dep") {
+		t.Errorf("error should name the single-build-dep invariant; got: %v", err)
 	}
 }
 

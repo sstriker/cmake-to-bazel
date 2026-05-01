@@ -24,11 +24,28 @@ func init() {
 	registerHandler(pipelineHandler{
 		kindName: "pyproject",
 		defaultVars: map[string]string{
+			"python":        "python3",
+			"pip":           "pip",
 			"python-prefix": "%{prefix}/lib/python3",
+			"pip-args":      `--no-build-isolation --no-deps --no-index --target="%{install-root}%{python-prefix}"`,
+			// build / installer driver knobs — names mirror
+			// upstream buildstream-plugins pyproject defaults so
+			// elements that reference them resolve cleanly.
+			"build-args":     "--wheel --no-isolation",
+			"installer-args": "",
+			"dist-dir":       "dist",
 		},
 		defaults: pipelineDefaults{
-			Configure: []string{
-				`pip install --no-build-isolation --no-deps --no-index --target="%{install-root}%{python-prefix}" .`,
+			// Match upstream buildstream-plugins pyproject.yaml's
+			// shape: %{python} -m build, then %{python} -m pip
+			// install. Per-element variables: blocks override
+			// pieces (e.g. setting python=python3.11 explicitly,
+			// or extending pip-args with --extra-index-url).
+			Build: []string{
+				`%{python} -m build --wheel --no-isolation --outdir _bst_dist .`,
+			},
+			Install: []string{
+				`%{python} -m %{pip} install %{pip-args} _bst_dist/*.whl`,
 			},
 		},
 	})

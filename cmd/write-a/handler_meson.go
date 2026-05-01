@@ -23,22 +23,24 @@ func init() {
 	registerHandler(pipelineHandler{
 		kindName: "meson",
 		defaultVars: map[string]string{
-			"meson-source":       ".",
-			"meson-builddir":     "_builddir",
-			"conf-cmd-args":      "%{meson-source} %{meson-builddir}",
-			"meson-build-args":   "",
-			"meson-install-args": "",
+			// Variable names mirror upstream buildstream-plugins'
+			// meson.yaml. FDSDK references %{build-dir} from
+			// per-element config: blocks, so the name has to
+			// match.
+			"build-dir":    "_builddir",
+			"meson-source": ".",
+			"meson-args":   "%{meson-source} %{build-dir}",
+			"meson-extra":  "",
+			"meson-local":  "",
+			"meson-global": "",
+			"make":         `ninja -C "%{build-dir}" -j 0`,
+			"make-install": `DESTDIR="%{install-root}" ninja -C "%{build-dir}" install`,
+			"meson":        `meson %{meson-args} %{meson-extra} %{meson-local} %{meson-global}`,
 		},
 		defaults: pipelineDefaults{
-			Configure: []string{
-				`meson %{conf-cmd-args}`,
-			},
-			Build: []string{
-				`meson compile -C %{meson-builddir} %{meson-build-args}`,
-			},
-			Install: []string{
-				`env DESTDIR="%{install-root}" meson install -C %{meson-builddir} %{meson-install-args}`,
-			},
+			Configure: []string{`%{meson}`},
+			Build:     []string{`%{make}`},
+			Install:   []string{`%{make-install}`},
 		},
 	})
 }

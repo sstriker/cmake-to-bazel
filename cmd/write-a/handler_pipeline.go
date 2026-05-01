@@ -248,6 +248,7 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	type groupKey [4]string
 	groupIdx := map[groupKey]int{}
 	var groups []dispatchGroup
+	var lastSkipErr error
 	for _, tuple := range cartesianTuples(dispatch) {
 		phases, err := resolveAt(tuple)
 		if err != nil {
@@ -259,6 +260,7 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 				// Future --verbose flag can echo the skip to
 				// stderr; for now the BUILD content is the
 				// canonical record of which dispatch arms exist.
+				lastSkipErr = err
 				continue
 			}
 			return err
@@ -283,8 +285,11 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	// the operator knows nothing's buildable rather than silently
 	// rendering an empty select().
 	if len(groups) == 0 {
-		return fmt.Errorf("element %q (kind:%s): every dispatch tuple was unresolvable; check (?): branch coverage vs option values",
-			elem.Name, h.kindName)
+		// All tuples skipped — surface the last underlying
+		// resolution error so the operator sees which variable
+		// is the culprit.
+		return fmt.Errorf("element %q (kind:%s): every dispatch tuple was unresolvable; check (?): branch coverage vs option values; last error: %v",
+			elem.Name, h.kindName, lastSkipErr)
 	}
 	// Dedup-collapse: if every dispatch tuple resolves identically,
 	// the (?): block didn't actually affect the rendered cmd. Emit

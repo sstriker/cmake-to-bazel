@@ -268,6 +268,14 @@ type element struct {
 	// Deps are the resolved depends-on edges of this element. Populated
 	// during loadGraph; parents reference children.
 	Deps []*element
+	// BuildDeps is the subset of Deps drawn from build-depends (vs
+	// runtime-depends). kind:filter's invariant is "exactly one
+	// parent to filter from"; that parent is the single build-dep,
+	// independent of how many runtime-deps the filter declares for
+	// downstream consumers. Pipeline kinds (autotools/cmake/make/…)
+	// may grow build-vs-runtime separation here when their typed-
+	// filegroup wrappers ship.
+	BuildDeps []*element
 	// Patterns is the parsed <element>.read-paths.txt content
 	// (committed alongside the .bst). Nil when the file is
 	// absent — that's the default "entire tree real" case. Only
@@ -494,6 +502,15 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 		for k, v := range info.Variables {
 			seeded[k] = v
 		}
+		// Per-kind project-conf overrides
+		// (`elements: <kind>: variables:`) layer on top of project-
+		// wide variables. FDSDK uses this for autotools-conf.yml's
+		// build-dir, conf-cmd, etc.
+		if kv, ok := info.KindVars[elem.Bst.Kind]; ok {
+			for k, v := range kv {
+				seeded[k] = v
+			}
+		}
 		foldedVars, foldedConds := foldStaticConditionals(seeded, info.Conditionals, staticDispatchVars, optionTypedSet(info.Options))
 		elem.ProjectConfVars = foldedVars
 		elem.ProjectConfConditionals = foldedConds
@@ -511,26 +528,42 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 	// multiplicity).
 	for _, elem := range g.Elements {
 		seen := map[*element]bool{}
-		allDeps := append([]bstDep{}, elem.Bst.Depends...)
-		allDeps = append(allDeps, elem.Bst.BuildDepends...)
-		allDeps = append(allDeps, elem.Bst.RuntimeDepends...)
-		for _, dep := range allDeps {
-			// List-form deps (filename: [a.bst, b.bst]) expand to
-			// N edges; the shared config: applies to each.
-			for _, fn := range dep.expandedFilenames() {
-				// Tolerate `depends: [- foo.bst]` style by
-				// stripping the .bst suffix; also accept bare
-				// element names.
-				depName := strings.TrimSuffix(fn, ".bst")
-				depElem, ok := g.ByName[depName]
-				if !ok {
-					return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
+		seenBuild := map[*element]bool{}
+		// `depends:` is BuildStream's "both" shorthand — counts as
+		// build AND runtime in the typed-output split. Treat as
+		// build for the BuildDeps slice (kind:filter cares).
+		// `build-depends:` is build-only. `runtime-depends:` is
+		// runtime-only and does NOT contribute to BuildDeps.
+		buildClasses := []struct {
+			deps    []bstDep
+			isBuild bool
+		}{
+			{elem.Bst.Depends, true},
+			{elem.Bst.BuildDepends, true},
+			{elem.Bst.RuntimeDepends, false},
+		}
+		for _, class := range buildClasses {
+			for _, dep := range class.deps {
+				// List-form deps (filename: [a.bst, b.bst]) expand to
+				// N edges; the shared config: applies to each.
+				for _, fn := range dep.expandedFilenames() {
+					// Tolerate `depends: [- foo.bst]` style by
+					// stripping the .bst suffix; also accept bare
+					// element names.
+					depName := strings.TrimSuffix(fn, ".bst")
+					depElem, ok := g.ByName[depName]
+					if !ok {
+						return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
+					}
+					if !seen[depElem] {
+						seen[depElem] = true
+						elem.Deps = append(elem.Deps, depElem)
+					}
+					if class.isBuild && !seenBuild[depElem] {
+						seenBuild[depElem] = true
+						elem.BuildDeps = append(elem.BuildDeps, depElem)
+					}
 				}
-				if seen[depElem] {
-					continue
-				}
-				seen[depElem] = true
-				elem.Deps = append(elem.Deps, depElem)
 			}
 		}
 	}
@@ -990,6 +1023,27 @@ func copyTree(src, dst string) error {
 			return err
 		}
 		target := filepath.Join(dst, rel)
+		// Preserve symlinks as symlinks rather than dereferencing
+		// (copyFile via os.Open would follow). Some BuildStream
+		// kind:import elements ship dangling-on-disk symlinks
+		// whose targets exist only in the staged install tree
+		// (e.g. FDSDK's bootstrap/symlinks: bin → usr/bin where
+		// usr/bin doesn't exist in the source dir but will after
+		// staging). Re-creating the symlink as-is matches the
+		// element's intent.
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("readlink %s: %w", path, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			// Remove any pre-existing entry at target — re-runs
+			// of write-a against the same output dir hit this.
+			_ = os.Remove(target)
+			return os.Symlink(linkTarget, target)
+		}
 		if info.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}

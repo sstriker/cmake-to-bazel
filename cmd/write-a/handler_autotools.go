@@ -86,6 +86,30 @@ fi`,
 
 			"make":         "make",
 			"make-install": `make -j1 DESTDIR="%{install-root}" install`,
+
+			// Libtool .la file scrubbing — buildstream-plugins'
+			// autotools plugin runs this in install-commands by
+			// default, since stale .la files break downstream
+			// linkers when the install layout differs from the
+			// libtool-recorded paths. FDSDK references
+			// %{delete-libtool-archives} from autotools-conf.yml's
+			// install-commands tail; the per-element BUILD just
+			// inlines the resolved value.
+			"remove-libtool-modules":   "false",
+			"remove-libtool-libraries": "false",
+			"delete-libtool-archives": `if %{remove-libtool-modules} || %{remove-libtool-libraries}; then
+    find "%{install-root}" -name "*.la" -print0 | while read -d '' -r file; do
+        if grep '^shouldnotlink=yes$' "${file}" &>/dev/null; then
+            if %{remove-libtool-modules}; then
+                rm "${file}"
+            fi
+        else
+            if %{remove-libtool-libraries}; then
+                rm "${file}"
+            fi
+        fi
+    done
+fi`,
 		},
 		defaults: pipelineDefaults{
 			Configure: []string{"%{configure}"},
