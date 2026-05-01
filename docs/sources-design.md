@@ -217,35 +217,48 @@ Bazel re-evaluates the module extension when `sources.json`
 changes (its declared input). It doesn't need to watch the
 filesystem — we never overwrite paths.
 
-### BwoB caveat: input digesting on dev machine
+### Full BwoB via xattr-served digests
 
-Honest caveat. When Bazel constructs a remote-action input proto,
-it needs a digest for every input file. It computes this by
-reading the file. With FUSE, that read pulls bytes from CAS into
-dev's RAM (kernel page cache) for SHA-256 — bytes don't *persist*
-on disk (FUSE pages are evictable, can use direct-IO), but they
-do traverse the dev's network and RAM.
+Bazel ships a flag pair that closes the loop end-to-end without
+any dev-side byte traffic for digesting:
 
-So v1 is **partial BwoB**:
-- ✓ Executor side: clean BwoB. Workers read from CAS via REAPI.
-- ✓ Dev disk: source trees never materialize as durable files.
-- ✗ Dev network: bytes flow once, to be re-digested.
+```
+--unix_digest_hash_attribute_name=user.bazel.cas.digest
+--digest_function=SHA256
+```
 
-Mitigations live upstream: we file a Bazel feature request to
-trust pre-computed digests served via xattrs on the FUSE FS
-(bb_clientd already publishes `user.bazel.cas.digest`-style
-attrs; what's missing is a Bazel-side `--experimental_*` flag for
-trusting them on repo-rule inputs, analogous to
-`--experimental_remote_output_service` on outputs). We track and
-adopt if it lands. Until then, the first-build cost is bounded by
-how aggressively read-paths narrowing tightens the input set.
+When set, Bazel reads the named extended attribute on each input
+file and treats its value as the file's content digest, skipping
+the read-and-hash step it would otherwise perform. `cmd/cas-fuse`
+serves exactly that xattr (key `user.bazel.cas.digest`, value =
+hex SHA-256 of the file's bytes — already known from the CAS
+FileNode digest). Result:
 
-**TODO**: confirm or refute whether a relevant flag already
-exists. Bazel has several digest-trust pathways
-(`FileArtifactValue`, `--experimental_remote_merkle_tree_cache`,
-`ctx.download_and_extract` SRI trust); whether any of them
-naturally cover xattr-served inputs is something to verify when
-implementing, not block on now.
+- ✓ Executor side: workers read from CAS via REAPI.
+- ✓ Dev disk: source trees never materialise as durable files.
+- ✓ Dev network: bytes don't flow at all for digesting; they only
+  flow when an action actually reads the content (which usually
+  doesn't happen for inputs to remote actions — the executor
+  fetches them itself).
+
+The build invocation gets these alongside the existing
+remote-execution flags:
+
+```
+bazel build \
+  --remote_executor=grpc://... \
+  --remote_cache=grpc://... \
+  --remote_download_minimal \
+  --unix_digest_hash_attribute_name=user.bazel.cas.digest \
+  --digest_function=SHA256 \
+  --repo_env=CAS_FUSE_MOUNT=/var/cache/cmake-to-bazel/cas \
+  //elements/<leaf>:<leaf>
+```
+
+`--repo_env=CAS_FUSE_MOUNT=...` points the source-extension's
+repo rule at the daemon's mount; the rule `ctx.symlink`s
+`<mount>/blobs/directory/<digest>/` into each declared
+`@src_<key>//` repo.
 
 ## `cmd/write-a`'s source access pattern
 

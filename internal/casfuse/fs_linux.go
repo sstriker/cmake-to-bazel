@@ -30,12 +30,39 @@ type MountOptions struct {
 	// future per-mount tuning.
 }
 
-// Mount attaches Tree at mountPoint and returns the running
-// server. Caller calls Wait() to block until unmount, or
-// Unmount() to tear down.
+// Mount attaches a single Tree at mountPoint and returns the
+// running server. The kernel sees the tree's root Directory at
+// the mount point. Used by tests; production uses MountRoot
+// for the multi-digest namespacing.
 func Mount(tree *Tree, mountPoint string, opts MountOptions) (*fuse.Server, error) {
 	root := &dirNode{tree: tree}
 	server, err := fs.Mount(mountPoint, root, &fs.Options{
+		MountOptions: fuse.MountOptions{
+			Name:       "cas-fuse",
+			FsName:     "cas-fuse",
+			AllowOther: opts.AllowOther,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return server, nil
+}
+
+// MountRoot attaches a Root at mountPoint and returns the
+// running server. The kernel sees the bb_clientd-style virtual
+// hierarchy:
+//
+//	<mount>/[<instance>/]blobs/directory/<hash>-<size>/...
+//
+// where <instance> is omitted for the empty-instance default and
+// each <hash>-<size> path component lazily resolves to a Tree
+// rooted at that CAS Directory. This is what production daemons
+// run: one mount serves every per-source repo a Bazel build
+// references.
+func MountRoot(root *Root, mountPoint string, opts MountOptions) (*fuse.Server, error) {
+	rootNode := &rootNode{root: root}
+	server, err := fs.Mount(mountPoint, rootNode, &fs.Options{
 		MountOptions: fuse.MountOptions{
 			Name:       "cas-fuse",
 			FsName:     "cas-fuse",
@@ -149,6 +176,8 @@ type fileNode struct {
 var _ fs.NodeReader = (*fileNode)(nil)
 var _ fs.NodeGetattrer = (*fileNode)(nil)
 var _ fs.NodeOpener = (*fileNode)(nil)
+var _ fs.NodeGetxattrer = (*fileNode)(nil)
+var _ fs.NodeListxattrer = (*fileNode)(nil)
 
 func (n *fileNode) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	mode := uint32(0o444)
@@ -181,6 +210,55 @@ func (n *fileNode) Read(ctx context.Context, _ fs.FileHandle, dest []byte, off i
 		end = int64(len(body))
 	}
 	return fuse.ReadResultData(body[off:end]), 0
+}
+
+// XattrDigestName is the xattr key the file nodes serve with the
+// pre-computed CAS digest of each file's bytes (hex of SHA-256).
+// Bazel reads this when invoked with
+//
+//	--unix_digest_hash_attribute_name=user.bazel.cas.digest \
+//	--digest_function=SHA256
+//
+// which lets it skip re-digesting input files served through a
+// FUSE mount — meaning bytes don't have to traverse dev's RAM
+// just to compute a digest the daemon already knows. Without this,
+// BwoB still works but the dev machine reads every input once for
+// hashing.
+const XattrDigestName = "user.bazel.cas.digest"
+
+// Getxattr serves XattrDigestName with the file's CAS hash. Other
+// names return ENODATA so Bazel cleanly falls back to its own
+// digesting for unrelated xattr requests.
+func (n *fileNode) Getxattr(_ context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	if attr != XattrDigestName {
+		return 0, syscall.ENODATA
+	}
+	val := []byte(n.fn.Digest.Hash)
+	if len(dest) == 0 {
+		// "Probe" call: kernel passes a zero-length buffer to ask
+		// for the size. Return the length without copying.
+		return uint32(len(val)), 0
+	}
+	if len(dest) < len(val) {
+		return uint32(len(val)), syscall.ERANGE
+	}
+	return uint32(copy(dest, val)), 0
+}
+
+// Listxattr advertises the digest xattr so `getfattr -d` style
+// listings find it. Bazel itself only Getxattr's the configured
+// name, but having Listxattr return the same name keeps tooling
+// honest.
+func (n *fileNode) Listxattr(_ context.Context, dest []byte) (uint32, syscall.Errno) {
+	// Format is NUL-terminated names concatenated.
+	val := []byte(XattrDigestName + "\x00")
+	if len(dest) == 0 {
+		return uint32(len(val)), 0
+	}
+	if len(dest) < len(val) {
+		return uint32(len(val)), syscall.ERANGE
+	}
+	return uint32(copy(dest, val)), 0
 }
 
 // symlinkNode is a virtual symlink. The CAS Directory's

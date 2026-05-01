@@ -2,5 +2,7 @@
 
 package main
 
-func serverWait(_ *struct{})          {}
-func serverUnmount(_ *struct{}) error { return nil }
+type serverShim = *struct{}
+
+func serverWait(_ serverShim)          {}
+func serverUnmount(_ serverShim) error { return nil }

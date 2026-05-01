@@ -2617,3 +2617,105 @@ func TestWriter_LocalOnlyGraphSkipsUseRepoBlock(t *testing.T) {
 		t.Errorf("MODULE.bazel should skip use_extension when no non-local sources:\n%s", raw)
 	}
 }
+
+// TestWriter_SourceCachePopulatesDigestsInJSON asserts the
+// PR #58 wiring: when --source-cache resolves a non-kind:local
+// source to an on-disk tree, write-a packs that tree, computes
+// its CAS Directory digest, and stamps it into sources.json.
+// The repo rule (rules/sources.bzl) reads that digest to build
+// its FUSE-mount symlink.
+func TestWriter_SourceCachePopulatesDigestsInJSON(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Stage a fake source-cache hit at <cache>/<key>/.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	bstSrc := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(bstSrc)
+	if wantKey == "" {
+		t.Fatal("setup: sourceKey empty for non-local source")
+	}
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Element pointing at the matching source (URL/Ref the same so
+	// loadElement's source-cache lookup hits).
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Sources[0].AbsPath == "" {
+		t.Fatal("source-cache hit did not populate AbsPath")
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(outA, "tools/sources.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	str := string(raw)
+	if !strings.Contains(str, `"digest"`) {
+		t.Errorf("sources.json should carry a digest for source-cache-hit entries:\n%s", str)
+	}
+	if !strings.Contains(str, wantKey) {
+		t.Errorf("sources.json missing key %q", wantKey)
+	}
+}
+
+// TestWriter_NoSourceCacheLeavesDigestEmpty asserts the
+// graceful-degradation case: when --source-cache isn't passed
+// (no AbsPath on the resolvedSource), sources.json carries the
+// entry with an empty Digest. The repo rule's empty-tree
+// fallback handles that without breaking load() resolution.
+func TestWriter_NoSourceCacheLeavesDigestEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(outA, "tools/sources.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"digest"`) {
+		t.Errorf("entries without a source-cache hit should omit digest:\n%s", raw)
+	}
+}

@@ -706,7 +706,17 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 	// reads to declare per-source repos. One entry per unique source
 	// identity (kind + url + ref) across the graph; kind:local
 	// sources are excluded since they don't need a CAS-backed repo.
-	srcs := collectSources(g)
+	// When --source-cache resolved a tree for a given source,
+	// populateDigests packs it and stamps the resulting CAS
+	// Directory digest into the entry; entries without an
+	// AbsPath get an empty Digest (the repo rule's empty-tree
+	// fallback handles that without breaking load() resolution).
+	rawSrcs := collectSources(g)
+	withDigests, _, err := populateDigests(g, rawSrcs.Sources)
+	if err != nil {
+		return fmt.Errorf("compute source digests: %w", err)
+	}
+	srcs := sourcesJSON{Sources: withDigests}
 	srcJSON, err := marshalSourcesJSON(srcs)
 	if err != nil {
 		return fmt.Errorf("marshal sources.json: %w", err)
@@ -781,7 +791,12 @@ func writeProjectB(g *graph, outDir string) error {
 	if err := writeFile(filepath.Join(outDir, "rules", "BUILD.bazel"), "# rules/ holds the starlark utilities project B's per-element BUILDs use.\n"); err != nil {
 		return err
 	}
-	srcs := collectSources(g)
+	rawSrcs := collectSources(g)
+	withDigests, _, err := populateDigests(g, rawSrcs.Sources)
+	if err != nil {
+		return fmt.Errorf("compute source digests: %w", err)
+	}
+	srcs := sourcesJSON{Sources: withDigests}
 	srcJSON, err := marshalSourcesJSON(srcs)
 	if err != nil {
 		return fmt.Errorf("marshal sources.json: %w", err)

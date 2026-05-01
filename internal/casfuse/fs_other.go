@@ -18,3 +18,9 @@ type MountOptions struct {
 func Mount(_ *Tree, _ string, _ MountOptions) (*struct{}, error) {
 	return nil, errors.New("casfuse.Mount: not implemented on this platform yet (Linux-only in v1)")
 }
+
+// MountRoot is the multi-digest counterpart to Mount; same
+// non-Linux constraint applies in v1.
+func MountRoot(_ *Root, _ string, _ MountOptions) (*struct{}, error) {
+	return nil, errors.New("casfuse.MountRoot: not implemented on this platform yet (Linux-only in v1)")
+}
