@@ -84,15 +84,18 @@ plugins:
 	if err := os.WriteFile(conf, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	vars, err := loadProjectConf(conf)
+	pc, err := loadProjectConf(conf)
 	if err != nil {
 		t.Fatalf("loadProjectConf: %v", err)
 	}
-	if got, want := vars["prefix"], "/usr"; got != want {
+	if got, want := pc.Variables["prefix"], "/usr"; got != want {
 		t.Errorf("prefix: got %q, want %q", got, want)
 	}
-	if got, want := vars["custom"], "%{prefix}/custom"; got != want {
+	if got, want := pc.Variables["custom"], "%{prefix}/custom"; got != want {
 		t.Errorf("custom: got %q, want %q", got, want)
+	}
+	if got, want := pc.ElementPath, "elements"; got != want {
+		t.Errorf("element-path: got %q, want %q", got, want)
 	}
 }
 
@@ -102,12 +105,12 @@ func TestLoadProjectConf_NoVariablesBlockReturnsNil(t *testing.T) {
 	if err := os.WriteFile(conf, []byte("name: empty\nelement-path: elements\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	vars, err := loadProjectConf(conf)
+	pc, err := loadProjectConf(conf)
 	if err != nil {
 		t.Fatalf("loadProjectConf: %v", err)
 	}
-	if vars != nil {
-		t.Errorf("expected nil for missing variables: block, got %v", vars)
+	if pc.Variables != nil {
+		t.Errorf("expected nil for missing variables: block, got %v", pc.Variables)
 	}
 }
 

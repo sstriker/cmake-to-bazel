@@ -65,18 +65,21 @@ produces a single edge. The build-vs-runtime distinction lands
 later, when the typed-filegroup wrapper for pipeline-kind outputs
 exposes runtime-only labels separately.
 
-### 2. Path-qualified element references (6 018 dep references)
+### 2. Path-qualified element references (6 018 dep references) ✓ done
 
-`bzip2.bst` declares `depends: [public-stacks/runtime-minimal.bst,
-bootstrap/bzip2.bst]`. Our `loadElement` derives the element name
-from the basename (`bstFile.Depends` → `runtime-minimal`,
-`bzip2`); the resolver then can't find them because the graph
-keys by full path.
+`project.conf` now reads `element-path:` (defaults to `.`).
+loadGraph keys each element by its path relative to
+`<project-root>/<element-path>`, minus `.bst`, so a `.bst` at
+`<project>/elements/components/bzip2.bst` keys as
+`components/bzip2` and a `depends: [bootstrap/bzip2.bst]` reference
+resolves regardless of which subdirectory the dep declaration
+lives in. Same-basename collision (FDSDK has both
+`elements/components/bzip2.bst` and `elements/bootstrap/bzip2.bst`)
+no longer overwrites the graph entry.
 
-Fix shape: load every `.bst` under FDSDK's `element-path` (a
-project.conf field; defaults to `elements/`). Key the graph by the
-relative path under `element-path` rather than basename. Dep
-resolution then matches against the same key.
+When no project.conf is found, write-a falls back to basename
+keying (the pre-project.conf shape that
+`testdata/meta-project/two-libs/` and similar fixtures rely on).
 
 ### 3. Multi-source elements (129 elements)
 
@@ -216,20 +219,24 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-Items #1 (build/runtime-depends) and #7 (junction-targeted dep map
-shape) are closed. The reality-check probes don't visibly move yet
-— every probe still trips earlier on path-qualified deps, multi-
-source, or kind:git_repo. The next stack-on PRs target those:
+Items #1 (build/runtime-depends), #7 (junction-targeted dep map
+shape), and #2 (path-qualified element resolution + element-path
+slice of #10) are closed. The script's curated isolated-element
+probes still trip on the gaps further down the list (each one is a
+diagnostic for first-failure, and a single-file isolated probe
+can't expose multi-element dep resolution); the new "synthetic
+multi-element probe" in the script directly exercises path-qualified
+resolution and now passes.
 
-1. **PR `path-qualified element resolution`** — closes #2 + the
-   `element-path` slice of #10. Unblocks every dep reference; first
-   probe (`bzip2.bst` kind:stack) should reach a different failure.
-2. **PR `multi-source elements + public: tolerance + source.directory`** —
-   closes #3, #4, #5. Reaches the variable-resolver phase on most
-   elements.
+The next stack-on PR targets:
 
-After those, the survey re-runs from the variable-resolver side:
-the next forcing function will likely be `(@):` composition (item
-6), which is the first non-mechanical change on the list. `(?):`
-conditional handling (item 9) is the architectural piece; it lands
+1. **PR `multi-source elements + public: tolerance + source.directory`** —
+   closes #3, #4, #5. After this, the curated probes against
+   `boot-keys-prod.bst`, `bootstrap/bzip2.bst`, and `tar.bst` (the
+   ones tripping on multi-source) should reach the variable-
+   resolver phase.
+
+After that, the next forcing function is `(@):` composition (#6),
+which is the first non-mechanical change on the list. `(?):`
+conditional handling (#9) is the architectural piece; it lands
 once the FDSDK fixture forces it.

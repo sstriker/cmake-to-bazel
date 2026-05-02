@@ -252,9 +252,22 @@ func main() {
 }
 
 // loadGraph parses every .bst path in input order, then resolves
-// `depends:` references to produce a topologically-sorted element
-// list. Dep resolution matches by element name (filename basename
-// without .bst); unresolved deps are an error so typos surface early.
+// `depends:` / `build-depends:` / `runtime-depends:` references
+// into a topologically-sorted element list. Element keying:
+//
+//   - With project.conf found: element name is the path relative to
+//     the project's element-root (project.conf dir + element-path),
+//     minus ".bst". So a .bst at <project>/elements/foo/bar.bst keys
+//     into the graph as "foo/bar", and a depends-list reference
+//     "foo/bar.bst" resolves regardless of which subdir the
+//     declaration lives in.
+//   - With no project.conf: element name falls back to basename
+//     minus ".bst". The pre-project.conf shape; covers single-fixture
+//     trees and the existing testdata/meta-project fixtures that
+//     don't declare a project.
+//
+// Unresolved deps surface as errors so typos and missing-from-loader
+// elements both surface early.
 //
 // Project.conf is loaded once per invocation, walking up from the
 // first .bst's directory. Multi-junction graphs (where different
@@ -262,10 +275,10 @@ func main() {
 // need a per-junction scope on top of this single-project shape.
 func loadGraph(bstPaths []string) (*graph, error) {
 	g := &graph{ByName: map[string]*element{}}
-	var projectConfVars map[string]string
+	var info projectInfo
 	if len(bstPaths) > 0 {
 		var err error
-		projectConfVars, err = loadProjectConfFromBst(bstPaths[0])
+		info, err = loadProjectInfoFromBst(bstPaths[0])
 		if err != nil {
 			return nil, fmt.Errorf("load project.conf: %w", err)
 		}
@@ -275,11 +288,28 @@ func loadGraph(bstPaths []string) (*graph, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Re-key the element by project-relative path when a
+		// project.conf is in play. loadElement defaults Name to the
+		// basename; here we widen it to the path-relative form.
+		if info.ElementRoot != "" {
+			absBst, err := filepath.Abs(p)
+			if err != nil {
+				return nil, err
+			}
+			rel, err := filepath.Rel(info.ElementRoot, absBst)
+			if err != nil {
+				return nil, fmt.Errorf("compute element-path-relative name for %s: %w", p, err)
+			}
+			if strings.HasPrefix(rel, "..") {
+				return nil, fmt.Errorf("element %s lives outside the project's element-root %s", p, info.ElementRoot)
+			}
+			elem.Name = strings.TrimSuffix(rel, ".bst")
+		}
 		if existing, ok := g.ByName[elem.Name]; ok {
 			return nil, fmt.Errorf("element %q declared twice (%s and %s)",
 				elem.Name, existing.Name, p)
 		}
-		elem.ProjectConfVars = projectConfVars
+		elem.ProjectConfVars = info.Variables
 		g.ByName[elem.Name] = elem
 		g.Elements = append(g.Elements, elem)
 	}

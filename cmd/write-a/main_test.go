@@ -1008,6 +1008,187 @@ config:
 	}
 }
 
+// TestWriter_PathQualifiedDeps covers the FDSDK-shape: element
+// names key into the graph by their path relative to the project's
+// element-root, so a depends-list reference like
+// "components/foo.bst" resolves regardless of which subdir the
+// dependent element lives in.
+func TestWriter_PathQualifiedDeps(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte("variables:\n  prefix: /usr\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// elements/components/foo.bst depends on elements/subdir/bar.bst
+	// using the path-qualified form.
+	for _, sub := range []string{"components", "subdir"} {
+		if err := os.MkdirAll(filepath.Join(tmp, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srcDir := filepath.Join(tmp, "subdir-src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(bar)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "subdir/bar.bst"),
+		[]byte("kind: cmake\nsources:\n- kind: local\n  path: "+srcDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "components/foo.bst"),
+		[]byte("kind: stack\ndepends:\n- subdir/bar.bst\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{
+		filepath.Join(tmp, "components/foo.bst"),
+		filepath.Join(tmp, "subdir/bar.bst"),
+	})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	// Names key by project-relative path (element-path defaults to "."
+	// since project.conf doesn't set it).
+	want := map[string]bool{"components/foo": true, "subdir/bar": true}
+	for name := range g.ByName {
+		if !want[name] {
+			t.Errorf("unexpected element name %q in graph", name)
+		}
+		delete(want, name)
+	}
+	for name := range want {
+		t.Errorf("missing element name %q in graph", name)
+	}
+	// foo's dep resolves to bar.
+	foo := g.ByName["components/foo"]
+	if foo == nil {
+		t.Fatal("components/foo not in graph")
+	}
+	if len(foo.Deps) != 1 || foo.Deps[0].Name != "subdir/bar" {
+		t.Errorf("path-qualified dep not resolved; got Deps=%v", foo.Deps)
+	}
+}
+
+// TestWriter_PathQualifiedDeps_ElementPathSubdir covers the FDSDK
+// case more precisely: project.conf sets element-path: elements,
+// so .bst files at <project>/elements/foo/bar.bst key as "foo/bar"
+// rather than "elements/foo/bar".
+func TestWriter_PathQualifiedDeps_ElementPathSubdir(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte("variables:\n  prefix: /usr\nelement-path: elements\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"elements/components", "elements/bootstrap"} {
+		if err := os.MkdirAll(filepath.Join(tmp, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(b)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "elements/bootstrap/bar.bst"),
+		[]byte("kind: cmake\nsources:\n- kind: local\n  path: "+srcDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "elements/components/foo.bst"),
+		[]byte("kind: stack\nbuild-depends:\n- bootstrap/bar.bst\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{
+		filepath.Join(tmp, "elements/components/foo.bst"),
+		filepath.Join(tmp, "elements/bootstrap/bar.bst"),
+	})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	// element-path: elements strips the "elements/" prefix, so names
+	// are "components/foo" and "bootstrap/bar" (matching FDSDK's
+	// dep-reference convention).
+	if g.ByName["components/foo"] == nil {
+		t.Fatalf("components/foo not in graph; have: %v", keysOf(g.ByName))
+	}
+	if g.ByName["bootstrap/bar"] == nil {
+		t.Fatalf("bootstrap/bar not in graph; have: %v", keysOf(g.ByName))
+	}
+	foo := g.ByName["components/foo"]
+	if len(foo.Deps) != 1 || foo.Deps[0].Name != "bootstrap/bar" {
+		t.Errorf("path-qualified build-depends not resolved; got Deps=%v", foo.Deps)
+	}
+}
+
+// TestWriter_PathQualifiedDeps_SameBasenameDifferentSubdirs covers
+// the FDSDK case that broke basename keying: two elements with the
+// same basename in different subdirs — like
+// elements/components/bzip2.bst and elements/bootstrap/bzip2.bst —
+// should be distinguishable by their path-qualified name.
+func TestWriter_PathQualifiedDeps_SameBasenameDifferentSubdirs(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte("element-path: elements\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"elements/components", "elements/bootstrap"} {
+		if err := os.MkdirAll(filepath.Join(tmp, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "elements/components/dup.bst"),
+		[]byte("kind: stack\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "elements/bootstrap/dup.bst"),
+		[]byte("kind: stack\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{
+		filepath.Join(tmp, "elements/components/dup.bst"),
+		filepath.Join(tmp, "elements/bootstrap/dup.bst"),
+	})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.ByName["components/dup"] == nil || g.ByName["bootstrap/dup"] == nil {
+		t.Errorf("same-basename elements should both key by path; got %v", keysOf(g.ByName))
+	}
+}
+
+// TestWriter_NoProjectConf_BasenameKeyingFallback covers the
+// pre-project.conf code path: no project.conf found means name keying
+// stays at basename-only (the existing testdata/meta-project/two-libs/
+// fixture relies on this).
+func TestWriter_NoProjectConf_BasenameKeyingFallback(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "lib-a")
+	b := makeCmakeBst(t, tmp, "lib-b")
+	g, err := loadGraph([]string{a, b})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	for _, want := range []string{"lib-a", "lib-b"} {
+		if g.ByName[want] == nil {
+			t.Errorf("expected basename keying %q without project.conf; got %v", want, keysOf(g.ByName))
+		}
+	}
+}
+
+// keysOf returns a sorted slice of the map keys (for stable error
+// messages in the path-qualified-resolution tests above).
+func keysOf(m map[string]*element) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // TestWriter_BuildDependsResolvedIntoDepsGraph covers the
 // build-depends key (separate from `depends`) flowing into
 // element.Deps. Without explicit handling, yaml.v3 silently drops
