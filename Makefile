@@ -244,6 +244,13 @@ e2e-meta-autotools-native: check-tools converter
 e2e-meta-autotools-multitarget: check-tools converter
 	scripts/meta-autotools-multitarget.sh
 
+# Per-target CFLAGS preservation gate. Fixture's
+# `hotloop.o: CFLAGS += -O2` overrides global -O0 -g; the
+# converter cross-references trace + make-db to keep -O2 in
+# copts while stripping the global default flags.
+e2e-meta-autotools-tu-optflags: check-tools converter
+	scripts/meta-autotools-tu-optflags.sh
+
 # Conditional-lowering acceptance gate. Single kind:manual element
 # (testdata/meta-project/conditional-greet/) whose .bst declares
 # (?): per-arch variable overrides. write-a lowers them into a

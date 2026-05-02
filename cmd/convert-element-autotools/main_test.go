@@ -59,11 +59,10 @@ func TestParseExecveLine(t *testing.T) {
 
 // TestClassifyArgv_Compile / Link / Archive cover the four
 // invocation shapes we recognize. Compile and link branch on
-// `-c`; archive branches on `ar`'s mode-flag arg. Note that
-// default-toolchain flags (`-O2`, `-fPIC`, `-DNDEBUG`, etc.)
-// are intentionally stripped, so test cases use a hardening
-// flag (`-fstack-protector-strong`) to assert copts are
-// captured at all.
+// `-c`; archive branches on `ar`'s mode-flag arg. classifyArgv
+// keeps every flag in Copts; the default-toolchain strip
+// happens later in buildRules with make-db awareness so
+// per-target overrides survive.
 func TestClassifyArgv(t *testing.T) {
 	cases := []struct {
 		name string
@@ -90,10 +89,16 @@ func TestClassifyArgv(t *testing.T) {
 			Event{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-fstack-protector-strong"}},
 		},
 		{
-			"default-toolchain flags stripped",
+			// classifyArgv keeps default-toolchain flags;
+			// the strip happens in buildRules with make-db
+			// awareness so per-target overrides survive.
+			// -DNDEBUG still routes to defines and gets the
+			// special "drop, Bazel's opt mode provides it"
+			// treatment in the post-strip pass.
+			"default-toolchain flags retained at classify",
 			[]string{"cc", "-O2", "-fPIC", "-g", "-DNDEBUG", "-c", "-o", "foo.o", "foo.c"},
 			true,
-			Event{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}},
+			Event{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-O2", "-fPIC", "-g"}},
 		},
 		{
 			"-D extracted to defines",
@@ -169,7 +174,7 @@ func TestCorrelate_LibAndApp(t *testing.T) {
 		{Kind: EventArchive, Out: "libfoo.a", Objs: []string{"foo.o", "bar.o"}},
 		{Kind: EventLink, Out: "myapp", Objs: []string{"myapp.o"}, Libs: []string{"foo"}, Copts: []string{"-fstack-protector-strong"}},
 	}
-	got := emitBuild(correlate(events), nil)
+	got := emitBuild(correlate(events), nil, nil)
 
 	for _, marker := range []string{
 		`load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")`,
@@ -205,7 +210,7 @@ func TestCorrelate_GreetStandalone(t *testing.T) {
 	events := []Event{
 		{Kind: EventLink, Out: "greet", Srcs: []string{"greet.c"}, Copts: []string{"-fstack-protector-strong"}},
 	}
-	got := emitBuild(correlate(events), nil)
+	got := emitBuild(correlate(events), nil, nil)
 	for _, marker := range []string{
 		`load("@rules_cc//cc:defs.bzl", "cc_binary")`,
 		`cc_binary(`,
@@ -253,16 +258,64 @@ func TestEmitBuild_ImportsManifestFallback(t *testing.T) {
 	events := []Event{
 		{Kind: EventLink, Out: "myapp", Srcs: []string{"myapp.c"}, Libs: []string{"z"}},
 	}
-	got := emitBuild(correlate(events), imports)
+	got := emitBuild(correlate(events), imports, nil)
 	if !strings.Contains(got, `deps = ["//elements/zlib:zlib"]`) {
 		t.Errorf("expected deps to resolve -lz via manifest:\n%s", got)
 	}
 
 	// Negative check: nil manifest (no fallback) drops the
 	// unresolved -lz silently.
-	got2 := emitBuild(correlate(events), nil)
+	got2 := emitBuild(correlate(events), nil, nil)
 	if strings.Contains(got2, "deps") {
 		t.Errorf("nil manifest should not produce deps; got:\n%s", got2)
+	}
+}
+
+// TestPerTargetIntent_PreservesAlwaysOptimize covers the
+// real-world case the user flagged: a Makefile that
+// per-target-bumps optimization for a hot translation unit
+// (`hotloop.o: CFLAGS += -O2` even when global CFLAGS=-O0).
+// The trace captures `cc -O0 -g -O2 -c hotloop.c -o hotloop.o`;
+// without make-db awareness, all three flags get stripped as
+// "default-toolchain". With make-db awareness, the per-target
+// `-O2` survives because it's in the user's declared intent.
+func TestPerTargetIntent_PreservesAlwaysOptimize(t *testing.T) {
+	events := []Event{
+		// cool.o: gets only global CFLAGS (-O0 -g).
+		{Kind: EventCompile, Out: "cool.o", Srcs: []string{"cool.c"}, Copts: []string{"-O0", "-g"}},
+		// hotloop.o: gets global CFLAGS + per-target += -O2.
+		{Kind: EventCompile, Out: "hotloop.o", Srcs: []string{"hotloop.c"}, Copts: []string{"-O0", "-g", "-O2"}},
+		{Kind: EventArchive, Out: "libcool.a", Objs: []string{"cool.o", "hotloop.o"}},
+	}
+	makeDB := &MakeDB{
+		Variables:  map[string]string{"CFLAGS": "-O0 -g"},
+		Rules:      map[string]MakeRule{},
+		TargetVars: map[string][]TargetVar{"hotloop.o": {{Name: "CFLAGS", Op: "+=", Value: "-O2"}}},
+	}
+	got := emitBuild(correlate(events), nil, makeDB)
+	// hotloop.o's per-target -O2 lands in the cc_library's copts.
+	if !strings.Contains(got, `copts = ["-O2"]`) {
+		t.Errorf("expected -O2 in copts (per-target intent preserved):\n%s", got)
+	}
+	// cool.o's flags are all default-strip and have no
+	// per-target intent → no copts attribute.
+	if strings.Contains(got, `"-O0"`) || strings.Contains(got, `"-g"`) {
+		t.Errorf("global CFLAGS leaked through default-strip:\n%s", got)
+	}
+}
+
+// TestPerTargetIntent_NilDBStripsEverything is the regression
+// guard for the simple case: nil makeDB falls back to
+// unconditional default-toolchain stripping (every -O\d, -g,
+// -fPIC dropped).
+func TestPerTargetIntent_NilDBStripsEverything(t *testing.T) {
+	events := []Event{
+		{Kind: EventCompile, Out: "x.o", Srcs: []string{"x.c"}, Copts: []string{"-O2", "-g", "-fPIC"}},
+		{Kind: EventArchive, Out: "libx.a", Objs: []string{"x.o"}},
+	}
+	got := emitBuild(correlate(events), nil, nil)
+	if strings.Contains(got, "copts =") {
+		t.Errorf("nil makeDB should strip every default flag; got:\n%s", got)
 	}
 }
 

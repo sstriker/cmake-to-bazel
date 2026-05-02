@@ -40,6 +40,24 @@ type MakeDB struct {
 	// all collapse to the same map; conditional assignments
 	// (`?=`) only get recorded if not already present.
 	Variables map[string]string
+	// TargetVars carries Makefile target-specific variable
+	// assignments — `<target>: <NAME> <op> <value>` lines
+	// such as `hotloop.o: CFLAGS += -O2`. The converter uses
+	// these as the user's intent signal to preserve flags
+	// that would otherwise be default-stripped (e.g.,
+	// per-translation-unit -O2 for hot paths even when the
+	// global CFLAGS is -O0).
+	TargetVars map[string][]TargetVar
+}
+
+// TargetVar is one target-specific variable assignment from
+// `make -np`. Op carries the assignment operator (`=`, `+=`,
+// `:=`, etc.) so callers can distinguish replace-global
+// (`=`) from add-to-global (`+=`).
+type TargetVar struct {
+	Name  string
+	Op    string
+	Value string
 }
 
 // MakeRule is one explicit Makefile rule: target, prereqs, recipe.
@@ -74,8 +92,9 @@ type MakeRule struct {
 // separates rules.
 func parseMakeDB(body []byte) *MakeDB {
 	db := &MakeDB{
-		Rules:     map[string]MakeRule{},
-		Variables: map[string]string{},
+		Rules:      map[string]MakeRule{},
+		Variables:  map[string]string{},
+		TargetVars: map[string][]TargetVar{},
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	scanner.Buffer(make([]byte, 64*1024), 1<<20)
@@ -142,9 +161,21 @@ func parseMakeDB(body []byte) *MakeDB {
 				continue
 			}
 			rhs := strings.TrimSpace(line[idx+1:])
-			// Skip target-specific variable assignments like
-			// `target: VAR = value`.
-			if _, _, ok := parseAssignment(rhs); ok {
+			// Target-specific variable assignment
+			// (`target: VAR <op> value`) — record as a
+			// TargetVar against every target on the LHS.
+			// Bypass rule recording so the explicit rule's
+			// prereqs aren't clobbered by a stray TargetVar
+			// entry.
+			if name, op, value, ok := parseAssignmentWithOp(rhs); ok {
+				targets := strings.Fields(lhs)
+				for _, t := range targets {
+					db.TargetVars[t] = append(db.TargetVars[t], TargetVar{
+						Name:  name,
+						Op:    op,
+						Value: value,
+					})
+				}
 				continue
 			}
 			if current != nil {
@@ -176,8 +207,19 @@ func parseMakeDB(body []byte) *MakeDB {
 // reports whether the line is an assignment; name + value are
 // the captured identifier + RHS (whitespace-trimmed).
 func parseAssignment(line string) (name, value string, ok bool) {
-	for _, op := range []string{":::=", "::=", ":=", "?=", "+=", "="} {
-		idx := strings.Index(line, op)
+	name, _, value, ok = parseAssignmentWithOp(line)
+	return
+}
+
+// parseAssignmentWithOp is like parseAssignment but also
+// returns the assignment operator (`=`, `+=`, `:=`, etc.).
+// Callers that distinguish replace-global (`=`) from
+// add-to-global (`+=`) use this — target-specific
+// assignments need the operator to compute the per-target
+// flag delta.
+func parseAssignmentWithOp(line string) (name, op, value string, ok bool) {
+	for _, candidate := range []string{":::=", "::=", ":=", "?=", "+=", "="} {
+		idx := strings.Index(line, candidate)
 		if idx <= 0 {
 			continue
 		}
@@ -188,9 +230,9 @@ func parseAssignment(line string) (name, value string, ok bool) {
 		if !isMakeIdent(lhs) {
 			continue
 		}
-		return lhs, strings.TrimSpace(line[idx+len(op):]), true
+		return lhs, candidate, strings.TrimSpace(line[idx+len(candidate):]), true
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // isMakeIdent reports whether s is a syntactically valid Make
