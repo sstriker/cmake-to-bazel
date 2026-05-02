@@ -1686,6 +1686,85 @@ config:
 	}
 }
 
+// TestWriter_EnvironmentRendersExports covers the env-var
+// rendering: project.conf-level + element-level environment
+// blocks compose (element wins), variable references substitute,
+// runtime sentinels (%{install-root}) map to shell-var form, and
+// the resulting `export K=V` lines appear in the rendered cmd
+// after the standard prelude.
+func TestWriter_EnvironmentRendersExports(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte(`variables:
+  prefix: /usr
+environment:
+  LC_ALL: en_US.UTF-8
+  SOURCE_DATE_EPOCH: '1320937200'
+  PROJECT_OVERRIDE_ME: project-value
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+environment:
+  PROJECT_OVERRIDE_ME: element-value
+  ELEMENT_ONLY: hello
+  RUNTIME_REF: '%{install-root}/runtime'
+
+config:
+  install-commands:
+  - echo done
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(outA, "elements/elem/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(rendered)
+	for _, marker := range []string{
+		// Project-level env survives.
+		`export LC_ALL="en_US.UTF-8"`,
+		`export SOURCE_DATE_EPOCH="1320937200"`,
+		// Element overrides project on conflict.
+		`export PROJECT_OVERRIDE_ME="element-value"`,
+		// Element-only entry survives.
+		`export ELEMENT_ONLY="hello"`,
+		// Runtime sentinel %{install-root} maps to $$INSTALL_ROOT.
+		`export RUNTIME_REF="$$INSTALL_ROOT/runtime"`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("rendered cmd missing env marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// Project-only-value should NOT survive after element override.
+	if strings.Contains(got, `export PROJECT_OVERRIDE_ME="project-value"`) {
+		t.Error("element override should win over project-level env value")
+	}
+}
+
 // TestWriter_PathQualifiedDeps covers the FDSDK-shape: element
 // names key into the graph by their path relative to the project's
 // element-root, so a depends-list reference like
@@ -1947,12 +2026,12 @@ build-depends:
 // "depend on each of these elements with the same shared config:"
 // shape:
 //
-//   build-depends:
-//   - filename:
-//     - bootstrap/bzip2.bst
-//     - bootstrap/zlib-ng.bst
-//     config:
-//       location: "%{sysroot}"
+//	build-depends:
+//	- filename:
+//	  - bootstrap/bzip2.bst
+//	  - bootstrap/zlib-ng.bst
+//	  config:
+//	    location: "%{sysroot}"
 //
 // Each filename in the list expands to a separate dep edge in
 // element.Deps. The shared config: applies to each (recorded but
