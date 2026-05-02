@@ -314,7 +314,15 @@ func loadGraph(bstPaths []string) (*graph, error) {
 		}
 	}
 	for _, p := range bstPaths {
-		elem, err := loadElement(p)
+		// Element-level (@): includes resolve against the project
+		// root when one's known (BuildStream's contract). Without a
+		// project.conf, fall back to the .bst's own directory —
+		// covers self-contained fixtures with no project setup.
+		includeBase := info.ProjectRoot
+		if includeBase == "" {
+			includeBase = filepath.Dir(p)
+		}
+		elem, err := loadElement(p, includeBase)
 		if err != nil {
 			return nil, err
 		}
@@ -438,14 +446,20 @@ func loadReadPaths(path string) ([]string, error) {
 	return out, nil
 }
 
-func loadElement(bstPath string) (*element, error) {
-	body, err := os.ReadFile(bstPath)
+// loadElement parses one .bst into an *element. includeBase is the
+// directory (@): include paths resolve against (the project root,
+// matching BuildStream semantics). When no project.conf was found
+// for this graph, callers pass filepath.Dir(bstPath) as a fallback
+// — covers the existing self-contained fixtures that don't declare
+// a project.
+func loadElement(bstPath, includeBase string) (*element, error) {
+	doc, err := loadAndComposeYAML(bstPath, includeBase, map[string]bool{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse %s: %w", bstPath, err)
 	}
 	var f bstFile
-	if err := yaml.Unmarshal(body, &f); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", bstPath, err)
+	if err := doc.Decode(&f); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", bstPath, err)
 	}
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")
 
