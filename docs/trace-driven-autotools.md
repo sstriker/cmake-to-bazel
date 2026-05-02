@@ -93,24 +93,40 @@ What works today:
   under strace, parses, emits
   `cc_binary(name="greet", srcs=["greet.c"], copts=["-O2"])`.
 
-## Follow-ups
+## Future directions (parked)
 
 In rough priority order:
 
-1. Cross-event correlation: pair compile-only / archive /
-   link events into `cc_library` (for archives) +
-   `cc_binary` (for binaries) targets with proper
-   `srcs` / `deps`.
-2. Cross-element dep resolution: link command's `-l<lib>` /
-   `/opt/prefix/lib/lib<X>.so` references → Bazel labels
-   via the existing `imports` manifest (mirrors cmake's
-   STATIC IMPORTED dep recovery).
-3. **Tracer wrapper at action time**: a small Go binary
-   that wraps the build invocation and emits a deterministic
-   trace artifact. Runs inside Bazel's genrule sandbox.
-4. **Trace registry**: REAPI Action Cache entry under
-   `(srckey, tracer_version)`. write-a's render gates on
-   the AC lookup.
-5. **Native handler**: split write-a's `kind:autotools`
-   handler into a coarse-fallback path + a native-render
-   path; AC hit/miss decides.
+1. **Per-target CFLAGS cross-validation**. Parse Makefile
+   target-specific variable assignments (`foo: CC = clang`)
+   from the make-db. Detect when the trace-recorded copts
+   diverge from what the Makefile declared (e.g.,
+   environmental override broke a per-target flag). Surface
+   diffs as comments in BUILD.bazel.out — audit-grade.
+   Needs a fixture where the Makefile uses target-specific
+   vars; the autotools-multitarget fixture's helper.o uses
+   recipe-level `-Wall` instead, so this gap surfaces only
+   when a real-world fixture exercises it.
+2. **Makefile target-name authority**. When the Makefile
+   target name differs from the trace's `-o` argument
+   basename, prefer the Makefile's. Mainly for shared libs
+   with versioned filenames (`libfoo.so.0.1.0`) where
+   Bazel's natural rule name differs from the on-disk
+   output. No current fixture exercises this — defer until
+   a real-world shared-versioned target surfaces the need.
+3. **Phony-target recipe parsing beyond `install:`**.
+   `check:` recipes describe test invocations (Bazel
+   cc_test); `clean:` is structural noise; custom phony
+   targets (`docs:`, `dist:`) might surface other typed
+   slices. The current parser only walks `install:`.
+
+## Standard autotools project as test bed
+
+The hand-rolled `testdata/meta-project/autotools-multitarget/`
+fixture exercises the full surface today (multiple cc_library
++ cc_binary outputs, multiple install dests, per-target
+CFLAGS). A separate "real-world standard autotools project"
+test bed (libpng-static / GNU hello / a coreutils slice) is a
+nice-to-have for confidence at scale; deferred until the
+spike itself surfaces a gap the multitarget fixture can't
+cover.
