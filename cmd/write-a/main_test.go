@@ -1008,6 +1008,139 @@ config:
 	}
 }
 
+// TestWriter_BuildDependsResolvedIntoDepsGraph covers the
+// build-depends key (separate from `depends`) flowing into
+// element.Deps. Without explicit handling, yaml.v3 silently drops
+// the build-depends list since bstFile didn't have the field;
+// adding bstFile.BuildDepends + the loadGraph merge reaches it.
+func TestWriter_BuildDependsResolvedIntoDepsGraph(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := filepath.Join(tmp, "b.bst")
+	if err := os.WriteFile(b,
+		[]byte("kind: stack\nbuild-depends:\n- a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{a, b})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	bElem := g.ByName["b"]
+	if bElem == nil {
+		t.Fatal("element b not in graph")
+	}
+	if len(bElem.Deps) != 1 || bElem.Deps[0].Name != "a" {
+		t.Errorf("build-depends not resolved into Deps; got Deps=%v", bElem.Deps)
+	}
+}
+
+// TestWriter_RuntimeDependsResolvedIntoDepsGraph covers the
+// runtime-depends key — same shape as build-depends.
+func TestWriter_RuntimeDependsResolvedIntoDepsGraph(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := filepath.Join(tmp, "b.bst")
+	if err := os.WriteFile(b,
+		[]byte("kind: stack\nruntime-depends:\n- a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{a, b})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	bElem := g.ByName["b"]
+	if len(bElem.Deps) != 1 || bElem.Deps[0].Name != "a" {
+		t.Errorf("runtime-depends not resolved into Deps; got Deps=%v", bElem.Deps)
+	}
+}
+
+// TestWriter_MergedDependsDedupesByElement covers the duplicate
+// case: an element listed in both `depends:` and `build-depends:`
+// still produces a single edge in element.Deps (topo sort and
+// downstream rendering don't care about edge multiplicity, but
+// keeping Deps unique avoids surprising the BUILD renderers).
+func TestWriter_MergedDependsDedupesByElement(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := filepath.Join(tmp, "b.bst")
+	body := `kind: stack
+
+depends:
+- a
+
+build-depends:
+- a
+`
+	if err := os.WriteFile(b, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{a, b})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	bElem := g.ByName["b"]
+	if len(bElem.Deps) != 1 {
+		t.Errorf("duplicate dep across depends + build-depends should dedupe; got %d edges", len(bElem.Deps))
+	}
+}
+
+// TestWriter_DepMapFormParsed covers the junction-targeted dep
+// shape: "- filename: foo.bst, junction: jx.bst, config: {...}".
+// For v1 we resolve by Filename; junction + config are parsed but
+// inert.
+func TestWriter_DepMapFormParsed(t *testing.T) {
+	tmp := t.TempDir()
+	a := makeCmakeBst(t, tmp, "a")
+	b := filepath.Join(tmp, "b.bst")
+	body := `kind: stack
+
+build-depends:
+- filename: a.bst
+  junction: somejunction.bst
+  config:
+    location: "%{sysroot}"
+`
+	if err := os.WriteFile(b, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{a, b})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	bElem := g.ByName["b"]
+	if len(bElem.Deps) != 1 || bElem.Deps[0].Name != "a" {
+		t.Errorf("map-form dep not resolved by Filename; got Deps=%v", bElem.Deps)
+	}
+	// The Junction + Config fields are recorded on the bstDep entry
+	// but inert — verify they round-tripped through the unmarshal.
+	if got := bElem.Bst.BuildDepends[0].Junction; got != "somejunction.bst" {
+		t.Errorf("junction not recorded on bstDep; got %q", got)
+	}
+	if bElem.Bst.BuildDepends[0].Config.IsZero() {
+		t.Errorf("dep config not recorded on bstDep")
+	}
+}
+
+// TestWriter_DepMapFormRequiresFilename covers the malformed map
+// shape: a map-form dep without a filename: key surfaces as a parse
+// error (without this, the silent default of empty filename would
+// flow into graph resolution as a confusing "depends on \"\"").
+func TestWriter_DepMapFormRequiresFilename(t *testing.T) {
+	tmp := t.TempDir()
+	bst := filepath.Join(tmp, "bad.bst")
+	body := `kind: stack
+
+build-depends:
+- junction: somejunction.bst
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadGraph([]string{bst}); err == nil {
+		t.Fatal("expected error for map-form dep without filename, got nil")
+	}
+}
+
 // appendDepends adds a depends: list to an existing .bst file.
 func appendDepends(bstPath string, deps []string) error {
 	body, err := os.ReadFile(bstPath)

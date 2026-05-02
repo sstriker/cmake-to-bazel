@@ -56,18 +56,14 @@ should make distinct probes pass distinct phases incrementally.
 Ordered by **smallest unblocker first** — closing each gap unblocks
 strictly more of FDSDK with strictly less new machinery.
 
-### 1. `build-depends` / `runtime-depends` keys (914 / 129 elements)
+### 1. `build-depends` / `runtime-depends` keys (914 / 129 elements) ✓ done
 
-Currently `bstFile.Depends` only reads `depends:`. FDSDK uses all
-three (`depends` for runtime+build deps, `build-depends` for
-build-only deps, `runtime-depends` for runtime-only deps) — 84 % of
-elements declare `build-depends`. Without parsing them write-a treats
-them as missing dep keys and renders an incomplete graph.
-
-Fix shape: extend `bstFile` with `BuildDepends` / `RuntimeDepends`
-fields, merge into `element.Deps` for the v1 graph (no per-edge
-build-vs-runtime semantics yet — that lands when the typed-filegroup
-wrapper distinguishes runtime-only labels).
+`bstFile` now reads all three dep keys (`depends`, `build-depends`,
+`runtime-depends`); `loadGraph` merges them into `element.Deps`,
+dedup-ing by element pointer so a dep listed in two categories
+produces a single edge. The build-vs-runtime distinction lands
+later, when the typed-filegroup wrapper for pipeline-kind outputs
+exposes runtime-only labels separately.
 
 ### 2. Path-qualified element references (6 018 dep references)
 
@@ -135,16 +131,15 @@ list-append, `(<):` list-prepend, `(=):` overwrite, and merging
 rules; for v1 a basic deep-merge of mappings + list concatenation
 covers what we observe in FDSDK.
 
-### 7. Junction-targeted deps (62 elements)
+### 7. Junction-targeted deps (62 elements) ✓ done
 
-A dep can be a map instead of a string: `- {filename:
-bootstrap/glibc.bst, config: location: "%{sysroot}"}`. Unlocks
-junctions (cross-project deps with explicit configuration) but
-currently breaks our `Depends []string` parse.
-
-Fix shape: change `Depends` to `[]bstDep` where `bstDep` is a
-union of `string` and `{filename, junction, config}` — yaml.Node-
-based decode picks per-entry shape.
+`bstDep` accepts both shapes via a custom `UnmarshalYAML`: a
+scalar node treats the whole string as the filename; a mapping
+node decodes `filename` / `junction` / `config`. For v1 only
+`Filename` drives graph resolution; `Junction` and `Config` are
+recorded on the `bstDep` entry but inert. Acting on them lands
+once junction support proper (#10's separate junction
+infrastructure) arrives.
 
 ### 8. kind:git_repo / kind:patch source kinds (519 + 55 elements)
 
@@ -221,19 +216,20 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-In stack order (each PR builds on the last), the first three are
-the highest-leverage smallest changes:
+Items #1 (build/runtime-depends) and #7 (junction-targeted dep map
+shape) are closed. The reality-check probes don't visibly move yet
+— every probe still trips earlier on path-qualified deps, multi-
+source, or kind:git_repo. The next stack-on PRs target those:
 
-1. **PR `build-depends + runtime-depends`** — closes #1, unblocks
-   84 % of elements past the first parse error.
-2. **PR `path-qualified element resolution`** — closes #2 + the
-   `element-path` slice of #10. Unblocks every dep reference.
-3. **PR `multi-source elements + public: tolerance + source.directory`** —
+1. **PR `path-qualified element resolution`** — closes #2 + the
+   `element-path` slice of #10. Unblocks every dep reference; first
+   probe (`bzip2.bst` kind:stack) should reach a different failure.
+2. **PR `multi-source elements + public: tolerance + source.directory`** —
    closes #3, #4, #5. Reaches the variable-resolver phase on most
    elements.
 
-After those three, the survey re-runs from the variable-resolver
-side: the next forcing function will likely be `(@):` composition
-(item 6), which is the first non-mechanical change on the list.
-`(?):` conditional handling (item 9) is the architectural piece;
-it lands once the FDSDK fixture forces it.
+After those, the survey re-runs from the variable-resolver side:
+the next forcing function will likely be `(@):` composition (item
+6), which is the first non-mechanical change on the list. `(?):`
+conditional handling (item 9) is the architectural piece; it lands
+once the FDSDK fixture forces it.
