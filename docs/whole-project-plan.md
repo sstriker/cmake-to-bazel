@@ -330,9 +330,27 @@ parsing, the `kindHandler` per-kind dispatch interface, and
 `kind: stack` — gated by `make e2e-meta-stack` against
 `testdata/meta-project/two-libs/` (2 cmake elements + 1 stack
 bundling them; smoke `cc_binary` linking against both via the
-stack's filegroup). Remaining kinds in this bucket land in
-follow-up PRs once their cross-element semantics need real
-install-tree producers (see Phase 3).
+stack's filegroup).
+
+`kind: compose`, `kind: filter`, and `kind: import` follow on the
+same dispatch shape. `kind: compose` is rendering-equivalent to
+`kind: stack` with conflict detection deferred to Bazel's own
+filegroup-collision reporting. `kind: filter` enforces the
+single-dep invariant and decodes `config: include / exclude /
+include-orphans` into BUILD comments — domain-based slicing
+itself reshapes into per-dep typed-filegroup labels and lands
+alongside the typed-filegroup wrapper for pipeline-kind outputs.
+`kind: import` stages a `kind: local` source tree verbatim into
+project B and exposes it as `filegroup(srcs = glob([...]))`.
+Gated by `make e2e-meta-compose` / `e2e-meta-filter` /
+`e2e-meta-import`.
+
+The remaining kinds in this bucket (`flatpak_image`, `snap_image`,
+`flatpak_repo`, `collect_*`, `check_forbidden`) reshape into the
+same filegroup-composition shape with kind-specific config
+parsing; they land in follow-up PRs once their cross-element
+semantics need real install-tree producers (see Phase 3) and
+typed filegroups.
 
 **Phase 3 — buildsystem-variant kinds.** *(in progress)* meson,
 autotools, make, manual, pyproject, makemaker, modulebuild,

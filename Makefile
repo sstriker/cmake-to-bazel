@@ -1,6 +1,7 @@
 .PHONY: all converter orchestrator diff history bst-translate derive-toolchain test test-e2e e2e-hello-world e2e-fmt \
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
         e2e-meta-hello e2e-meta-stack e2e-meta-manual e2e-meta-make e2e-meta-vars \
+        e2e-meta-compose e2e-meta-filter e2e-meta-import \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -142,6 +143,32 @@ e2e-meta-make: check-tools converter
 # prefix.
 e2e-meta-vars: check-tools converter
 	scripts/meta-vars.sh
+
+# kind:compose acceptance gate. Three elements (2 cmake + 1 compose)
+# in testdata/meta-project/compose-greet/. compose renders the same
+# filegroup-over-deps shape as kind:stack; this gate proves the
+# rendering wiring works end-to-end and that compose's filegroup
+# resolves through bazel against the staged cmake outputs.
+e2e-meta-compose: check-tools converter
+	scripts/meta-compose.sh
+
+# kind:filter acceptance gate. Two elements (1 cmake parent + 1
+# filter) in testdata/meta-project/filter-greet/. filter renders a
+# single-dep filegroup with the .bst's `config: include / exclude /
+# include-orphans` recorded as comments — domain-based slicing
+# itself lands when the typed-filegroup wrapper for pipeline-kind
+# outputs and the parent-public-data parser both arrive.
+e2e-meta-filter: check-tools converter
+	scripts/meta-filter.sh
+
+# kind:import acceptance gate. Single import element with a
+# kind:local source tree (testdata/meta-project/import-greet/);
+# write-a stages the tree into project B verbatim and renders a
+# filegroup over it. Validates the staged content is byte-identical
+# to the fixture source and (when bazel >= 7 is present) the
+# filegroup resolves through bazel.
+e2e-meta-import: check-tools converter
+	scripts/meta-import.sh
 
 # M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
 # in addition to the standard cmake/ninja/bwrap; if absent the test
