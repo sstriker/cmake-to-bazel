@@ -159,16 +159,14 @@ func mergeWithDefault(user *[]string, def []string) []string {
 	return *user
 }
 
-// stagePipelineSources copies the .bst's kind:local source tree into
-// the project-A package so the genrule's `srcs = glob(["sources/**"])`
-// picks them up. No narrowing: pipeline kinds' commands can read any
-// path arbitrarily, so feedback-driven zero stubs don't apply.
+// stagePipelineSources copies the .bst's kind:local source trees
+// into the project-A package so the genrule's
+// `srcs = glob(["sources/**"])` picks them up. No narrowing:
+// pipeline kinds' commands can read any path arbitrarily, so
+// feedback-driven zero stubs don't apply. Multi-source elements
+// honor each source's Directory subpath under sources/.
 func stagePipelineSources(elem *element, elemPkg string) error {
-	srcStage := filepath.Join(elemPkg, "sources")
-	if err := copyTree(elem.AbsSourceDir, srcStage); err != nil {
-		return fmt.Errorf("stage pipeline sources for %q: %w", elem.Name, err)
-	}
-	return nil
+	return stageAllSources(elem, filepath.Join(elemPkg, "sources"))
 }
 
 // renderPipelineBuild renders the per-element BUILD for a coarse-

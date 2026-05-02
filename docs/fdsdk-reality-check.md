@@ -20,21 +20,24 @@ The gaps fall into three buckets:
 ### Empirical first-failures (from `make fdsdk-reality-check`)
 
 The probe runs each element in isolation (no FDSDK project.conf
-alongside) so the per-element gap surfaces directly:
+alongside) so the per-element gap surfaces directly. As gaps
+close, the probes progress to later failure points:
 
 | Element | Kind | First failure | Punch list |
 |---|---|---|---|
-| `components/bzip2.bst` | stack | path-qualified dep `public-stacks/runtime-minimal` not in graph | #2 |
-| `components/boot-keys-prod.bst` | import | multi-source element (10 sources) | #3 |
+| `components/bzip2.bst` | stack | path-qualified dep `public-stacks/runtime-minimal` not in graph (single-element isolation; the dep elements simply aren't loaded) | resolution works; needs full graph load |
+| `components/boot-keys-prod.bst` | import | source-stage failure: kind:local source path missing in probe sandbox | parses; needs FDSDK source files |
 | `components/expat.bst` | cmake | unsupported source kind `git_repo` | #8 |
 | `components/aom.bst` | cmake | yaml unmarshal: `(?):` block (line 15) | #9 |
-| `bootstrap/bzip2.bst` | manual | multi-source (2: git_repo + patch) | #3 + #8 |
-| `components/tar.bst` | autotools | "0 sources" (sources live in element-level `(@):` include) | #6 + #3 |
+| `bootstrap/bzip2.bst` | manual | unsupported source kind `git_repo` | #8 |
+| `components/tar.bst` | autotools | "requires at least one source; .bst declares none" (sources live in element-level `(@):` include) | #6 |
 | (project.conf in-place) | — | yaml unmarshal: `(@):` in `variables:` | #6 |
+| (synthetic multi-element probe) | mixed | — | **OK** |
 
-Six different elements, six different first failures. The variance
-confirms the gaps are independent — closing them in punch-list order
-should make distinct probes pass distinct phases incrementally.
+The synthetic probe exercises every closed punch-list item end-to-end:
+path-qualified deps, build-depends + runtime-depends, multi-source
+elements with `directory:` flag, and `public:` block tolerance. It
+passes today.
 
 1. **Loader gaps** — write-a's `.bst` / `project.conf` parsing surface
    doesn't match what real `.bst` files declare. These are mechanical
@@ -81,38 +84,39 @@ When no project.conf is found, write-a falls back to basename
 keying (the pre-project.conf shape that
 `testdata/meta-project/two-libs/` and similar fixtures rely on).
 
-### 3. Multi-source elements (129 elements)
+### 3. Multi-source elements (129 elements) ✓ done
 
-`boot-keys-prod.bst` declares 10 sources. write-a errors:
-`requires exactly one source per element`.
+`loadElement` no longer hard-errors on `len(sources) != 1`; it
+iterates every source and resolves each kind:local entry into
+`element.Sources []resolvedSource`. A new `stageAllSources` helper
+in `main.go` drives the per-handler staging:
 
-Fix shape: drop the hard-error in `loadElement`; iterate every
-source. For kind:cmake / kind:autotools / kind:make / kind:manual /
-kind:import, extend `stagePipelineSources` (and the cmake handler's
-own staging) to copy each source tree into the element's package.
+- `kind:import` (`handler_import.go`): every source mounts into
+  `elemPkg/<directory>/`.
+- pipeline kinds (`handler_pipeline.go`): every source mounts into
+  `elemPkg/sources/<directory>/`; the genrule's
+  `glob(["sources/**"])` picks them all up uniformly.
+- `kind:cmake` (`handler_cmake.go`): single-source-no-directory
+  elements still get the existing read-set-narrowing path;
+  multi-source or any-source-with-directory elements fall through
+  to "stage everything as real, no zero stubs". Multi-source
+  narrowing arrives when an FDSDK fixture forces it.
 
-### 4. Source `directory:` flag (64 elements)
+### 4. Source `directory:` flag (64 elements) ✓ done
 
-Per-source staging subpath: a source declares `directory: extra-kek`
-to land its content under `extra-kek/` inside the element's source
-tree. We don't currently parse this — every source effectively
-stages at the package root.
+`bstSource` gains `Directory string` (yaml:directory). The new
+`stageAllSources` helper resolves each source onto
+`<elem-pkg>/<directory>/` (or onto the package root when
+`directory` is empty). Last-writer-wins on collisions — matches
+BuildStream's source-merge behavior.
 
-Fix shape: extend `bstSource` with `Directory string` (yaml:directory),
-honor it in source staging.
+### 5. `public:` block tolerance (355 elements) ✓ done
 
-### 5. `public:` block tolerance (355 elements)
-
-Real elements declare a `public: bst: split-rules: ...` block
-defining domain → file-glob mappings (e.g. `runtime`, `devel`,
-`debug`). We don't parse `public:` so it's currently a silent
-ignore. That works at parse time (yaml.v3 ignores unknown fields)
-but means kind:filter has no way to consume domain definitions.
-
-Fix shape: extend `bstFile` with `Public yaml.Node` (same pattern
-as `Config`); each handler that needs split-rules decodes it.
-kind:filter's domain enforcement lands when both this and the
-typed-filegroup wrapper for pipeline-kind outputs are in place.
+`bstFile` gains `Public yaml.Node` (same pattern as `Config`).
+Decoded but inert today — the `public:` block round-trips onto
+the bstFile so handlers can read it later. kind:filter's domain
+enforcement (which consumes `public.bst.split-rules`) lands
+alongside the typed-filegroup wrapper for pipeline-kind outputs.
 
 ### 6. `(@):` composition directive (project.conf + 202 elements)
 
@@ -219,24 +223,27 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-Items #1 (build/runtime-depends), #7 (junction-targeted dep map
-shape), and #2 (path-qualified element resolution + element-path
-slice of #10) are closed. The script's curated isolated-element
-probes still trip on the gaps further down the list (each one is a
-diagnostic for first-failure, and a single-file isolated probe
-can't expose multi-element dep resolution); the new "synthetic
-multi-element probe" in the script directly exercises path-qualified
-resolution and now passes.
+Items #1, #2, #3, #4, #5, and #7 are closed. The synthetic
+multi-element probe exercises every closed item end-to-end and
+passes today. The curated isolated-element probes have moved
+forward — `boot-keys-prod.bst`, `bootstrap/bzip2.bst`, and
+`tar.bst` no longer trip on multi-source; their first-failures now
+point at the next gaps (`kind:git_repo` source dispatch, `(@):`
+composition).
 
-The next stack-on PR targets:
+The next forcing function is **`(@):` composition** (#6): the
+project.conf probe and the `tar.bst` probe both gate on it, and
+no curated FDSDK element runs in-place against the real
+project.conf without it. That's the first non-mechanical change
+on the list — it requires a YAML pre-processor at write-a's
+loader that resolves include directives + does shape merging
+before unmarshal. After that:
 
-1. **PR `multi-source elements + public: tolerance + source.directory`** —
-   closes #3, #4, #5. After this, the curated probes against
-   `boot-keys-prod.bst`, `bootstrap/bzip2.bst`, and `tar.bst` (the
-   ones tripping on multi-source) should reach the variable-
-   resolver phase.
-
-After that, the next forcing function is `(@):` composition (#6),
-which is the first non-mechanical change on the list. `(?):`
-conditional handling (#9) is the architectural piece; it lands
-once the FDSDK fixture forces it.
+- **`kind: git_repo` / `kind: patch` source dispatch** (#8) —
+  unblocks `expat.bst`, `bootstrap/bzip2.bst`, and 519 / 55 other
+  elements. Source-kind dispatch mirrors the existing element-kind
+  dispatch.
+- **`(?):` conditional → project-B `select()`** (#9) — the
+  architectural piece. Lowers per-arch variable overrides into
+  Bazel-native multi-arch resolution rather than baking write-a's
+  host arch into the rendered cmd.

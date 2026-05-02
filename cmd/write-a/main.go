@@ -89,6 +89,13 @@ type bstFile struct {
 	// pipeline-kind handler runs phase commands through
 	// substituteCmd against the resolved map.
 	Variables map[string]string `yaml:"variables"`
+	// Public is the BuildStream public-data block: per-element
+	// downstream metadata (split-rules, environment overrides, ...).
+	// 33 % of FDSDK elements declare it. For v1 we decode it as a
+	// yaml.Node so the file parses but don't act on its contents —
+	// kind:filter's domain enforcement (which consumes
+	// public.bst.split-rules) is a follow-up.
+	Public yaml.Node `yaml:"public"`
 }
 
 // bstDep is one entry inside a depends / build-depends / runtime-
@@ -140,15 +147,38 @@ func (d *bstDep) UnmarshalYAML(node *yaml.Node) error {
 type bstSource struct {
 	Kind string `yaml:"kind"`
 	Path string `yaml:"path"`
+	// Directory is the optional staging subpath inside the element's
+	// source tree (BuildStream defaults to ""). When set, this
+	// source's content lands under <element-pkg>/<directory>/ rather
+	// than at the package root. 64 of FDSDK's elements use it (most
+	// commonly to keep separately-fetched component sources from
+	// colliding with the primary source tree).
+	Directory string `yaml:"directory"`
+}
+
+// resolvedSource is one entry in element.Sources: a kind:local
+// source path (resolved to an absolute on-disk location) plus the
+// staging-subpath the handler should mount it under.
+type resolvedSource struct {
+	AbsPath   string
+	Directory string
 }
 
 type element struct {
 	Name string // derived from .bst filename (basename without .bst suffix)
 	Bst  *bstFile
-	// AbsSourceDir is the absolute path on the host to the resolved
-	// element source tree (for kind:local, this is bstDir/<source.path>).
-	// Empty for kinds that don't resolve a source tree (kind:stack).
-	AbsSourceDir string
+	// Sources is the resolved source list for this element — one
+	// entry per kind:local source declared in the .bst, with each
+	// AbsPath pre-resolved against the .bst's directory. Empty for
+	// kinds that don't resolve their own source tree (kind:stack /
+	// kind:compose / kind:filter).
+	//
+	// Single-source elements (most v1 fixtures) have len(Sources) ==
+	// 1 with Directory == "". Handlers that pre-date multi-source
+	// expect that shape; the staging loops in handler_cmake /
+	// handler_pipeline / handler_import iterate Sources so multi-
+	// source elements stage all their trees correctly.
+	Sources []resolvedSource
 	// Deps are the resolved depends-on edges of this element. Populated
 	// during loadGraph; parents reference children.
 	Deps []*element
@@ -426,25 +456,30 @@ func loadElement(bstPath string) (*element, error) {
 	// filter / compose don't have their own sources. Phase 2's
 	// supported kinds use kind:local where present.
 	if h, ok := handlers[f.Kind]; ok && h.NeedsSources() {
+		if len(f.Sources) == 0 {
+			return nil, fmt.Errorf("%s: kind %q requires at least one source; .bst declares none", bstPath, f.Kind)
+		}
 		bstDir := filepath.Dir(bstPath)
-		if len(f.Sources) != 1 {
-			return nil, fmt.Errorf("%s: write-a (Phase 2) requires exactly one source per element of kind %q; got %d", bstPath, f.Kind, len(f.Sources))
+		for i, src := range f.Sources {
+			if src.Kind != "local" {
+				return nil, fmt.Errorf("%s: source[%d]: write-a supports only kind:local sources; got %q (kind:git_repo / kind:patch / etc. arrive with source-kind dispatch)", bstPath, i, src.Kind)
+			}
+			// kind:local path is interpreted relative to the .bst
+			// dir if it isn't already absolute (matches BuildStream
+			// semantics).
+			resolved := src.Path
+			if !filepath.IsAbs(resolved) {
+				resolved = filepath.Join(bstDir, resolved)
+			}
+			abs, err := filepath.Abs(resolved)
+			if err != nil {
+				return nil, err
+			}
+			elem.Sources = append(elem.Sources, resolvedSource{
+				AbsPath:   abs,
+				Directory: src.Directory,
+			})
 		}
-		src := f.Sources[0]
-		if src.Kind != "local" {
-			return nil, fmt.Errorf("%s: write-a (Phase 2) supports only kind:local sources; got %q", bstPath, src.Kind)
-		}
-		// kind:local path is interpreted relative to the .bst dir if it
-		// isn't already absolute (matches BuildStream semantics).
-		resolved := src.Path
-		if !filepath.IsAbs(resolved) {
-			resolved = filepath.Join(bstDir, resolved)
-		}
-		abs, err := filepath.Abs(resolved)
-		if err != nil {
-			return nil, err
-		}
-		elem.AbsSourceDir = abs
 	}
 	return elem, nil
 }
@@ -646,4 +681,32 @@ func copyTree(src, dst string) error {
 		}
 		return copyFile(path, target)
 	})
+}
+
+// stageAllSources copies every source in elem.Sources into dstRoot,
+// honoring each entry's Directory subpath. Used by handlers whose
+// staging is "all sources, flat or under their declared subdir":
+// kind:cmake's project-B copy, kind:import's filegroup root, the
+// pipeline-handler's project-A source mount.
+//
+// Single-source elements (Directory=="") get a flat copyTree, same
+// as the pre-multi-source code path. Multi-source elements stage
+// each entry rooted at dstRoot/<Directory>; collisions between
+// sources are caller's responsibility (BuildStream's behavior is to
+// merge, with later sources winning — copyTree's last-writer-wins
+// matches that).
+func stageAllSources(elem *element, dstRoot string) error {
+	for i, src := range elem.Sources {
+		dst := dstRoot
+		if src.Directory != "" {
+			dst = filepath.Join(dstRoot, src.Directory)
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				return fmt.Errorf("element %q source[%d]: prepare directory %q: %w", elem.Name, i, src.Directory, err)
+			}
+		}
+		if err := copyTree(src.AbsPath, dst); err != nil {
+			return fmt.Errorf("element %q source[%d]: stage %s → %s: %w", elem.Name, i, src.AbsPath, dst, err)
+		}
+	}
+	return nil
 }

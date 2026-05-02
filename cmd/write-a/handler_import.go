@@ -43,8 +43,8 @@ func (importHandler) RenderA(elem *element, elemPkg string) error {
 }
 
 func (importHandler) RenderB(elem *element, elemPkg string) error {
-	if err := copyTree(elem.AbsSourceDir, elemPkg); err != nil {
-		return fmt.Errorf("element %q (kind:import): stage source tree for project B: %w", elem.Name, err)
+	if err := stageAllSources(elem, elemPkg); err != nil {
+		return err
 	}
 	// glob(["**/*"]) catches every staged file. The exclude on
 	// BUILD.bazel keeps the filegroup self-referential-clean — the

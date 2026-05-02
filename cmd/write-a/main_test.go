@@ -1008,6 +1008,198 @@ config:
 	}
 }
 
+// TestWriter_MultiSourceImport covers kind:import with a 2-source
+// element. write-a stages each source's tree into project B's
+// element package; with no Directory set, the trees merge at the
+// element-package root.
+func TestWriter_MultiSourceImport(t *testing.T) {
+	tmp := t.TempDir()
+	srcA := filepath.Join(tmp, "src-a")
+	srcB := filepath.Join(tmp, "src-b")
+	for _, dir := range []string{srcA, srcB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(srcA, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcB, "b.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "imp.bst")
+	body := "kind: import\nsources:\n- kind: local\n  path: " + srcA + "\n- kind: local\n  path: " + srcB + "\n"
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if got := len(g.Elements[0].Sources); got != 2 {
+		t.Fatalf("Sources len = %d, want 2", got)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outB := filepath.Join(tmp, "B")
+	if err := os.MkdirAll(outB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProjectA(g, filepath.Join(tmp, "A"), binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	for _, rel := range []string{"a.txt", "b.txt"} {
+		if _, err := os.Stat(filepath.Join(outB, "elements/imp", rel)); err != nil {
+			t.Errorf("multi-source: %s not staged in project B: %v", rel, err)
+		}
+	}
+}
+
+// TestWriter_SourceDirectoryMountsUnderSubpath covers the source-
+// level `directory:` flag: a kind:local source with directory:
+// extras stages its content under elemPkg/extras/ rather than at
+// the package root.
+func TestWriter_SourceDirectoryMountsUnderSubpath(t *testing.T) {
+	tmp := t.TempDir()
+	srcRoot := filepath.Join(tmp, "src-root")
+	srcExtras := filepath.Join(tmp, "src-extras")
+	for _, dir := range []string{srcRoot, srcExtras} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcExtras, "extra.txt"), []byte("extra\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "imp.bst")
+	body := "kind: import\nsources:\n- kind: local\n  path: " + srcRoot + "\n- kind: local\n  path: " + srcExtras + "\n  directory: extras\n"
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if got := g.Elements[0].Sources[1].Directory; got != "extras" {
+		t.Errorf("Sources[1].Directory: got %q, want %q", got, "extras")
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outB := filepath.Join(tmp, "B")
+	if err := os.MkdirAll(outB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProjectA(g, filepath.Join(tmp, "A"), binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outB, "elements/imp/main.txt")); err != nil {
+		t.Errorf("primary source not at element root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outB, "elements/imp/extras/extra.txt")); err != nil {
+		t.Errorf("source with directory:extras not staged under extras/: %v", err)
+	}
+}
+
+// TestWriter_MultiSourcePipeline covers kind:manual with two
+// kind:local sources — one mounted at the source root, one under a
+// `directory:` subpath. The genrule's source-stage block sees both
+// in elemPkg/sources/, with the second under sources/extras/.
+func TestWriter_MultiSourcePipeline(t *testing.T) {
+	tmp := t.TempDir()
+	primary := filepath.Join(tmp, "primary")
+	patches := filepath.Join(tmp, "patches")
+	for _, dir := range []string{primary, patches} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(primary, "main.c"), []byte("// main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(patches, "0001.patch"), []byte("--- patch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: manual
+
+sources:
+- kind: local
+  path: ` + primary + `
+- kind: local
+  path: ` + patches + `
+  directory: patches
+
+config:
+  install-commands:
+  - echo done
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "elements/elem/sources/main.c")); err != nil {
+		t.Errorf("primary source not staged at sources/main.c: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "elements/elem/sources/patches/0001.patch")); err != nil {
+		t.Errorf("directory:patches source not staged at sources/patches/0001.patch: %v", err)
+	}
+}
+
+// TestWriter_PublicBlockTolerated covers the public: data block
+// real FDSDK elements declare. write-a doesn't act on it yet but
+// must accept it without parse errors.
+func TestWriter_PublicBlockTolerated(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "imp.bst")
+	body := `kind: import
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+public:
+  bst:
+    split-rules:
+      runtime:
+        - "/usr/lib/lib*.so*"
+      devel:
+        - "/usr/lib/lib*.so"
+        - "/usr/include/**"
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v (public: block should be tolerated)", err)
+	}
+	if g.Elements[0].Bst.Public.IsZero() {
+		t.Errorf("public: block should round-trip onto bstFile.Public; got zero node")
+	}
+}
+
 // TestWriter_PathQualifiedDeps covers the FDSDK-shape: element
 // names key into the graph by their path relative to the project's
 // element-root, so a depends-list reference like
