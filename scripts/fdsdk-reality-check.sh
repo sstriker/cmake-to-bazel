@@ -52,11 +52,13 @@ trap "rm -rf '$work_dir'" EXIT
 # whichever loader / handler gap matches.
 probes="
 elements/components/bzip2.bst         | kind:stack — path-qualified deps + project.conf includes
-elements/components/boot-keys-prod.bst | kind:import — multi-source element
 elements/components/expat.bst         | kind:cmake — public: block + kind:git_repo source
 elements/components/aom.bst           | kind:cmake — (?) arch conditional
 elements/bootstrap/bzip2.bst          | kind:manual — element-level (@) include + build-depends + junction-targeted dep
 elements/components/tar.bst           | kind:autotools — (@) include + build-depends + path-qualified deps
+elements/public-stacks/runtime-minimal.bst | kind:stack — top-level runtime target; deepest stack + filter resolution
+elements/components/glib.bst          | kind:meson — meson with extensive deps + (?) branches
+elements/flatpak-images/vainfo.bst    | kind:flatpak_image — image-building (currently unsupported handler)
 "
 
 ok=0

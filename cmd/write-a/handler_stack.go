@@ -33,9 +33,10 @@ func init() { registerHandler(stackHandler{}) }
 // "primary target name" lookup) instead of assuming.
 type stackHandler struct{}
 
-func (stackHandler) Kind() string           { return "stack" }
-func (stackHandler) NeedsSources() bool     { return false }
-func (stackHandler) HasProjectABuild() bool { return false }
+func (stackHandler) Kind() string                                 { return "stack" }
+func (stackHandler) NeedsSources() bool                           { return false }
+func (stackHandler) HasProjectABuild() bool                       { return false }
+func (stackHandler) DefaultReadPathsPatterns() *readPathsPatterns { return nil }
 
 func (stackHandler) RenderA(elem *element, elemPkg string) error {
 	// Stack elements have no project-A action. Drop a stub BUILD so

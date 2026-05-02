@@ -201,7 +201,7 @@ rather than a write-a gap.
 
 Full pipeline-handler lowering done across PRs #45 / #49 / #51 / #52 / #53 / #54. target_arch lowers to `select()` over `@platforms//cpu:*`; project.conf-declared options lower to `config_setting` per `(option, value)`; cross-product (target_arch × option) emits per-tuple `config_setting`s combining `constraint_values` + `flag_values`. Static-fold survives for host facts (host_arch / build_arch).
 
-Diagnosed-via-probe but unfixed: when multiple deeply-nested `(@):` includes each declare their own `variables: (?):` block, the YAML composer's parent-wins merge drops all but one. FDSDK's bootstrap/base-sdk/perl.bst hits this — its flags.yml-derived `bootstrap_build_arch` branches get overridden by a higher-layer (?):). Fix is in the composer's `mergeMappings`: detect both-mapping-have-`(?):` and concatenate the branch lists rather than parent-wins. Separate follow-up.
+Diagnosed-via-probe and **fixed**: when multiple deeply-nested `(@):` includes each declared their own `variables: (?):` block, the YAML composer's parent-wins merge dropped all but one — FDSDK's bootstrap/base-sdk/perl.bst hit this with its flags.yml-derived `bootstrap_build_arch` branches getting overridden by a higher-layer `(?):`. Composer's `mergeMappings` now detects both-mapping-have-`(?)` (key without trailing colon — that's the YAML separator) sequence values and concatenates with src (included) first, dst (parent) last so per-branch last-match-wins preserves "your local (?): overrides the included one" while letting included branches contribute when the parent's don't apply.
 
 ### 9-original. `(?):` conditional directive (81 elements) — historical
 
@@ -339,14 +339,28 @@ Other follow-ups (none on the critical path for `write-a render`):
   fetcher reshapes into a `module_extension` per the design in
   `docs/sources-design.md`; aliases + environment now parsed so
   the data is ready when the extension lands.
-- **`(?):` outside variables:** — write-a's extractor only
-  handles conditional blocks at the `variables:` level (the
-  dominant FDSDK pattern). Per-arch `config:` blocks would need
-  an analogous extractor on `bstFile.Config`. Lands when an
-  FDSDK fixture forces it.
-- **richer `(?):` expression syntax** — `host_arch` /
-  `build_arch` references, `and`-combinators, parentheses.
-  Branches with unrecognized expressions are silently skipped
-  today. Surfaces empirically as the
-  `bootstrap_build_arch`-referenced-but-not-defined finding
-  above.
+- **`(?):` outside variables:** — `variables:` and `config:`
+  are now both handled. `extractConditionalsFromConfig` pulls
+  per-arch configure-/build-/install-/strip-commands overrides
+  out of the YAML tree onto `bstFile.ConfigConditionals`; the
+  pipeline handler's `resolveAt` merges matching branches'
+  partial pipelineCfg into the per-tuple resolved cfg, so per-
+  arch command overrides flow through the same dispatch path
+  variable overrides do. `environment:` and `public:` (?):
+  blocks still fall through `stripRemainingConditionals` —
+  the loader doesn't error, but the per-branch overrides at
+  those depths aren't honored. Lands when a fixture forces it.
+- **richer `(?):` expression syntax** — done. `host_arch` /
+  `build_arch` / `bootstrap_build_arch` references work (the
+  parser is variable-agnostic for `==` / `in` / `or`-chains;
+  `!=` is target_arch-only because the closed-set complement is
+  well-defined there). Outer parens (single layer) supported.
+  `and`-combinators supported in both shapes:
+  - same-LHS (`var != "X" and var != "Y"`) interprets as set
+    intersection of the per-conjunct complements.
+  - mixed-LHS (`target_arch == "x86_64" and bootstrap_build_arch == "aarch64"`)
+    populates `conditionalBranch.Constraints` — a slice of
+    `(Varname, Values)` pairs; `branchMatchesTuple` requires
+    every constraint to match for the branch to fire, and
+    `dispatchSpaceForElement` collects every constraint's
+    Varname as a dispatch dimension.

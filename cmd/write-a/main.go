@@ -19,23 +19,25 @@
 // driver script's stage step is a no-op for them.
 //
 // Shadow-tree narrowing (kind:cmake):
-//   - With --read-paths-feedback unset: every source file is staged
-//     real. First-run / no-feedback shape.
-//   - With --read-paths-feedback pointing at a prior run's
-//     read_paths.json: only files in the read set (plus all
-//     CMakeLists.txt files in the source tree, which the trace
-//     never captures because cmake's parser opens them before any
-//     trace event fires) get staged. Everything else becomes a
-//     zero_files entry — present at the same path inside the
-//     genrule's exec root, but with empty content. cmake's
-//     directory walks see the entries; reads against zero stubs
-//     would be hits on empty files. The action input merkle is
-//     content-stable across edits to non-read source files.
+//   - Default (no <element>.read-paths.txt sibling): every source
+//     file is staged real. Conservative; matches pre-narrowing
+//     behaviour.
+//   - With <element>.read-paths.txt: include / exclude glob
+//     patterns partition the source tree. Matched files stage
+//     real; the rest stage as zero stubs (empty content via the
+//     zero_files starlark rule). cmake's directory walks see the
+//     entries; reads against zero stubs hit empty files. The
+//     action input merkle is content-stable across edits to
+//     non-included source files.
+//
+// CMakeLists.txt files always stay real regardless of the
+// patterns — cmake parses the entry CMakeLists before any trace
+// event could fire, so auto-including them keeps cmake configure
+// correct.
 package main
 
 import (
 	_ "embed"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -102,6 +104,13 @@ type bstFile struct {
 	// over @platforms//cpu:* rather than baking write-a's host arch
 	// into the rendered cmd. See conditional.go.
 	Conditionals []conditionalBranch `yaml:"-"`
+	// ConfigConditionals are the per-arch (?): branches extracted
+	// from `config:` (the FDSDK bootstrap pattern: per-arch
+	// configure-commands overrides on the same .bst). Empty when
+	// no config: (?): block is present. The pipeline handler
+	// merges matching branches' partial pipelineCfg overrides
+	// into the per-tuple resolved cfg in resolveAt.
+	ConfigConditionals []conditionalBranch `yaml:"-"`
 	// Public is the BuildStream public-data block: per-element
 	// downstream metadata (split-rules, environment overrides, ...).
 	// 33 % of FDSDK elements declare it. For v1 we decode it as a
@@ -259,12 +268,20 @@ type element struct {
 	// Deps are the resolved depends-on edges of this element. Populated
 	// during loadGraph; parents reference children.
 	Deps []*element
-	// ReadSet is the source-relative paths a prior run's
-	// read_paths.json reported. Populated when
-	// --read-paths-feedback is set; empty (and HasFeedback false)
-	// otherwise. Only consumed by kind:cmake's handler.
-	ReadSet     []string
-	HasFeedback bool
+	// BuildDeps is the subset of Deps drawn from build-depends (vs
+	// runtime-depends). kind:filter's invariant is "exactly one
+	// parent to filter from"; that parent is the single build-dep,
+	// independent of how many runtime-deps the filter declares for
+	// downstream consumers. Pipeline kinds (autotools/cmake/make/…)
+	// may grow build-vs-runtime separation here when their typed-
+	// filegroup wrappers ship.
+	BuildDeps []*element
+	// Patterns is the parsed <element>.read-paths.txt content
+	// (committed alongside the .bst). Nil when the file is
+	// absent — that's the default "entire tree real" case. Only
+	// consumed by kind:cmake's handler today; pipeline-shape
+	// handlers stage everything regardless.
+	Patterns *readPathsPatterns
 
 	// RealPaths / ZeroPaths are derived during the cmake handler's
 	// per-element rendering: real files staged on disk, zero paths
@@ -309,6 +326,15 @@ type graph struct {
 	Options map[string]bstOption
 }
 
+// useFuseSourcesGlobal is the package-wide toggle for the
+// PR #60 fuse-sources path. Set from main()'s --use-fuse-sources
+// flag; consulted by handler_cmake.RenderA. Lives at package
+// scope because the handler interface (RenderA(elem, elemPkg))
+// has no plumbing for per-render config; threading it through
+// would touch every handler. Acceptable singleton for a flag
+// that's structurally process-wide anyway.
+var useFuseSourcesGlobal bool
+
 // stringList is a flag.Value for repeated flags (--bst foo.bst --bst bar.bst).
 type stringList []string
 
@@ -322,8 +348,11 @@ func main() {
 	outA := flag.String("out", "", "output directory for project A (the meta workspace whose genrules run convert-element)")
 	outB := flag.String("out-b", "", "optional: output directory for project B (the consumer workspace built against project A's outputs). When unset, only project A is rendered.")
 	convertBin := flag.String("convert-element", "", "path to the convert-element binary (will be referenced from project-A's tools/)")
-	readPathsFeedback := flag.String("read-paths-feedback", "", "optional: path to a prior run's read_paths.json. When set, narrows kind:cmake elements' source-tree staging to that set + CMakeLists.txt files; everything else becomes a zero_files stub. Currently single-element only — multi-element feedback gets a per-element flag in a follow-up.")
 	sourceCache := flag.String("source-cache", "", "optional: directory of pre-fetched source trees, indexed by source-key. Non-kind:local sources whose key (SHA of kind+url+ref) hits a directory under this cache stage as if they were kind:local at that path. Callers populate the cache via the orchestrator's source-checkout layer or by hand for tests; write-a itself doesn't fetch.")
+	useFuseSources := flag.Bool("use-fuse-sources", false, "experimental: render kind:cmake elements to consume sources via @src_<key>//:tree (the FUSE-mounted CAS path) rather than staging files into elements/<name>/sources/. Requires cas-fuse running and CAS_FUSE_MOUNT passed to bazel via --repo_env.")
+	hostArch := flag.String("host-arch", "", "override the static host_arch dispatch variable (default: auto-detected from the build host).")
+	buildArch := flag.String("build-arch", "", "override the static build_arch dispatch variable (default: auto-detected from the build host).")
+	bootstrapBuildArch := flag.String("bootstrap-build-arch", "", "override the static bootstrap_build_arch dispatch variable (default: auto-detected from the build host).")
 	flag.Parse()
 
 	if len(bstPaths) == 0 || *outA == "" || *convertBin == "" {
@@ -350,21 +379,22 @@ func main() {
 		log.Fatalf("convert-element binary at %s: %v", convertAbs, err)
 	}
 
-	if *readPathsFeedback != "" {
-		feedback, err := loadReadPaths(*readPathsFeedback)
-		if err != nil {
-			log.Fatalf("load --read-paths-feedback: %v", err)
-		}
-		// Phase 2 still applies feedback to all kind:cmake elements
-		// uniformly. Multi-element feedback (one read_paths.json per
-		// element) lands when the FDSDK fixture forces the issue; for
-		// now, single-element fixtures are the only consumers.
-		for _, elem := range g.Elements {
-			if elem.Bst.Kind == "cmake" {
-				elem.ReadSet = feedback
-				elem.HasFeedback = true
-			}
-		}
+	useFuseSourcesGlobal = *useFuseSources
+
+	// Apply CLI overrides for the static dispatch vars.
+	// Auto-detected defaults from runtime.GOARCH cover the
+	// common case (a dev host that matches the build host);
+	// these flags are for cross-compile / host-emulation
+	// scenarios where the operator knows better than the
+	// detected GOARCH.
+	if *hostArch != "" {
+		staticDispatchVars["host_arch"] = *hostArch
+	}
+	if *buildArch != "" {
+		staticDispatchVars["build_arch"] = *buildArch
+	}
+	if *bootstrapBuildArch != "" {
+		staticDispatchVars["bootstrap_build_arch"] = *bootstrapBuildArch
 	}
 
 	if err := writeProjectA(g, *outA, convertAbs); err != nil {
@@ -472,6 +502,15 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 		for k, v := range info.Variables {
 			seeded[k] = v
 		}
+		// Per-kind project-conf overrides
+		// (`elements: <kind>: variables:`) layer on top of project-
+		// wide variables. FDSDK uses this for autotools-conf.yml's
+		// build-dir, conf-cmd, etc.
+		if kv, ok := info.KindVars[elem.Bst.Kind]; ok {
+			for k, v := range kv {
+				seeded[k] = v
+			}
+		}
 		foldedVars, foldedConds := foldStaticConditionals(seeded, info.Conditionals, staticDispatchVars, optionTypedSet(info.Options))
 		elem.ProjectConfVars = foldedVars
 		elem.ProjectConfConditionals = foldedConds
@@ -489,26 +528,42 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 	// multiplicity).
 	for _, elem := range g.Elements {
 		seen := map[*element]bool{}
-		allDeps := append([]bstDep{}, elem.Bst.Depends...)
-		allDeps = append(allDeps, elem.Bst.BuildDepends...)
-		allDeps = append(allDeps, elem.Bst.RuntimeDepends...)
-		for _, dep := range allDeps {
-			// List-form deps (filename: [a.bst, b.bst]) expand to
-			// N edges; the shared config: applies to each.
-			for _, fn := range dep.expandedFilenames() {
-				// Tolerate `depends: [- foo.bst]` style by
-				// stripping the .bst suffix; also accept bare
-				// element names.
-				depName := strings.TrimSuffix(fn, ".bst")
-				depElem, ok := g.ByName[depName]
-				if !ok {
-					return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
+		seenBuild := map[*element]bool{}
+		// `depends:` is BuildStream's "both" shorthand — counts as
+		// build AND runtime in the typed-output split. Treat as
+		// build for the BuildDeps slice (kind:filter cares).
+		// `build-depends:` is build-only. `runtime-depends:` is
+		// runtime-only and does NOT contribute to BuildDeps.
+		buildClasses := []struct {
+			deps    []bstDep
+			isBuild bool
+		}{
+			{elem.Bst.Depends, true},
+			{elem.Bst.BuildDepends, true},
+			{elem.Bst.RuntimeDepends, false},
+		}
+		for _, class := range buildClasses {
+			for _, dep := range class.deps {
+				// List-form deps (filename: [a.bst, b.bst]) expand to
+				// N edges; the shared config: applies to each.
+				for _, fn := range dep.expandedFilenames() {
+					// Tolerate `depends: [- foo.bst]` style by
+					// stripping the .bst suffix; also accept bare
+					// element names.
+					depName := strings.TrimSuffix(fn, ".bst")
+					depElem, ok := g.ByName[depName]
+					if !ok {
+						return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
+					}
+					if !seen[depElem] {
+						seen[depElem] = true
+						elem.Deps = append(elem.Deps, depElem)
+					}
+					if class.isBuild && !seenBuild[depElem] {
+						seenBuild[depElem] = true
+						elem.BuildDeps = append(elem.BuildDeps, depElem)
+					}
 				}
-				if seen[depElem] {
-					continue
-				}
-				seen[depElem] = true
-				elem.Deps = append(elem.Deps, depElem)
 			}
 		}
 	}
@@ -566,20 +621,6 @@ func topoSort(elems []*element) ([]*element, error) {
 	return out, nil
 }
 
-// loadReadPaths parses a convert-element-emitted read_paths.json
-// (a JSON array of source-relative paths).
-func loadReadPaths(path string) ([]string, error) {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	return out, nil
-}
-
 // loadElement parses one .bst into an *element. includeBase is the
 // directory (@): include paths resolve against (the project root,
 // matching BuildStream semantics). When no project.conf was found
@@ -598,6 +639,16 @@ func loadElement(bstPath, includeBase, sourceCache string, options map[string]bs
 	if err != nil {
 		return nil, fmt.Errorf("extract conditionals from %s: %w", bstPath, err)
 	}
+	configConditionals, err := extractConditionalsFromConfig(doc)
+	if err != nil {
+		return nil, fmt.Errorf("extract config conditionals from %s: %w", bstPath, err)
+	}
+	// Strip any (?): blocks that survived past the typed
+	// extractors (variables: + config:). Branches under
+	// environment: / public: aren't honored today; the strip
+	// just keeps the loader from barfing on the list-of-mapping
+	// shape landing in a strict-typed slot.
+	stripRemainingConditionals(doc)
 	var f bstFile
 	if err := doc.Decode(&f); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", bstPath, err)
@@ -610,9 +661,22 @@ func loadElement(bstPath, includeBase, sourceCache string, options map[string]bs
 	foldedVars, foldedConds := foldStaticConditionals(f.Variables, conditionals, staticDispatchVars, optionTypedSet(options))
 	f.Variables = foldedVars
 	f.Conditionals = foldedConds
+	// config: (?): branches don't have a "fold against static
+	// vars" path today (no static overrides for config commands
+	// — every per-arch override survives for the dispatch loop).
+	// Stash on bstFile and let pipelineHandler consume.
+	f.ConfigConditionals = configConditionals
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")
 
-	elem := &element{Name: name, Bst: &f}
+	// Load <element>.read-paths.txt sibling if present. Absent
+	// → nil patterns → "entire tree real" default in the cmake
+	// handler.
+	patterns, err := loadReadPathsPatterns(bstPath)
+	if err != nil {
+		return nil, fmt.Errorf("load read-paths patterns for %s: %w", bstPath, err)
+	}
+
+	elem := &element{Name: name, Bst: &f, Patterns: patterns}
 
 	// Source resolution is per-kind. cmake / manual / autotools /
 	// import / … pull a kind:local source tree from disk; stack /
@@ -695,7 +759,33 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 	if err := writeFile(filepath.Join(outDir, "rules", "zero_files.bzl"), zeroFilesBzl); err != nil {
 		return err
 	}
+	if err := writeFile(filepath.Join(outDir, "rules", "sources.bzl"), renderSourcesBzl()); err != nil {
+		return err
+	}
 	if err := writeFile(filepath.Join(outDir, "rules", "BUILD.bazel"), "# rules/ holds the starlark utilities project A's per-element BUILDs use.\n"); err != nil {
+		return err
+	}
+
+	// Emit tools/sources.json — the data file the sources extension
+	// reads to declare per-source repos. One entry per unique source
+	// identity (kind + url + ref) across the graph; kind:local
+	// sources are excluded since they don't need a CAS-backed repo.
+	// When --source-cache resolved a tree for a given source,
+	// populateDigests packs it and stamps the resulting CAS
+	// Directory digest into the entry; entries without an
+	// AbsPath get an empty Digest (the repo rule's empty-tree
+	// fallback handles that without breaking load() resolution).
+	rawSrcs := collectSources(g)
+	withDigests, _, err := populateDigests(g, rawSrcs.Sources)
+	if err != nil {
+		return fmt.Errorf("compute source digests: %w", err)
+	}
+	srcs := sourcesJSON{Sources: withDigests}
+	srcJSON, err := marshalSourcesJSON(srcs)
+	if err != nil {
+		return fmt.Errorf("marshal sources.json: %w", err)
+	}
+	if err := writeFile(filepath.Join(outDir, "tools", "sources.json"), string(srcJSON)); err != nil {
 		return err
 	}
 
@@ -714,7 +804,7 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 	if err := os.Chmod(stagedBin, 0o755); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(outDir, "tools", "BUILD.bazel"), `exports_files(["convert-element"])`+"\n"); err != nil {
+	if err := writeFile(filepath.Join(outDir, "tools", "BUILD.bazel"), `exports_files(["convert-element", "sources.json"])`+"\n"); err != nil {
 		return err
 	}
 
@@ -747,12 +837,38 @@ func writeProjectB(g *graph, outDir string) error {
 		return err
 	}
 
-	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelB()); err != nil {
+	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelB(g)); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"),
 		"# project B root; per-element packages live under elements/<name>/.\n",
 	); err != nil {
+		return err
+	}
+
+	// Project B reads the same sources extension + JSON as project
+	// A so @src_<key>// repos resolve to the same CAS Directories
+	// in both workspaces.
+	if err := writeFile(filepath.Join(outDir, "rules", "sources.bzl"), renderSourcesBzl()); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(outDir, "rules", "BUILD.bazel"), "# rules/ holds the starlark utilities project B's per-element BUILDs use.\n"); err != nil {
+		return err
+	}
+	rawSrcs := collectSources(g)
+	withDigests, _, err := populateDigests(g, rawSrcs.Sources)
+	if err != nil {
+		return fmt.Errorf("compute source digests: %w", err)
+	}
+	srcs := sourcesJSON{Sources: withDigests}
+	srcJSON, err := marshalSourcesJSON(srcs)
+	if err != nil {
+		return fmt.Errorf("marshal sources.json: %w", err)
+	}
+	if err := writeFile(filepath.Join(outDir, "tools", "sources.json"), string(srcJSON)); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(outDir, "tools", "BUILD.bazel"), "# tools/ holds the JSON inputs the sources extension reads.\nexports_files([\"sources.json\"])\n"); err != nil {
 		return err
 	}
 
@@ -792,21 +908,51 @@ bazel_dep(name = "bazel_skylib", version = "1.7.1")
 # toolchain bookkeeping.)
 `)
 	}
+	b.WriteString(renderSourcesUseExtension(collectSources(g)))
 	return b.String()
 }
 
 // moduleBazelB declares rules_cc so project A's converted
 // BUILD.bazel.out (which loads cc_library from @rules_cc//cc:defs.bzl)
 // resolves cleanly in project B.
-func moduleBazelB() string {
-	return `module(name = "meta_project_b", version = "0.0.0")
+func moduleBazelB(g *graph) string {
+	var b strings.Builder
+	b.WriteString(`module(name = "meta_project_b", version = "0.0.0")
 
 # rules_cc is what the cmake-converter emits load() lines against
 # (load("@rules_cc//cc:defs.bzl", "cc_library")). Pin a recent stable
 # release; this is downloaded from bcr.bazel.build the first time
 # project B's bazel build runs.
 bazel_dep(name = "rules_cc", version = "0.0.17")
-`
+`)
+	b.WriteString(renderSourcesUseExtension(collectSources(g)))
+	return b.String()
+}
+
+// renderSourcesUseExtension emits the use_extension + use_repo
+// block for the sources module extension. Both project A and
+// project B include the same block so the @src_<key>// repos
+// resolve identically across the two workspaces.
+//
+// When the graph has no non-kind:local sources the block is
+// omitted entirely — declaring an extension with zero repos is
+// legal but noisy in MODULE.bazel review.
+func renderSourcesUseExtension(s sourcesJSON) string {
+	if len(s.Sources) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(`
+sources = use_extension("//rules:sources.bzl", "sources")
+sources.from_json(path = "//tools:sources.json")
+use_repo(
+    sources,
+`)
+	for _, e := range s.Sources {
+		fmt.Fprintf(&b, "    %q,\n", "src_"+e.Key)
+	}
+	b.WriteString(")\n")
+	return b.String()
 }
 
 // summarizeKinds is for the startup log line: "kind:cmake×2, kind:stack×1".
@@ -877,6 +1023,27 @@ func copyTree(src, dst string) error {
 			return err
 		}
 		target := filepath.Join(dst, rel)
+		// Preserve symlinks as symlinks rather than dereferencing
+		// (copyFile via os.Open would follow). Some BuildStream
+		// kind:import elements ship dangling-on-disk symlinks
+		// whose targets exist only in the staged install tree
+		// (e.g. FDSDK's bootstrap/symlinks: bin → usr/bin where
+		// usr/bin doesn't exist in the source dir but will after
+		// staging). Re-creating the symlink as-is matches the
+		// element's intent.
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("readlink %s: %w", path, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			// Remove any pre-existing entry at target — re-runs
+			// of write-a against the same output dir hit this.
+			_ = os.Remove(target)
+			return os.Symlink(linkTarget, target)
+		}
 		if info.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}

@@ -64,8 +64,27 @@ func emitLoad(buf *bytes.Buffer, pkg *ir.Package) {
 	buf.WriteString(")\n\n")
 }
 
-// Emit returns the contents of a BUILD.bazel file for pkg.
+// Options tunes the BUILD.bazel emission. Zero-value Options
+// preserves the legacy relative-path emission.
+type Options struct {
+	// SourceKey, when non-empty, prefixes every source path in
+	// emitted cc_library/cc_binary/cc_test `srcs = [...]` with
+	// "@src_<SourceKey>//:" so project B references the bytes
+	// by digest-stable Bazel label rather than by local
+	// filesystem path. Used by the FUSE-sources route to keep
+	// project B's compile actions BwoB without a project-B-side
+	// FUSE mount of its own.
+	SourceKey string
+}
+
+// Emit returns the contents of a BUILD.bazel file for pkg using
+// default Options.
 func Emit(pkg *ir.Package) ([]byte, error) {
+	return EmitWithOptions(pkg, Options{})
+}
+
+// EmitWithOptions is the configurable form of Emit.
+func EmitWithOptions(pkg *ir.Package, opts Options) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(header)
 	emitLoad(&buf, pkg)
@@ -80,7 +99,7 @@ func Emit(pkg *ir.Package) ([]byte, error) {
 			}
 			continue
 		}
-		if err := emitCCTarget(&buf, t); err != nil {
+		if err := emitCCTargetWithOptions(&buf, t, opts); err != nil {
 			return nil, err
 		}
 	}
@@ -193,6 +212,10 @@ type genruleView struct {
 }
 
 func emitCCTarget(w *bytes.Buffer, t ir.Target) error {
+	return emitCCTargetWithOptions(w, t, Options{})
+}
+
+func emitCCTargetWithOptions(w *bytes.Buffer, t ir.Target, opts Options) error {
 	v := ccView{
 		RuleKind:   t.Kind.String(),
 		Name:       t.Name,
@@ -218,6 +241,15 @@ func emitCCTarget(w *bytes.Buffer, t ir.Target) error {
 		sort.Strings(v.Srcs)
 		v.Hdrs = nil
 	}
+	// FUSE-sources path: rewrite src + hdr paths to @src_<key>//:
+	// labels so project B compiles against digest-referenced
+	// inputs rather than relative paths. The `@…//:<path>` form
+	// preserves the path exactly (no leading slash) — Bazel's
+	// label parser handles it.
+	if opts.SourceKey != "" {
+		v.Srcs = prefixWithSourceLabel(v.Srcs, opts.SourceKey)
+		v.Hdrs = prefixWithSourceLabel(v.Hdrs, opts.SourceKey)
+	}
 	if t.Kind == ir.KindCCTest {
 		v.Args = append([]string(nil), t.TestArgs...) // preserve order; arg order matters
 		v.Data = sortedCopy(t.TestData)
@@ -234,6 +266,27 @@ func emitCCTarget(w *bytes.Buffer, t ir.Target) error {
 		}
 	}
 	return ccRuleTmpl.Execute(w, v)
+}
+
+// prefixWithSourceLabel maps relative source paths to
+// @src_<key>//:tree_dir/<path> Bazel labels. The tree_dir/
+// segment matches the repo rule's layout: rules/sources.bzl's
+// _src_repo_impl ctx.symlinks the FUSE mount under tree_dir/
+// inside the @src_<key>// repo and exports every path under
+// it via exports_files(glob(["tree_dir/**"])). The label form
+// preserves the relative path exactly under that prefix.
+//
+// Returns a fresh slice so the caller's view stays untouched on
+// the legacy (non-fuse) path.
+func prefixWithSourceLabel(paths []string, key string) []string {
+	if len(paths) == 0 {
+		return paths
+	}
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = "@src_" + key + "//:tree_dir/" + p
+	}
+	return out
 }
 
 // formatBazelDuration renders a Go time.Duration as a Bazel-accepted

@@ -41,6 +41,25 @@ type kindHandler interface {
 	// Implementations are responsible for everything that goes in
 	// the package — sources, BUILD.bazel, placeholders, etc.
 	RenderB(elem *element, elemPkg string) error
+
+	// DefaultReadPathsPatterns returns the converter-default
+	// shadow-tree narrowing rules for this kind, or nil when the
+	// kind doesn't narrow. Per-element <element>.read-paths.txt
+	// rules layer on top (concatenated after the defaults), so
+	// the default patterns shape the conservative starting point
+	// and per-element files refine.
+	//
+	// Cache-key stability follows from the converter version:
+	// when a kind's defaults change, the action input merkle for
+	// every element of that kind shifts. Pinning the converter
+	// version pins the defaults.
+	//
+	// Most kinds return nil — pipeline-shape kinds run arbitrary
+	// commands that can read anything, so narrowing the source
+	// tree at the genrule input layer is unsafe by default.
+	// kind:cmake's narrowing is well-defined because cmake's
+	// configure-time read pattern is structural.
+	DefaultReadPathsPatterns() *readPathsPatterns
 }
 
 // handlers is the per-kind dispatch table. Each handler registers

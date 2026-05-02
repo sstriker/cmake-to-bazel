@@ -73,21 +73,38 @@ var projectVars = map[string]string{
 	"sysconfdir":     "/etc",
 	"localstatedir":  "/var",
 	"sharedstatedir": "%{prefix}/com",
+	// max-jobs is BuildStream's parallelism cap, typically set
+	// via the --max-jobs CLI flag (default 0 → "no cap"). FDSDK
+	// uses %{max-jobs} in environment bindings (e.g.
+	// CARGO_BUILD_JOBS) so an undefined value blocks resolve.
+	// "0" matches BuildStream's "use all available CPUs" sentinel
+	// the consuming tools (cargo / make) interpret.
+	"max-jobs": "0",
 }
 
-// resolveVars composes the layered variable map (BuildStream stock
-// < project.conf < kind defaults < element overrides) and expands
-// every reference until fixed-point. Returns name->resolved-value,
-// with runtime sentinels preserved as %{install-root} /
-// %{build-root} so substituteCmd can swap them for shell-var
-// references at the command-rendering stage.
+// resolveVars composes the layered variable map (per-element
+// builtins < BuildStream stock < project.conf < kind defaults
+// < element overrides) and expands every reference until fixed-
+// point. Returns name->resolved-value, with runtime sentinels
+// preserved as %{install-root} / %{build-root} so substituteCmd
+// can swap them for shell-var references at the command-
+// rendering stage.
 //
-// Any of projectConf / kindVars / elemVars may be nil — a nil layer
-// contributes no overrides. Cycles among non-sentinel variables
-// produce an error naming one participant. References to undefined
-// variables produce an error naming the missing variable.
-func resolveVars(projectConf, kindVars, elemVars map[string]string) (map[string]string, error) {
+// elemBuiltins is the per-element builtin layer (e.g.
+// `element-name` → the element's own name). Lowest precedence
+// so user variables can override; matches BuildStream's
+// `%{element-name}` semantics.
+//
+// Any of elemBuiltins / projectConf / kindVars / elemVars may
+// be nil — a nil layer contributes no overrides. Cycles among
+// non-sentinel variables produce an error naming one
+// participant. References to undefined variables produce an
+// error naming the missing variable.
+func resolveVars(elemBuiltins, projectConf, kindVars, elemVars map[string]string) (map[string]string, error) {
 	raw := map[string]string{}
+	for k, v := range elemBuiltins {
+		raw[k] = v
+	}
 	for k, v := range projectVars {
 		raw[k] = v
 	}
@@ -171,7 +188,7 @@ func resolveVars(projectConf, kindVars, elemVars map[string]string) (map[string]
 // arch is one of the supportedArches strings ("x86_64",
 // "aarch64", ...). Branches whose Arches don't include arch
 // contribute nothing for this resolution.
-func resolveVarsForArch(projectConf, kindVars, elemVars map[string]string,
+func resolveVarsForArch(elemBuiltins, projectConf, kindVars, elemVars map[string]string,
 	arch string,
 	projectConditionals, elemConditionals []conditionalBranch) (map[string]string, error) {
 	pc := projectConf
@@ -182,7 +199,7 @@ func resolveVarsForArch(projectConf, kindVars, elemVars map[string]string,
 	if branch := branchForArch(elemConditionals, arch); branch != nil {
 		ev = applyConditional(ev, branch)
 	}
-	return resolveVars(pc, kindVars, ev)
+	return resolveVars(elemBuiltins, pc, kindVars, ev)
 }
 
 // expandRefs replaces every %{name} reference in s with the result

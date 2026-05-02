@@ -255,6 +255,29 @@ func mergeMappings(dst, src *yaml.Node) {
 			srcVal := src.Content[i+1]
 			if dstVal.Kind == yaml.MappingNode && srcVal.Kind == yaml.MappingNode {
 				mergeMappings(dstVal, srcVal)
+				continue
+			}
+			// (?): blocks are list-of-mappings (each entry is one
+			// conditional branch). Parent-wins on the whole list
+			// would silently drop included branches — FDSDK's
+			// bootstrap/base-sdk/perl.bst hits exactly this when
+			// flags.yml declares bootstrap_build_arch branches
+			// that a higher layer's (?): replaces wholesale.
+			//
+			// Concatenate instead: src's branches first (less
+			// specific, included content), then dst's (more
+			// specific, parent file). Branch evaluation order
+			// matters when multiple conditions match the same
+			// dispatch tuple — last writer wins per-arch, so
+			// putting parent branches last preserves "your local
+			// (?): overrides the included one" semantics while
+			// still letting included branches contribute when
+			// the parent's branches don't apply.
+			if k == "(?)" && dstVal.Kind == yaml.SequenceNode && srcVal.Kind == yaml.SequenceNode {
+				merged := append([]*yaml.Node{}, srcVal.Content...)
+				merged = append(merged, dstVal.Content...)
+				dstVal.Content = merged
+				continue
 			}
 			// else: parent wins, nothing to do.
 		} else {

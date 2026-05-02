@@ -1,0 +1,5 @@
+#ifndef CFGLIB_CONFIG_H
+#define CFGLIB_CONFIG_H
+#define CFGLIB_VERSION_MAJOR 1
+#define CFGLIB_VERSION_MINOR 2
+#endif

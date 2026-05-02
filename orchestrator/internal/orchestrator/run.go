@@ -43,11 +43,11 @@ import (
 	"github.com/sstriker/cmake-to-bazel/internal/manifest"
 	"github.com/sstriker/cmake-to-bazel/internal/reapi"
 	"github.com/sstriker/cmake-to-bazel/internal/shadow"
+	"github.com/sstriker/cmake-to-bazel/internal/synthprefix"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/allowlistreg"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/element"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/exports"
 	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/sourcecheckout"
-	"github.com/sstriker/cmake-to-bazel/orchestrator/internal/synthprefix"
 )
 
 // Options configures one Run call.

@@ -9,7 +9,7 @@ func TestResolveVars_ProjectDefaults(t *testing.T) {
 	// With no project.conf or per-element overrides, every variable
 	// resolves to its BuildStream-stock value (prefix=/usr/local,
 	// bindir derived through %{exec_prefix}).
-	v, err := resolveVars(nil, nil, nil)
+	v, err := resolveVars(nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("resolveVars: %v", err)
 	}
@@ -33,6 +33,7 @@ func TestResolveVars_ProjectConfOverride(t *testing.T) {
 	// because they reference %{prefix} / %{exec_prefix} via the
 	// BuildStream-stock derivation chain.
 	v, err := resolveVars(
+		nil,
 		map[string]string{"prefix": "/usr"},
 		nil, nil,
 	)
@@ -56,6 +57,7 @@ func TestResolveVars_LayerPrecedence(t *testing.T) {
 	// All four layers contribute, highest wins: BuildStream stock
 	// < project.conf < kind < element.
 	v, err := resolveVars(
+		nil,
 		map[string]string{"prefix": "/usr", "make-args": "-j2"},
 		map[string]string{"make-args": "-j4", "make-install-args": "install"},
 		map[string]string{"make-args": "-j8"},
@@ -78,7 +80,7 @@ func TestResolveVars_LayerPrecedence(t *testing.T) {
 }
 
 func TestResolveVars_ElementOverridesPrefix(t *testing.T) {
-	v, err := resolveVars(nil, nil, map[string]string{
+	v, err := resolveVars(nil, nil, nil, map[string]string{
 		"prefix": "/opt/freedesktop-sdk",
 	})
 	if err != nil {
@@ -99,6 +101,7 @@ func TestResolveVars_ElementOverridesPrefix(t *testing.T) {
 func TestResolveVars_KindDefaultsLayer(t *testing.T) {
 	// kind:make-shape: kind defines its own variables; element doesn't override.
 	v, err := resolveVars(
+		nil,
 		nil,
 		map[string]string{
 			"make-args":         "",
@@ -121,6 +124,7 @@ func TestResolveVars_KindDefaultsLayer(t *testing.T) {
 func TestResolveVars_ElementOverridesKindDefault(t *testing.T) {
 	v, err := resolveVars(
 		nil,
+		nil,
 		map[string]string{"make-args": "-j4"},
 		map[string]string{"make-args": "-j8"},
 	)
@@ -134,7 +138,7 @@ func TestResolveVars_ElementOverridesKindDefault(t *testing.T) {
 
 func TestResolveVars_RecursiveExpansion(t *testing.T) {
 	// %{a} -> %{b}, %{b} -> %{c}, %{c} -> "deep"
-	v, err := resolveVars(nil, nil, map[string]string{
+	v, err := resolveVars(nil, nil, nil, map[string]string{
 		"a": "%{b}/x",
 		"b": "%{c}/y",
 		"c": "deep",
@@ -148,7 +152,7 @@ func TestResolveVars_RecursiveExpansion(t *testing.T) {
 }
 
 func TestResolveVars_CycleDetected(t *testing.T) {
-	_, err := resolveVars(nil, nil, map[string]string{
+	_, err := resolveVars(nil, nil, nil, map[string]string{
 		"a": "%{b}",
 		"b": "%{a}",
 	})
@@ -161,7 +165,7 @@ func TestResolveVars_CycleDetected(t *testing.T) {
 }
 
 func TestResolveVars_UndefinedReferenceErrors(t *testing.T) {
-	_, err := resolveVars(nil, nil, map[string]string{
+	_, err := resolveVars(nil, nil, nil, map[string]string{
 		"a": "%{nonexistent}",
 	})
 	if err == nil {
@@ -173,7 +177,7 @@ func TestResolveVars_UndefinedReferenceErrors(t *testing.T) {
 }
 
 func TestResolveVars_RuntimeSentinelsPassThrough(t *testing.T) {
-	v, err := resolveVars(nil, nil, nil)
+	v, err := resolveVars(nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("resolveVars: %v", err)
 	}
@@ -186,6 +190,7 @@ func TestResolveVars_RuntimeSentinelsPassThrough(t *testing.T) {
 
 func TestSubstituteCmd_ExpandsAndMapsSentinels(t *testing.T) {
 	v, err := resolveVars(
+		nil,
 		nil,
 		map[string]string{
 			"make-args":         "",
@@ -207,7 +212,7 @@ func TestSubstituteCmd_ExpandsAndMapsSentinels(t *testing.T) {
 }
 
 func TestSubstituteCmd_PrefixDerivedPath(t *testing.T) {
-	v, err := resolveVars(nil, nil, map[string]string{"prefix": "/opt/foo"})
+	v, err := resolveVars(nil, nil, nil, map[string]string{"prefix": "/opt/foo"})
 	if err != nil {
 		t.Fatalf("resolveVars: %v", err)
 	}
@@ -222,7 +227,7 @@ func TestSubstituteCmd_PrefixDerivedPath(t *testing.T) {
 }
 
 func TestSubstituteCmd_UnknownVarErrors(t *testing.T) {
-	v, err := resolveVars(nil, nil, nil)
+	v, err := resolveVars(nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("resolveVars: %v", err)
 	}
@@ -232,5 +237,32 @@ func TestSubstituteCmd_UnknownVarErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not-a-real-var") {
 		t.Errorf("expected error to mention missing var, got: %v", err)
+	}
+}
+
+// TestResolveVars_ElementNameBuiltin asserts BuildStream's
+// `%{element-name}` built-in: passed in via the elemBuiltins
+// layer, resolves to the element's own name, and is overridable
+// by user variables (lowest precedence).
+func TestResolveVars_ElementNameBuiltin(t *testing.T) {
+	v, err := resolveVars(map[string]string{"element-name": "components/perl"}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v["element-name"] != "components/perl" {
+		t.Errorf("element-name builtin: got %q, want components/perl", v["element-name"])
+	}
+}
+
+func TestResolveVars_ElementNameBuiltinUserOverridable(t *testing.T) {
+	v, err := resolveVars(
+		map[string]string{"element-name": "default"},
+		nil, nil,
+		map[string]string{"element-name": "user-set"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v["element-name"] != "user-set" {
+		t.Errorf("user override should win over builtin; got %q", v["element-name"])
 	}
 }

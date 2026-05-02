@@ -36,9 +36,30 @@ record_one() {
     : >"$build/.cmake/api/v1/query/cmakeFiles-v1"
     : >"$build/.cmake/api/v1/query/cache-v2"
 
-    cmake -S "$src" -B "$build" -G Ninja \
+    # consumer/+producer/ convention: a fixture testing
+    # cross-element behavior (e.g. macro-from-import) puts the
+    # consumer cmake project in `consumer/` and producer-shipped
+    # cmake macros in `producer/`. cmake `-S` points at
+    # `consumer/`; `producer/` goes onto CMAKE_MODULE_PATH so
+    # `include(<name>)` resolves to a path OUTSIDE the consumer
+    # source root — which is the whole point: trace records
+    # those calls with the producer module as `file`, exercising
+    # lower's known-target rescue path.
+    local cmake_src="$src"
+    local extra_args=()
+    if [[ -d "$src/consumer" && -f "$src/consumer/CMakeLists.txt" ]]; then
+        cmake_src="$src/consumer"
+        if [[ -d "$src/producer" ]]; then
+            extra_args+=(-DCMAKE_MODULE_PATH="$src/producer")
+        fi
+    fi
+
+    cmake -S "$cmake_src" -B "$build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        "${extra_args[@]}" \
+        --trace-expand --trace-format=json-v1 \
+        --trace-redirect="$build/trace.jsonl" \
         >"$build/cmake.stdout" 2>"$build/cmake.stderr"
 
     rm -rf "$out"
@@ -52,6 +73,37 @@ record_one() {
     if [[ -f "$build/CMakeFiles/rules.ninja" ]]; then
         mkdir -p "$out/CMakeFiles"
         cp "$build/CMakeFiles/rules.ninja" "$out/CMakeFiles/rules.ninja"
+    fi
+    # Capture cmake's --trace-expand output. Used by lower's
+    # PUBLIC/PRIVATE-aware include partitioner, IMPORTED-target
+    # dep recovery for static libs, and configure_file genrule
+    # emission. See internal/shadow/trace_commands.go.
+    #
+    # Trace events embed absolute paths (the recording machine's
+    # source + build dirs). Lower's inSourceTree check uses
+    # codemodel's Paths.Source — also a recorded absolute path —
+    # so the in-tree filter compares recorded-vs-recorded. Both
+    # baked-in paths stay consistent across replays; tests on a
+    # different checkout work because the same recorded prefix
+    # is used to extract relative paths from both.
+    if [[ -f "$build/trace.jsonl" ]]; then
+        cp "$build/trace.jsonl" "$out/trace.jsonl"
+
+        # Stash configure_file outputs into the fixture mirroring
+        # the build-dir layout. lower's configure_file recovery
+        # reads each output's bytes from the build dir at convert-
+        # element time; offline test runs need those bytes
+        # captured here. Outputs outside the build dir (rare —
+        # configure_file with absolute non-build dest) are
+        # skipped because lower can't anchor them anyway.
+        while IFS= read -r abs_out; do
+            [[ -z "$abs_out" ]] && continue
+            [[ "$abs_out" == "$build/"* ]] || continue
+            [[ -f "$abs_out" ]] || continue
+            rel="${abs_out#"$build/"}"
+            mkdir -p "$out/$(dirname "$rel")"
+            cp "$abs_out" "$out/$rel"
+        done < <(jq -r 'select(.cmd == "configure_file") | .args[1] // empty' "$build/trace.jsonl")
     fi
 
     echo "    -> $(find "$out" -type f | wc -l) files in $out"

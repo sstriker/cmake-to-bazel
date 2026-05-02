@@ -54,9 +54,10 @@ type pipelineHandler struct {
 	defaults    pipelineDefaults
 }
 
-func (h pipelineHandler) Kind() string           { return h.kindName }
-func (h pipelineHandler) NeedsSources() bool     { return true }
-func (h pipelineHandler) HasProjectABuild() bool { return true }
+func (h pipelineHandler) Kind() string                                 { return h.kindName }
+func (h pipelineHandler) NeedsSources() bool                           { return true }
+func (h pipelineHandler) HasProjectABuild() bool                       { return true }
+func (h pipelineHandler) DefaultReadPathsPatterns() *readPathsPatterns { return nil }
 
 // pipelineCfg is the .bst `config:` block shape every pipeline-kind
 // element shares. Pointer-to-slice so the renderer can distinguish
@@ -122,32 +123,73 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	// command for a specific tuple (one entry per dispatch
 	// variable). Empty tuple = unconditional resolution.
 	resolveAt := func(tuple map[string]string) (pipelinePhases, error) {
+		// Per-element built-ins. BuildStream reserves a small set of
+		// names that resolve to the element's own metadata —
+		// `element-name` is the one v1 actually sees in FDSDK
+		// (bootstrap/base-sdk/perl uses it in flags.yml). Lowest
+		// precedence (any user var with the same name overrides).
+		elemBuiltins := map[string]string{
+			"element-name": elem.Name,
+		}
 		var vars map[string]string
 		var err error
 		if len(tuple) == 0 {
-			vars, err = resolveVars(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
+			vars, err = resolveVars(elemBuiltins, elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
 		} else {
-			vars, err = resolveVarsForTuple(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables,
+			vars, err = resolveVarsForTuple(elemBuiltins, elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables,
 				tuple, elem.ProjectConfConditionals, elem.Bst.Conditionals)
 		}
 		if err != nil {
 			return pipelinePhases{}, fmt.Errorf("element %q (kind:%s) resolve variables%s: %w",
 				elem.Name, h.kindName, tupleSuffix(tuple), err)
 		}
+		// Apply config: (?): per-arch overrides for the matching
+		// branches. Each branch's Overrides is a partial pipelineCfg
+		// shape (e.g. just configure-commands); decode and replace
+		// fields where the override pointer is non-nil.
+		tupleConfigure := rawConfigure
+		tupleBuild := rawBuild
+		tupleInstall := rawInstall
+		tupleStrip := rawStrip
+		for _, b := range elem.Bst.ConfigConditionals {
+			if !branchMatchesTuple(b, tuple) {
+				continue
+			}
+			var override pipelineCfg
+			if err := b.Overrides.Decode(&override); err != nil {
+				return pipelinePhases{}, fmt.Errorf("element %q (kind:%s) decode config:(?): branch%s: %w",
+					elem.Name, h.kindName, tupleSuffix(tuple), err)
+			}
+			if override.ConfigureCommands != nil {
+				tupleConfigure = *override.ConfigureCommands
+			}
+			if override.BuildCommands != nil {
+				tupleBuild = *override.BuildCommands
+			}
+			if override.InstallCommands != nil {
+				tupleInstall = *override.InstallCommands
+			}
+			if override.StripCommands != nil {
+				tupleStrip = *override.StripCommands
+			}
+			if override.Commands != nil {
+				tupleInstall = *override.Commands
+			}
+		}
 		var p pipelinePhases
-		p.Configure, err = substituteCmds(rawConfigure, vars, elem.Name, h.kindName, "configure-commands")
+		p.Configure, err = substituteCmds(tupleConfigure, vars, elem.Name, h.kindName, "configure-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}
-		p.Build, err = substituteCmds(rawBuild, vars, elem.Name, h.kindName, "build-commands")
+		p.Build, err = substituteCmds(tupleBuild, vars, elem.Name, h.kindName, "build-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}
-		p.Install, err = substituteCmds(rawInstall, vars, elem.Name, h.kindName, "install-commands")
+		p.Install, err = substituteCmds(tupleInstall, vars, elem.Name, h.kindName, "install-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}
-		p.Strip, err = substituteCmds(rawStrip, vars, elem.Name, h.kindName, "strip-commands")
+		p.Strip, err = substituteCmds(tupleStrip, vars, elem.Name, h.kindName, "strip-commands")
 		if err != nil {
 			return pipelinePhases{}, err
 		}
@@ -163,8 +205,17 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 		return p, nil
 	}
 
-	if err := stagePipelineSources(elem, elemPkg); err != nil {
-		return err
+	// FUSE-sources mode: skip on-disk staging when the element
+	// has a single non-kind:local source with no Directory subpath
+	// — the genrule will pull from @src_<key>//:tree (symlinked
+	// into the cas-fuse mount by the rules/sources.bzl repo
+	// rule). Multi-source / Directory / kind:local elements still
+	// stage; same shape as cmakeHandler's gating.
+	fuseKey := pipelineFuseEligible(elem)
+	if fuseKey == "" {
+		if err := stagePipelineSources(elem, elemPkg); err != nil {
+			return err
+		}
 	}
 
 	if len(dispatch) == 0 {
@@ -175,19 +226,43 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 			return err
 		}
 		return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
-			renderPipelineBuild(elem, dispatch, []dispatchGroup{{Phases: phases}}))
+			renderPipelineBuild(elem, dispatch, []dispatchGroup{{Phases: phases}}, fuseKey))
 	}
 
 	// Cross-product of all dispatch variables' values. Each tuple
 	// resolves to one phases set; group tuples by identical
 	// resolution so the emitted select() doesn't duplicate identical
 	// branches.
+	//
+	// Soft-skip semantics: when a tuple's resolution fails with a
+	// "variable referenced but not defined" error (the FDSDK
+	// pattern where flags.yml has (?): branches for
+	// {x86_64, aarch64, ppc64le, riscv64} but not loongarch64,
+	// while the option declaration enumerates loongarch64), log
+	// the skip and omit the tuple from the rendered select().
+	// Bazel surfaces the missing platform at build time as
+	// "no matching select() arm" rather than write-a aborting
+	// the whole element render. Preserves render robustness on
+	// real-world graphs where dispatch values overshoot what
+	// the (?): branches actually cover.
 	type groupKey [4]string
 	groupIdx := map[groupKey]int{}
 	var groups []dispatchGroup
+	var lastSkipErr error
 	for _, tuple := range cartesianTuples(dispatch) {
 		phases, err := resolveAt(tuple)
 		if err != nil {
+			if strings.Contains(err.Error(), "referenced but not defined") {
+				// Tuple silently dropped from the rendered
+				// select(); bazel surfaces the missing platform
+				// at build time as "no matching select() arm,"
+				// which is louder than write-a aborting render.
+				// Future --verbose flag can echo the skip to
+				// stderr; for now the BUILD content is the
+				// canonical record of which dispatch arms exist.
+				lastSkipErr = err
+				continue
+			}
 			return err
 		}
 		key := groupKey{
@@ -206,16 +281,26 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 			})
 		}
 	}
+	// All tuples skipped → nothing to emit. Surface as error so
+	// the operator knows nothing's buildable rather than silently
+	// rendering an empty select().
+	if len(groups) == 0 {
+		// All tuples skipped — surface the last underlying
+		// resolution error so the operator sees which variable
+		// is the culprit.
+		return fmt.Errorf("element %q (kind:%s): every dispatch tuple was unresolvable; check (?): branch coverage vs option values; last error: %v",
+			elem.Name, h.kindName, lastSkipErr)
+	}
 	// Dedup-collapse: if every dispatch tuple resolves identically,
 	// the (?): block didn't actually affect the rendered cmd. Emit
 	// the single-string form to keep the BUILD readable.
 	if len(groups) == 1 {
 		groups[0] = dispatchGroup{Phases: groups[0].Phases}
 		return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
-			renderPipelineBuild(elem, nil, groups))
+			renderPipelineBuild(elem, nil, groups, fuseKey))
 	}
 	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
-		renderPipelineBuild(elem, dispatch, groups))
+		renderPipelineBuild(elem, dispatch, groups, fuseKey))
 }
 
 // archSuffix shapes an arch identifier into a parenthetical for
@@ -368,6 +453,28 @@ func stagePipelineSources(elem *element, elemPkg string) error {
 	return stageAllSources(elem, filepath.Join(elemPkg, "sources"))
 }
 
+// pipelineFuseEligible reports whether a pipeline-shape element
+// can take the FUSE-sources path: --use-fuse-sources flipped
+// at startup, single source, no Directory subpath, and the
+// source has a sourceKey (i.e. not kind:local). Returns the
+// source key on success, "" otherwise.
+//
+// Same constraint envelope as cmakeHandler's gating; multi-
+// source / Directory / kind:local cases fall back to staging.
+// Repo-composition for multi-source elements is a follow-up.
+func pipelineFuseEligible(elem *element) string {
+	if !useFuseSourcesGlobal {
+		return ""
+	}
+	if len(elem.Sources) != 1 {
+		return ""
+	}
+	if elem.Sources[0].Directory != "" {
+		return ""
+	}
+	return sourceKey(elem.Sources[0])
+}
+
 // renderPipelineBuild renders the per-element BUILD for a coarse-
 // grained pipeline kind: a glob over staged sources + a genrule
 // whose cmd stages the sources into a fresh work dir, runs each
@@ -391,18 +498,21 @@ func stagePipelineSources(elem *element, elemPkg string) error {
 //     group. Lowering BuildStream's (?): per-arch overrides into
 //     project-B Bazel-native multi-arch resolution rather than
 //     baking write-a's host arch into the rendered cmd.
-func renderPipelineBuild(elem *element, dispatch []dispatchVar, groups []dispatchGroup) string {
+func renderPipelineBuild(elem *element, dispatch []dispatchVar, groups []dispatchGroup, fuseKey string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `# Generated by cmd/write-a. Do not edit by hand.
 
 package(default_visibility = ["//visibility:public"])
 
-filegroup(
+`)
+	if fuseKey == "" {
+		fmt.Fprintf(&b, `filegroup(
     name = "%[1]s_sources",
     srcs = glob(["sources/**"]),
 )
 
 `, elem.Name)
+	}
 
 	// config_setting emission gates on the dispatch shape:
 	//   - 0 dims (no dispatch) — none.
@@ -416,13 +526,17 @@ filegroup(
 		b.WriteString(renderConfigSettings(dispatch, groups))
 	}
 
+	srcsAttr := fmt.Sprintf(`[":%s_sources"]`, elem.Name)
+	if fuseKey != "" {
+		srcsAttr = fmt.Sprintf(`["@src_%s//:tree"]`, fuseKey)
+	}
 	fmt.Fprintf(&b, `genrule(
     name = "%[1]s_install",
-    srcs = [":%[1]s_sources"],
+    srcs = %[3]s,
     outs = ["install_tree.tar"],
     cmd = %[2]s,
 )
-`, elem.Name, renderPipelineCmdAttr(dispatch, groups))
+`, elem.Name, renderPipelineCmdAttr(dispatch, groups, fuseKey != ""), srcsAttr)
 	return b.String()
 }
 
@@ -539,14 +653,14 @@ func sortedKeys(m map[string]string) []string {
 // script string. Otherwise: select({...}) over per-tuple labels
 // (either @platforms//cpu:<v> for the simple target_arch-only
 // case, or local :<tuple-name> config_setting labels otherwise).
-func renderPipelineCmdAttr(dispatch []dispatchVar, groups []dispatchGroup) string {
+func renderPipelineCmdAttr(dispatch []dispatchVar, groups []dispatchGroup, fuseSources bool) string {
 	if len(groups) == 1 && len(groups[0].Tuples) == 0 {
-		return renderPipelineCmdBody(groups[0].Phases)
+		return renderPipelineCmdBody(groups[0].Phases, fuseSources)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "select({\n")
 	for _, g := range groups {
-		body := renderPipelineCmdBody(g.Phases)
+		body := renderPipelineCmdBody(g.Phases, fuseSources)
 		for _, tuple := range g.Tuples {
 			fmt.Fprintf(&b, "        %q: %s,\n", tupleSelectLabel(dispatch, tuple), body)
 		}
@@ -569,8 +683,17 @@ func tupleSelectLabel(dispatch []dispatchVar, tuple map[string]string) string {
 
 // renderPipelineCmdBody emits the triple-quoted shell-script body
 // the genrule's cmd attribute consumes (or one branch of the
-// select() dict in the multi-arch case).
-func renderPipelineCmdBody(p pipelinePhases) string {
+// select() dict in the multi-arch case). fuseSources picks the
+// strip-prefix the cmd uses to recover source-relative paths
+// from $(SRCS) entries: "sources/" for the staged-on-disk shape
+// (the default), "tree_dir/" for the FUSE-symlinked
+// @src_<key>//:tree shape (matches the symlink target the
+// rules/sources.bzl repo rule creates).
+func renderPipelineCmdBody(p pipelinePhases, fuseSources bool) string {
+	stripFrom := "sources/"
+	if fuseSources {
+		stripFrom = "tree_dir/"
+	}
 	return fmt.Sprintf(`"""
         # Snapshot the exec root before any cd. Bazel resolves
         # location expressions to exec-root-relative paths, and the
@@ -583,7 +706,7 @@ func renderPipelineCmdBody(p pipelinePhases) string {
         # each $(SRCS) entry to recover the source-relative path).
         BUILD_ROOT="$$(mktemp -d)"
         for src in $(SRCS); do
-            rel="$${src##*sources/}"
+            rel="$${src##*%[3]s}"
             mkdir -p "$$BUILD_ROOT/$$(dirname "$$rel")"
             cp -L "$$src" "$$BUILD_ROOT/$$rel"
         done
@@ -602,7 +725,7 @@ func renderPipelineCmdBody(p pipelinePhases) string {
         # Tar the install tree as the element's primary output.
         cd "$$EXEC_ROOT"
         tar -cf "$(location install_tree.tar)" -C "$$INSTALL_ROOT" .
-    """`, renderPipelineCommands(p.Configure, p.Build, p.Install, p.Strip), renderEnvExports(p.Env))
+    """`, renderPipelineCommands(p.Configure, p.Build, p.Install, p.Strip), renderEnvExports(p.Env), stripFrom)
 }
 
 // renderEnvExports emits one `export K=V` line per env entry,

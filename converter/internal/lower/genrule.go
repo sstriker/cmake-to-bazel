@@ -24,6 +24,16 @@ type codegenContext struct {
 	// after the main target loop alongside Genrules.
 	Tests []ir.Target
 
+	// Subs is the list of per-language sub-libraries lower
+	// synthesizes when a multi-language target is split into a
+	// wrapper + per-language cc_library shape (multi-language
+	// structural delta). The wrapper carries the original
+	// target's name and Bazel-public surface; each sub-library
+	// carries one language's srcs + per-language copts/defines.
+	// Appended after Genrules in target-walk order so the
+	// rendered BUILD groups them naturally with their parent.
+	Subs []ir.Target
+
 	// OutToGenrule maps a package-relative output path to the genrule
 	// name that produces it. Used by the consumer side to add
 	// has-cmake-codegen and to reference outputs by label.

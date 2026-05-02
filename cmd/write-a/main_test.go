@@ -100,6 +100,8 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 		"tools/BUILD.bazel",
 		"elements/hello/BUILD.bazel",
 		"elements/hello/sources/CMakeLists.txt",
+		"rules/sources.bzl",
+		"tools/sources.json",
 	} {
 		if _, err := os.Stat(filepath.Join(outA, want)); err != nil {
 			t.Errorf("missing rendered file %q in project A: %v", want, err)
@@ -155,6 +157,123 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 		if !strings.Contains(got, marker) {
 			t.Errorf("rendered BUILD missing marker %q\n--body--\n%s", marker, got)
 		}
+	}
+}
+
+// TestWriter_CmakeElementStagesDepBundles covers the cross-
+// cmake-element staging path: a kind:cmake element whose deps
+// list names another kind:cmake element gets the dep's
+// cmake-config bundle staged at convert-element action time
+// under $PREFIX/lib/cmake/<dep>/, with --prefix-dir=$PREFIX
+// passed to convert-element. find_package(<DepPkg> CONFIG)
+// inside the consumer's CMakeLists then resolves against the
+// staged bundle.
+//
+// Asserts on the rendered consumer's BUILD shape — markers for
+// the cross-element label, the per-dep tar extraction loop, and
+// the --prefix-dir flag. End-to-end (bazel build through both
+// projects) is exercised by a follow-up scripts/meta-cross-cmake.sh
+// gate gated on bzlmod-capable bazel.
+func TestWriter_CmakeElementStagesDepBundles(t *testing.T) {
+	tmp := t.TempDir()
+	// Producer cmake element.
+	prodSrc := filepath.Join(tmp, "prod-src")
+	if err := os.MkdirAll(prodSrc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(prodSrc, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(prod)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prodBst := filepath.Join(tmp, "prod.bst")
+	if err := os.WriteFile(prodBst,
+		[]byte("kind: cmake\nsources:\n- kind: local\n  path: "+prodSrc+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Consumer cmake element with a depends edge on prod.
+	consSrc := filepath.Join(tmp, "cons-src")
+	if err := os.MkdirAll(consSrc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(consSrc, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(cons)\nfind_package(prod CONFIG)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	consBst := filepath.Join(tmp, "cons.bst")
+	body := "kind: cmake\ndepends:\n- prod\nsources:\n- kind: local\n  path: " + consSrc + "\n"
+	if err := os.WriteFile(consBst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	g, err := loadGraph([]string{prodBst, consBst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	consBuild, err := os.ReadFile(filepath.Join(outA, "elements/cons/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(consBuild)
+	for _, marker := range []string{
+		`"//elements/prod:cmake_config_bundle"`,
+		`for tar in $(locations //elements/prod:cmake_config_bundle); do`,
+		`tar -xf "$$tar" -C "$$PREFIX"`,
+		`--prefix-dir="$$PREFIX"`,
+		`"imports.json"`,
+		`--imports-manifest="$(location imports.json)"`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("consumer BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+
+	// The producer side: its BUILD must expose a
+	// `cmake_config_bundle` filegroup so consumers can
+	// reference it.
+	prodBuild, err := os.ReadFile(filepath.Join(outA, "elements/prod/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(prodBuild), `name = "cmake_config_bundle"`) {
+		t.Errorf("producer BUILD missing cmake_config_bundle filegroup:\n%s", prodBuild)
+	}
+
+	// Negative check: a no-deps element shouldn't get the
+	// cross-element extract block. Producer has no deps, so
+	// its BUILD should NOT carry the prefix-dir flag.
+	if strings.Contains(string(prodBuild), `--prefix-dir`) {
+		t.Errorf("producer BUILD wrongly carries --prefix-dir (no deps):\n%s", prodBuild)
+	}
+
+	// imports.json is rendered next to the consumer's
+	// BUILD.bazel and maps the dep's IMPORTED-target name to
+	// its in-meta-project Bazel label. Convention-bound:
+	// <dep>::<dep> → //elements/<dep>:<dep>.
+	importsPath := filepath.Join(outA, "elements/cons/imports.json")
+	importsBody, err := os.ReadFile(importsPath)
+	if err != nil {
+		t.Fatalf("imports.json missing: %v", err)
+	}
+	for _, marker := range []string{
+		`"cmake_target": "prod::prod"`,
+		`"bazel_label": "//elements/prod:prod"`,
+	} {
+		if !strings.Contains(string(importsBody), marker) {
+			t.Errorf("consumer imports.json missing marker %q\n--body--\n%s", marker, importsBody)
+		}
+	}
+
+	// And the producer (no deps) should NOT have an
+	// imports.json — the writer skips it for elements with no
+	// kind:cmake deps.
+	if _, err := os.Stat(filepath.Join(outA, "elements/prod/imports.json")); err == nil {
+		t.Errorf("producer wrongly got an imports.json (has no deps)")
 	}
 }
 
@@ -618,8 +737,8 @@ func TestWriter_FilterRejectsMultipleDeps(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for filter with 2 deps, got nil")
 	}
-	if !strings.Contains(err.Error(), "expected exactly 1 dep") {
-		t.Errorf("error should name the single-dep invariant; got: %v", err)
+	if !strings.Contains(err.Error(), "expected exactly 1 build-dep") {
+		t.Errorf("error should name the single-build-dep invariant; got: %v", err)
 	}
 }
 
@@ -2492,4 +2611,724 @@ func appendDepends(bstPath string, deps []string) error {
 		body = append(body, "- "+d+"\n"...)
 	}
 	return os.WriteFile(bstPath, body, 0o644)
+}
+
+// TestWriter_NonLocalSourceProducesUseRepoBlock asserts the wiring
+// from PR #56: an element with a non-kind:local source flows
+// through writeProjectA + writeProjectB so that:
+//   - tools/sources.json contains one entry per unique source key.
+//   - MODULE.bazel for both projects loads the sources extension
+//     and use_repo's the corresponding "src_<key>" repo.
+//   - rules/sources.bzl is staged into both workspaces.
+func TestWriter_NonLocalSourceProducesUseRepoBlock(t *testing.T) {
+	tmp := t.TempDir()
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: a1b2c3
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	outB := filepath.Join(tmp, "project-B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+
+	// sources.json content: exactly one entry, key matches
+	// sourceKey(rs).
+	wantKey := sourceKey(g.Elements[0].Sources[0])
+	if wantKey == "" {
+		t.Fatal("test setup error: sourceKey returned empty for non-local source")
+	}
+	for _, dir := range []string{outA, outB} {
+		raw, err := os.ReadFile(filepath.Join(dir, "tools/sources.json"))
+		if err != nil {
+			t.Fatalf("%s: read sources.json: %v", dir, err)
+		}
+		if !strings.Contains(string(raw), wantKey) {
+			t.Errorf("%s/tools/sources.json missing key %q:\n%s", dir, wantKey, raw)
+		}
+		if !strings.Contains(string(raw), `"kind": "tar"`) {
+			t.Errorf("%s/tools/sources.json missing kind=tar:\n%s", dir, raw)
+		}
+	}
+
+	// rules/sources.bzl exists in both workspaces.
+	for _, dir := range []string{outA, outB} {
+		if _, err := os.Stat(filepath.Join(dir, "rules/sources.bzl")); err != nil {
+			t.Errorf("%s: rules/sources.bzl missing: %v", dir, err)
+		}
+	}
+
+	// MODULE.bazel loads the extension + use_repo's the key in
+	// both projects.
+	for _, dir := range []string{outA, outB} {
+		raw, err := os.ReadFile(filepath.Join(dir, "MODULE.bazel"))
+		if err != nil {
+			t.Fatalf("%s: read MODULE.bazel: %v", dir, err)
+		}
+		got := string(raw)
+		for _, want := range []string{
+			`use_extension("//rules:sources.bzl", "sources")`,
+			`sources.from_json(path = "//tools:sources.json")`,
+			`"src_` + wantKey + `"`,
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s/MODULE.bazel missing %q:\n%s", dir, want, got)
+			}
+		}
+	}
+}
+
+// TestWriter_LocalOnlyGraphSkipsUseRepoBlock asserts that a graph
+// with only kind:local sources still emits the (empty) sources.json
+// and the rules/sources.bzl file (so adding a non-local source
+// later doesn't require a write-a structure change), but skips the
+// noisy use_extension/use_repo block in MODULE.bazel.
+func TestWriter_LocalOnlyGraphSkipsUseRepoBlock(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"), []byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(sampleCmakeBst), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "rules/sources.bzl")); err != nil {
+		t.Errorf("rules/sources.bzl should still be emitted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "tools/sources.json")); err != nil {
+		t.Errorf("tools/sources.json should still be emitted: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(outA, "MODULE.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "use_extension") {
+		t.Errorf("MODULE.bazel should skip use_extension when no non-local sources:\n%s", raw)
+	}
+}
+
+// TestWriter_SourceCachePopulatesDigestsInJSON asserts the
+// PR #58 wiring: when --source-cache resolves a non-kind:local
+// source to an on-disk tree, write-a packs that tree, computes
+// its CAS Directory digest, and stamps it into sources.json.
+// The repo rule (rules/sources.bzl) reads that digest to build
+// its FUSE-mount symlink.
+func TestWriter_SourceCachePopulatesDigestsInJSON(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Stage a fake source-cache hit at <cache>/<key>/.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	bstSrc := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(bstSrc)
+	if wantKey == "" {
+		t.Fatal("setup: sourceKey empty for non-local source")
+	}
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Element pointing at the matching source (URL/Ref the same so
+	// loadElement's source-cache lookup hits).
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Sources[0].AbsPath == "" {
+		t.Fatal("source-cache hit did not populate AbsPath")
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(outA, "tools/sources.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	str := string(raw)
+	if !strings.Contains(str, `"digest"`) {
+		t.Errorf("sources.json should carry a digest for source-cache-hit entries:\n%s", str)
+	}
+	if !strings.Contains(str, wantKey) {
+		t.Errorf("sources.json missing key %q", wantKey)
+	}
+}
+
+// TestWriter_NoSourceCacheLeavesDigestEmpty asserts the
+// graceful-degradation case: when --source-cache isn't passed
+// (no AbsPath on the resolvedSource), sources.json carries the
+// entry with an empty Digest. The repo rule's empty-tree
+// fallback handles that without breaking load() resolution.
+func TestWriter_NoSourceCacheLeavesDigestEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(outA, "tools/sources.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"digest"`) {
+		t.Errorf("entries without a source-cache hit should omit digest:\n%s", raw)
+	}
+}
+
+// TestWriter_UseFuseSourcesEmitsExtRepoRef asserts the
+// PR #60 wiring: with --use-fuse-sources, a kind:cmake element
+// whose source resolves through --source-cache renders a
+// project-A BUILD that pulls srcs from @src_<key>//:tree
+// instead of staging into elements/<name>/sources/.
+func TestWriter_UseFuseSourcesEmitsExtRepoRef(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Stage a fake source-cache hit for a kind:tar source.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	srcMeta := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(srcMeta)
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Sources[0].AbsPath == "" {
+		t.Fatal("source-cache hit did not populate AbsPath; test setup error")
+	}
+
+	// Toggle the flag for this test, restore on exit.
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/x/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	// FUSE-mode + narrowing emits enumerated per-file labels:
+	// the source-cache fixture has a single CMakeLists.txt, so
+	// it surfaces as @src_<k>//:tree_dir/CMakeLists.txt. No
+	// zero_stubs since nothing's narrowed away (everything's
+	// real in the no-patterns / default case).
+	for _, want := range []string{
+		`@src_` + wantKey + `//:tree_dir/CMakeLists.txt`,
+		`rel="$${src##*tree_dir/}"`,
+		`--use-fuse-sources`,
+		`--source-key="` + wantKey + `"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+
+	// Ensure the on-disk staging directory was NOT created — the
+	// whole point of fuse-sources mode is that bytes live in CAS
+	// and are served via FUSE.
+	if _, err := os.Stat(filepath.Join(outA, "elements/x/sources")); err == nil {
+		t.Errorf("fuse-sources mode should not stage into elements/x/sources/")
+	}
+}
+
+// TestWriter_UseFuseSourcesFallbackForKindLocal asserts that
+// --use-fuse-sources gracefully degrades for kind:local
+// elements (which have no source-key, so can't be served via
+// @src_<key>//): they take the normal staging path.
+func TestWriter_UseFuseSourcesFallbackForKindLocal(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(sampleCmakeBst), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	// Staging dir should exist (kind:local fallback).
+	if _, err := os.Stat(filepath.Join(outA, "elements/hello/sources/CMakeLists.txt")); err != nil {
+		t.Errorf("kind:local should still stage even with --use-fuse-sources: %v", err)
+	}
+	build, err := os.ReadFile(filepath.Join(outA, "elements/hello/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(build), "@src_") {
+		t.Errorf("kind:local BUILD should not reference @src_<key>//: %s", build)
+	}
+}
+
+// TestWriter_ReadPathsPatternsApply asserts the full PR #61
+// flow: a kind:cmake element with a sibling
+// <element>.read-paths.txt drives partitioning of source files
+// into the staged real set vs zero stubs. Checks the rendered
+// project A's BUILD references the zero_files target with
+// exactly the excluded paths.
+func TestWriter_ReadPathsPatternsApply(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "hello-src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "include", "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "include", "api.h"), []byte("// api\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "include", "internal", "private.h"), []byte("// private\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(`kind: cmake
+sources:
+- kind: local
+  path: hello-src
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patternsPath := filepath.Join(tmp, "hello.read-paths.txt")
+	if err := os.WriteFile(patternsPath, []byte(`include CMakeLists.txt
+include include/**/*.h
+exclude include/internal/*
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Patterns == nil {
+		t.Fatal("Patterns not loaded")
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	// CMakeLists.txt + include/api.h should be staged real;
+	// main.c (not in any include rule) and include/internal/private.h
+	// (excluded) should not.
+	for _, want := range []string{"sources/CMakeLists.txt", "sources/include/api.h"} {
+		if _, err := os.Stat(filepath.Join(outA, "elements/hello", want)); err != nil {
+			t.Errorf("expected %s staged real: %v", want, err)
+		}
+	}
+	for _, dontWant := range []string{"sources/main.c", "sources/include/internal/private.h"} {
+		if _, err := os.Stat(filepath.Join(outA, "elements/hello", dontWant)); err == nil {
+			t.Errorf("expected %s NOT staged (zero-stub'd); but it exists", dontWant)
+		}
+	}
+
+	// BUILD.bazel should reference zero_files with both
+	// excluded paths.
+	build, err := os.ReadFile(filepath.Join(outA, "elements/hello/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	for _, want := range []string{
+		`load("//rules:zero_files.bzl", "zero_files")`,
+		`"sources/main.c"`,
+		`"sources/include/internal/private.h"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestWriter_NoReadPathsPatternsStagesEverything asserts the
+// default-when-absent behaviour: with no <element>.read-paths.txt,
+// every source file flows as real (no zero_files).
+func TestWriter_NoReadPathsPatternsStagesEverything(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "hello-src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bstPath := filepath.Join(tmp, "hello.bst")
+	if err := os.WriteFile(bstPath, []byte(`kind: cmake
+sources:
+- kind: local
+  path: hello-src
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bstPath}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatal(err)
+	}
+	build, err := os.ReadFile(filepath.Join(outA, "elements/hello/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(build), "zero_files") {
+		t.Errorf("default-no-patterns should not emit zero_files:\n%s", build)
+	}
+	for _, want := range []string{"sources/CMakeLists.txt", "sources/main.c"} {
+		if _, err := os.Stat(filepath.Join(outA, "elements/hello", want)); err != nil {
+			t.Errorf("expected %s staged real: %v", want, err)
+		}
+	}
+}
+
+// TestWriter_PipelineUseFuseSourcesEmitsExtRepoRef proves PR #62:
+// pipeline-shape kinds (autotools/make/manual/script) honor
+// --use-fuse-sources for single non-kind:local sources, emitting
+// a BUILD that pulls srcs from @src_<key>//:tree (the FUSE
+// path) instead of staging into elements/<name>/sources/.
+func TestWriter_PipelineUseFuseSourcesEmitsExtRepoRef(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Stage a fake source-cache hit for the autotools element's
+	// kind:tar source.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	srcMeta := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(srcMeta)
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "configure"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "x.bst")
+	body := `kind: autotools
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/x/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	for _, want := range []string{
+		`srcs = ["@src_` + wantKey + `//:tree"]`,
+		`rel="$${src##*tree_dir/}"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+	// FUSE mode should not emit the local _sources filegroup.
+	if strings.Contains(got, "x_sources") {
+		t.Errorf("FUSE mode should skip the _sources filegroup:\n%s", got)
+	}
+	// And no on-disk staging.
+	if _, err := os.Stat(filepath.Join(outA, "elements/x/sources")); err == nil {
+		t.Errorf("FUSE mode should not stage sources/ on disk for pipeline kinds")
+	}
+}
+
+// TestWriter_PipelineFuseFallbackForMultiSource proves
+// multi-source pipeline elements take the staging path even
+// with --use-fuse-sources (no repo composition yet for
+// multiple @src_<key>// repos under one element).
+func TestWriter_PipelineFuseFallbackForMultiSource(t *testing.T) {
+	tmp := t.TempDir()
+	cacheDir := filepath.Join(tmp, "src-cache")
+	for _, k := range []struct{ url, ref string }{
+		{"https://example.org/a.tar.gz", "v1"},
+		{"https://example.org/b.tar.gz", "v2"},
+	} {
+		key := sourceKey(resolvedSource{Kind: "tar", URL: k.url, Ref: yaml.Node{Kind: yaml.ScalarNode, Value: k.ref}})
+		root := filepath.Join(cacheDir, key)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bstPath := filepath.Join(tmp, "y.bst")
+	body := `kind: autotools
+sources:
+- kind: tar
+  url: https://example.org/a.tar.gz
+  ref: v1
+- kind: tar
+  url: https://example.org/b.tar.gz
+  ref: v2
+`
+	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/y/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+	if strings.Contains(got, "@src_") {
+		t.Errorf("multi-source pipeline should fall back to staging; BUILD references @src_ unexpectedly:\n%s", got)
+	}
+	if !strings.Contains(got, "y_sources") {
+		t.Errorf("multi-source pipeline should emit local _sources filegroup:\n%s", got)
+	}
+}
+
+// TestWriter_UseFuseSourcesAppliesNarrowing asserts that
+// read-paths narrowing applies in FUSE mode: a kind:cmake
+// element with a sibling <element>.read-paths.txt produces a
+// genrule whose srcs explicitly enumerates only the "real" set
+// as @src_<k>//:tree_dir/<path> labels and adds the
+// :<elem>_zero_stubs target for the zero set. cmake walks
+// SHADOW inside the action — real bytes for real files (CAS-
+// served via the labels), empty bytes for zero stubs. Same
+// content-stability property the staging-mode narrowing has.
+func TestWriter_UseFuseSourcesAppliesNarrowing(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Set up a kind:tar source-cache hit with a small tree:
+	// CMakeLists.txt + main.c + include/api.h + include/internal/private.h.
+	cacheDir := filepath.Join(tmp, "src-cache")
+	srcMeta := resolvedSource{
+		Kind: "tar",
+		URL:  "https://example.org/foo.tar.gz",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "abc123"},
+	}
+	wantKey := sourceKey(srcMeta)
+	srcRoot := filepath.Join(cacheDir, wantKey)
+	if err := os.MkdirAll(filepath.Join(srcRoot, "include", "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nproject(t)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "include", "api.h"), []byte("// api\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "include", "internal", "private.h"), []byte("// private\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bstPath := filepath.Join(tmp, "x.bst")
+	if err := os.WriteFile(bstPath, []byte(`kind: cmake
+sources:
+- kind: tar
+  url: https://example.org/foo.tar.gz
+  ref: abc123
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patternsPath := filepath.Join(tmp, "x.read-paths.txt")
+	if err := os.WriteFile(patternsPath, []byte(`include CMakeLists.txt
+include include/**/*.h
+exclude include/internal/*
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bstPath}, cacheDir)
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+
+	prev := useFuseSourcesGlobal
+	useFuseSourcesGlobal = true
+	t.Cleanup(func() { useFuseSourcesGlobal = prev })
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "project-A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	build, err := os.ReadFile(filepath.Join(outA, "elements/x/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(build)
+
+	// Real set (enumerated as @src_<k>//:tree_dir/<path> labels):
+	for _, want := range []string{
+		`@src_` + wantKey + `//:tree_dir/CMakeLists.txt`,
+		`@src_` + wantKey + `//:tree_dir/include/api.h`,
+		`":x_zero_stubs"`,
+		`load("//rules:zero_files.bzl", "zero_files")`,
+		// zero_files entries are tree_dir/-prefixed so the cmd's
+		// strip pattern recovers the right relative path.
+		`"tree_dir/main.c"`,
+		`"tree_dir/include/internal/private.h"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BUILD missing %q:\n%s", want, got)
+		}
+	}
+
+	// main.c should NOT appear as a real-file label (it's zero-stub'd).
+	if strings.Contains(got, `@src_`+wantKey+`//:tree_dir/main.c`) {
+		t.Errorf("main.c (excluded) should not appear as a real label; got:\n%s", got)
+	}
 }

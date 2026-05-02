@@ -21,7 +21,58 @@ func (cmakeHandler) Kind() string           { return "cmake" }
 func (cmakeHandler) NeedsSources() bool     { return true }
 func (cmakeHandler) HasProjectABuild() bool { return true }
 
+// DefaultReadPathsPatterns returns the cmake-converter default
+// shadow-tree narrowing rules. Per-element <element>.read-paths.txt
+// rules layer on top.
+//
+// Today: empty (no defaults). The patterns mechanism is in place
+// but the cmake defaults aren't tuned yet — empirical narrowing
+// data from the FDSDK reality-check probe will inform what's
+// safe to default-include. Until that lands, every cmake element
+// without an explicit read-paths.txt stages everything as real
+// (the conservative pre-narrowing behaviour); per-element files
+// remain the only narrowing path.
+//
+// Pinning the converter version pins these defaults, so cache-
+// key stability follows the converter release contract.
+func (cmakeHandler) DefaultReadPathsPatterns() *readPathsPatterns {
+	return nil
+}
+
 func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
+	// FUSE-sources mode (--use-fuse-sources): skip on-disk staging
+	// entirely; the per-element BUILD references @src_<key>//:tree
+	// directly. The repo rule (rules/sources.bzl) ctx.symlinks the
+	// file tree from the cas-fuse mount, so the genrule's $(SRCS)
+	// resolves to bazel-bin paths that the kernel serves through
+	// FUSE. Only viable for single-source-no-directory cmake elements
+	// today; multi-source / directory-suffix elements fall back to
+	// the staging path for now (additional repo composition needed).
+	if useFuseSourcesGlobal && !cmakeMultiSource(elem) {
+		k := sourceKey(elem.Sources[0])
+		if k != "" {
+			// Run the same partitionSources walk as the staging
+			// path: the source-cache local tree gives us the
+			// universe; converter defaults + per-element patterns
+			// partition it into RealPaths / ZeroPaths. Real entries
+			// flow as enumerated @src_<k>//:tree_dir/<path> labels;
+			// zero entries flow through the same zero_files starlark
+			// rule the staging path uses. cmake walks SHADOW inside
+			// the genrule action, which matches: real bytes for real
+			// files (streamed from CAS via @src_<k>//), empty bytes
+			// for zero stubs. Narrowing applies; bytes flow only
+			// when the action reads them.
+			if err := partitionSources(elem); err != nil {
+				return fmt.Errorf("partition sources (fuse mode): %w", err)
+			}
+			return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
+				cmakeElementBuildFuse(elem, k))
+		}
+		// Fall through: kind:local sources have no source-key, so
+		// they can't be served via @src_<key>//. They still take
+		// the staging path below.
+	}
+
 	srcStage := filepath.Join(elemPkg, "sources")
 	if err := os.RemoveAll(srcStage); err != nil {
 		return err
@@ -37,6 +88,9 @@ func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 		elem.RealPaths = nil
 		elem.ZeroPaths = nil
 		if err := stageAllSources(elem, srcStage); err != nil {
+			return err
+		}
+		if err := writeCmakeImportsManifest(elem, elemPkg); err != nil {
 			return err
 		}
 		return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), cmakeElementBuild(elem))
@@ -58,7 +112,56 @@ func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 			return fmt.Errorf("stage real source %s: %w", rel, err)
 		}
 	}
+	if err := writeCmakeImportsManifest(elem, elemPkg); err != nil {
+		return err
+	}
 	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), cmakeElementBuild(elem))
+}
+
+// writeCmakeImportsManifest renders an imports.json next to the
+// element's BUILD.bazel when the element has kind:cmake deps.
+// One Element entry per dep, with a single Export per dep
+// following the convention `<dep>::<dep>` → //elements/<dep>:<dep>.
+//
+// This is a best-effort convention bind. Real-world cmake
+// projects whose namespace/target shape diverges from
+// `<elem>::<elem>` won't resolve. A follow-up pass should let
+// convert-element emit per-element exports metadata that
+// write-a stitches in here at action time, replacing the
+// convention guess.
+func writeCmakeImportsManifest(elem *element, elemPkg string) error {
+	deps := cmakeDepBundleLabels(elem)
+	if len(deps) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(`{
+  "version": 1,
+  "elements": [
+`)
+	for i, dep := range deps {
+		if i > 0 {
+			b.WriteString(",\n")
+		}
+		fmt.Fprintf(&b, `    {
+      "name": %q,
+      "exports": [
+        {
+          "cmake_target": %q,
+          "bazel_label": "//elements/%s:%s",
+          "link_paths": ["${_IMPORT_PREFIX}/lib/lib%s.a"]
+        }
+      ]
+    }`, dep.DepName,
+			dep.DepName+"::"+dep.DepName,
+			dep.DepName, dep.DepName,
+			dep.DepName)
+	}
+	b.WriteString(`
+  ]
+}
+`)
+	return writeFile(filepath.Join(elemPkg, "imports.json"), b.String())
 }
 
 // cmakeMultiSource reports whether this cmake element's sources
@@ -107,12 +210,15 @@ filegroup(name = "BUILD_NOT_YET_STAGED", srcs = [])
 // partitionSources walks the element's source tree and decides which
 // paths flow as real files vs zero stubs into project A.
 //
-//   - With no read-set feedback (HasFeedback==false), every file is
-//     real. First-run / no-narrowing shape.
-//   - With feedback, the real set = the feedback set, plus all
-//     CMakeLists.txt files in the source tree (cmake parses the entry
-//     CMakeLists before any trace event fires; auto-including them
-//     keeps cmake configure correct after narrowing).
+//   - With no <element>.read-paths.txt patterns file
+//     (elem.Patterns == nil), every file is real. The conservative
+//     "no narrowing" default; matches pre-#61 behaviour without
+//     opt-in.
+//   - With patterns present, applyReadPathsPatterns partitions the
+//     source-relative path universe per the include / exclude
+//     rules. CMakeLists.txt files always stay real (cmake parses
+//     the entry CMakeLists before any narrowing has a chance to
+//     matter; auto-including them keeps cmake configure correct).
 //
 // Caller (cmakeHandler.RenderA) gates this on the single-source-no-
 // directory case (cmakeMultiSource(elem) == false), so reading
@@ -139,32 +245,33 @@ func partitionSources(elem *element) error {
 	}
 	sort.Strings(universe)
 
-	// Reset to handle re-renders cleanly.
-	elem.RealPaths = nil
-	elem.ZeroPaths = nil
+	// Compose: converter defaults first, per-element override
+	// rules concatenated after. applyReadPathsPatterns evaluates
+	// rules left-to-right so defaults set the conservative
+	// baseline and per-element entries refine.
+	patterns := composeReadPathsPatterns(cmakeHandler{}.DefaultReadPathsPatterns(), elem.Patterns)
+	elem.RealPaths, elem.ZeroPaths = applyReadPathsPatterns(patterns, universe)
+	return nil
+}
 
-	if !elem.HasFeedback {
-		elem.RealPaths = universe
+// composeReadPathsPatterns layers a per-element override file on
+// top of converter defaults. nil + nil → nil (default-no-narrow);
+// nil + b → b; a + nil → a; a + b → concatenated rules with
+// defaults first.
+func composeReadPathsPatterns(defaults, overrides *readPathsPatterns) *readPathsPatterns {
+	if defaults == nil && overrides == nil {
 		return nil
 	}
-
-	real := map[string]struct{}{}
-	for _, p := range elem.ReadSet {
-		real[p] = struct{}{}
+	if defaults == nil {
+		return overrides
 	}
-	for _, p := range universe {
-		if filepath.Base(p) == "CMakeLists.txt" {
-			real[p] = struct{}{}
-		}
+	if overrides == nil {
+		return defaults
 	}
-	for _, p := range universe {
-		if _, ok := real[p]; ok {
-			elem.RealPaths = append(elem.RealPaths, p)
-		} else {
-			elem.ZeroPaths = append(elem.ZeroPaths, p)
-		}
-	}
-	return nil
+	out := &readPathsPatterns{}
+	out.Rules = append(out.Rules, defaults.Rules...)
+	out.Rules = append(out.Rules, overrides.Rules...)
+	return out
 }
 
 func cmakeElementBuild(elem *element) string {
@@ -208,6 +315,16 @@ filegroup(
 )
 `, elem.Name)
 
+	// Cross-cmake-element deps: every kind:cmake dep of this
+	// element exposes a cmake_config_bundle filegroup
+	// (declared at the bottom of its own BUILD); extracting
+	// each into $PREFIX/lib/cmake/<dep>/ at action time makes
+	// `find_package(<Pkg> CONFIG)` resolve against the synth
+	// bundle. Non-cmake deps don't ship a cmake-config bundle
+	// today (Phase 4 typed filegroup work) and are skipped
+	// here.
+	cmakeDepLabels := cmakeDepBundleLabels(elem)
+
 	// Compose the genrule's srcs: real-files filegroup + (when
 	// narrowed) the zero_stubs target. The shadow-merge cmd handles
 	// both sets uniformly: each entry contains "sources/" in its
@@ -216,6 +333,45 @@ filegroup(
 	srcsList := fmt.Sprintf(`":%s_real"`, elem.Name)
 	if len(elem.ZeroPaths) > 0 {
 		srcsList += fmt.Sprintf(`, ":%s_zero_stubs"`, elem.Name)
+	}
+	for _, depLabel := range cmakeDepLabels {
+		srcsList += fmt.Sprintf(`, %q`, depLabel.Label)
+	}
+	if len(cmakeDepLabels) > 0 {
+		// imports.json was rendered at write-a time
+		// alongside this BUILD; stage it into the action so
+		// convert-element's manifest lookup resolves
+		// IMPORTED-target names from the consumer's deps to
+		// the right Bazel labels.
+		srcsList += `, "imports.json"`
+	}
+
+	// Cross-element bundle extraction: every kind:cmake dep's
+	// cmake-config-bundle.tar already carries its full synth-
+	// prefix slice (lib/cmake/<DepPkg>/*.cmake plus zero-byte
+	// IMPORTED_LOCATION stubs and INTERFACE_INCLUDE_DIRECTORIES
+	// directories — produced by synthprefix.Build inside
+	// convert-element). One `tar -xf` per dep into a shared
+	// $PREFIX overlays each slice; cmake's
+	// find_package(<DepPkg> CONFIG) resolves against the
+	// stitched tree and the IMPORTED-target EXISTS checks
+	// pass against the stubs.
+	var depExtract strings.Builder
+	prefixFlag := ""
+	importsFlag := ""
+	if len(cmakeDepLabels) > 0 {
+		depExtract.WriteString(`        PREFIX="$$(mktemp -d)"
+`)
+		for _, dep := range cmakeDepLabels {
+			fmt.Fprintf(&depExtract, `        for tar in $(locations %s); do
+            tar -xf "$$tar" -C "$$PREFIX"
+        done
+`, dep.Label)
+		}
+		prefixFlag = ` \
+            --prefix-dir="$$PREFIX"`
+		importsFlag = ` \
+            --imports-manifest="$(location imports.json)"`
 	}
 
 	fmt.Fprintf(&b, `
@@ -232,19 +388,29 @@ genrule(
         # paths under elements/<name>/sources/) and zero stubs (under
         # bazel-bin/.../sources/) into a fresh shadow dir. Both share
         # a "sources/" segment in their path; strip up to the last one
-        # to recover the source-relative suffix.
+        # to recover the source-relative suffix. Cross-element bundle
+        # tars from kind:cmake deps come in via $(SRCS) too; skip
+        # them here since the dep-extract loop below handles them.
         SHADOW="$$(mktemp -d)"
         for src in $(SRCS); do
+            case "$$src" in
+                *cmake-config-bundle.tar) continue ;;
+                */imports.json) continue ;;
+            esac
             rel="$${src##*sources/}"
             mkdir -p "$$SHADOW/$$(dirname "$$rel")"
             cp -L "$$src" "$$SHADOW/$$rel"
         done
-        BUNDLE_DIR="$$(mktemp -d)"
+        # Stage each kind:cmake dep's synth bundle under $$PREFIX
+        # so find_package(<Pkg> CONFIG) in this consumer's
+        # CMakeLists resolves against it. No-op when the element
+        # has no kind:cmake deps.
+%[3]s        BUNDLE_DIR="$$(mktemp -d)"
         $(location //tools:convert-element) \\
             --source-root="$$SHADOW" \\
             --out-build="$(location BUILD.bazel.out)" \\
             --out-bundle-dir="$$BUNDLE_DIR" \\
-            --out-read-paths="$(location read_paths.json)"
+            --out-read-paths="$(location read_paths.json)"%[4]s%[5]s
         tar -cf "$(location cmake-config-bundle.tar)" -C "$$BUNDLE_DIR" .
     """,
     tools = ["//tools:convert-element"],
@@ -255,9 +421,171 @@ genrule(
 # the typed slices (cmake_config / pkg_config / headers / libs).
 filegroup(
     name = "build_bazel",
-    srcs = [":%[1]s_converted"],
-    output_group = "BUILD.bazel.out",
+    srcs = ["BUILD.bazel.out"],
 )
-`, elem.Name, srcsList)
+
+# Cross-element handle: downstream cmake elements reference this
+# label in their own genrule srcs, which extracts the tar into
+# $PREFIX/lib/cmake/<this>/ at convert-element action time.
+filegroup(
+    name = "cmake_config_bundle",
+    srcs = ["cmake-config-bundle.tar"],
+)
+`, elem.Name, srcsList, depExtract.String(), prefixFlag, importsFlag)
+	return b.String()
+}
+
+// cmakeDepBundleLabel pairs a cross-element dep's name with the
+// Bazel label of its `cmake_config_bundle` filegroup. Used by
+// the cmake handler to stage one cmake-config tar per dep
+// under $PREFIX/lib/cmake/<dep>/ inside the consumer's
+// convert-element action.
+type cmakeDepBundleLabel struct {
+	DepName string
+	Label   string
+}
+
+// cmakeDepBundleLabels returns the cross-element bundle labels
+// the consumer's genrule should stage. Filters to kind:cmake
+// deps (the only kind that emits a cmake-config bundle today);
+// pipeline kinds and filegroup-composition kinds don't ship a
+// bundle and are skipped silently. Order is dep-walk order so
+// the rendered BUILD is deterministic.
+func cmakeDepBundleLabels(elem *element) []cmakeDepBundleLabel {
+	var out []cmakeDepBundleLabel
+	for _, dep := range elem.Deps {
+		if dep == nil || dep.Bst == nil {
+			continue
+		}
+		if dep.Bst.Kind != "cmake" {
+			continue
+		}
+		out = append(out, cmakeDepBundleLabel{
+			DepName: dep.Name,
+			Label:   fmt.Sprintf("//elements/%s:cmake_config_bundle", dep.Name),
+		})
+	}
+	return out
+}
+
+// cmakeElementBuildFuse renders the FUSE-sources variant of the
+// per-element BUILD.bazel: srcs come from @src_<key>//:tree
+// (which the sources extension's repo rule symlinks into the
+// cas-fuse mount), and the genrule's cmd strips up to and
+// including "tree_dir/" — matching the symlink target name
+// the rule (rules/sources.bzl) creates.
+//
+// v1 doesn't emit zero_files in this mode: read-paths narrowing
+// across a CAS-served tree needs additional plumbing
+// (the universe is the FileNodes in the Directory proto, not a
+// glob over an on-disk staging dir). All sources flow as real;
+// the action-cache stability story for FUSE mode is "the
+// Directory digest changes only when the source bytes change",
+// which is already strictly stronger than today's glob().
+func cmakeElementBuildFuse(elem *element, sourceKey string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `# Generated by cmd/write-a (--use-fuse-sources). Do not edit by hand.
+
+package(default_visibility = ["//visibility:public"])
+`)
+	// zero_files target: paths cmake's directory walk sees but
+	// doesn't read. Materialised at action time as zero-length
+	// stubs whose merkle is the empty SHA — the action input
+	// stays content-stable across edits to non-real source files.
+	if len(elem.ZeroPaths) > 0 {
+		fmt.Fprintf(&b, `
+load("//rules:zero_files.bzl", "zero_files")
+
+zero_files(
+    name = "%[1]s_zero_stubs",
+    paths = [
+`, elem.Name)
+		for _, p := range elem.ZeroPaths {
+			fmt.Fprintf(&b, "        %q,\n", "tree_dir/"+p)
+		}
+		fmt.Fprintf(&b, `    ],
+)
+`)
+	}
+
+	// Real-files srcs: enumerate per-file labels into the
+	// @src_<key>// repo (each file reachable as a digest-stable
+	// Bazel label, exports_files'd by the repo rule). When no
+	// patterns narrow the universe, partitionSources puts every
+	// path in RealPaths; when patterns are active, only the
+	// narrowed-real subset lands here and the rest flows through
+	// the zero_stubs target above.
+	srcsList := ""
+	if len(elem.RealPaths) > 0 {
+		// Single-line srcs list with @src_<k>//:tree_dir/<path>
+		// labels. Sorted for determinism (RealPaths is already
+		// sorted by partitionSources).
+		var labels []string
+		for _, p := range elem.RealPaths {
+			labels = append(labels, fmt.Sprintf("%q", "@src_"+sourceKey+"//:tree_dir/"+p))
+		}
+		srcsList = strings.Join(labels, ", ")
+	}
+	if len(elem.ZeroPaths) > 0 {
+		zeroRef := fmt.Sprintf("%q", ":"+elem.Name+"_zero_stubs")
+		if srcsList == "" {
+			srcsList = zeroRef
+		} else {
+			srcsList += ", " + zeroRef
+		}
+	}
+	// Fallback: when the element has no patterns + no source-cache
+	// hit (so partitionSources didn't run / produced nothing),
+	// reach for the opaque :tree filegroup so we still feed
+	// convert-element a non-empty input set. This matches the
+	// pre-narrowing "everything real" default.
+	if srcsList == "" {
+		srcsList = fmt.Sprintf("%q", "@src_"+sourceKey+"//:tree")
+	}
+
+	fmt.Fprintf(&b, `
+genrule(
+    name = "%[1]s_converted",
+    srcs = [%[3]s],
+    outs = [
+        "BUILD.bazel.out",
+        "read_paths.json",
+        "cmake-config-bundle.tar",
+    ],
+    cmd = """
+        # Materialise the narrowed source root inside the action
+        # sandbox: real srcs (CAS-served via @src_<key>//) and
+        # zero stubs (rule-generated empties) both arrive under
+        # path components ending in tree_dir/<rel>. Strip up to
+        # and including the last tree_dir/ to recover the
+        # source-relative suffix.
+        SHADOW="$$(mktemp -d)"
+        for src in $(SRCS); do
+            rel="$${src##*tree_dir/}"
+            mkdir -p "$$SHADOW/$$(dirname "$$rel")"
+            cp -L "$$src" "$$SHADOW/$$rel"
+        done
+        BUNDLE_DIR="$$(mktemp -d)"
+        $(location //tools:convert-element) \\
+            --source-root="$$SHADOW" \\
+            --source-key="%[2]s" \\
+            --out-build="$(location BUILD.bazel.out)" \\
+            --out-bundle-dir="$$BUNDLE_DIR" \\
+            --out-read-paths="$(location read_paths.json)"
+        tar -cf "$(location cmake-config-bundle.tar)" -C "$$BUNDLE_DIR" .
+    """,
+    tools = ["//tools:convert-element"],
+)
+
+filegroup(
+    name = "build_bazel",
+    srcs = ["BUILD.bazel.out"],
+)
+
+filegroup(
+    name = "cmake_config_bundle",
+    srcs = ["cmake-config-bundle.tar"],
+)
+`, elem.Name, sourceKey, srcsList)
 	return b.String()
 }
