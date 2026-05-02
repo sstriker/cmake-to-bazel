@@ -12,10 +12,11 @@ in `docs/whole-project-plan.md`. Three fixtures so far:
 - **`manual-greet/`** — single `kind: manual` element with a
   trivial install pipeline. Phase 3 acceptance gate
   (`make e2e-meta-manual`).
+- **`make-greet/`** — single `kind: make` element with a Makefile
+  that builds a tiny binary and a `make install` target. Phase 3
+  sibling-kind acceptance gate (`make e2e-meta-make`).
 
-## hello-world fixture
-
-## Layout
+## hello-world fixture (Phase 1)
 
 ```
 testdata/meta-project/
@@ -26,7 +27,7 @@ testdata/meta-project/
     include/hello.h
 ```
 
-## Pipeline (driven by `scripts/meta-hello.sh`)
+`scripts/meta-hello.sh` drives the pipeline:
 
 1. `cmd/write-a` parses `hello-world.bst`, resolves the `kind: local`
    source, and renders **two** workspaces:
@@ -136,3 +137,25 @@ tarball output shape.
    and asserts:
    - `usr/share/greeting.txt` exists.
    - Its content is `"Hello from kind:manual!"`.
+
+## make-greet fixture (Phase 3 sibling)
+
+```
+testdata/meta-project/make-greet/
+  greet.bst                   # kind:make + kind:local source; no config:
+  sources/
+    Makefile                  # all: greet ; install: install -D greet ...
+    greet.c                   # prints "greet from kind:make"
+```
+
+Smallest viable `kind: make` fixture: an empty `config:` block
+exercises the kind's defaults (`make` for build, `make -j1
+DESTDIR="%{install-root}" install` for install). The Makefile's
+`all` target compiles `greet.c` via `cc`; `install` places the
+binary at `%{install-root}%{prefix}/bin/greet`.
+
+`scripts/meta-make.sh` drives the same render → bazel-build →
+extract pipeline as `meta-manual.sh`, then runs the extracted
+`usr/bin/greet` binary and asserts its output is
+`"greet from kind:make"`. End-to-end proof that kind:make's
+defaults compose correctly with the shared pipelineHandler shape.

@@ -383,6 +383,123 @@ config:
 	}
 }
 
+func TestWriter_MakeElementShape(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile"), []byte("all:\n\t@echo build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "build-it.bst")
+	bstBody := `kind: make
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+`
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Bst.Kind != "make" {
+		t.Fatalf("Kind = %q, want make", g.Elements[0].Bst.Kind)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/build-it/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, marker := range []string{
+		// Pipeline shape.
+		`name = "build-it_install"`,
+		`outs = ["install_tree.tar"]`,
+		`for src in $(SRCS)`,
+		// kind:make defaults render verbatim — no per-element
+		// build/install commands in the .bst, so the handler's
+		// pipelineDefaults filled them in.
+		"# === build ===",
+		"        make",
+		"# === install ===",
+		`make -j1 DESTDIR="$$INSTALL_ROOT" install`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("kind:make BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// configure-commands and strip-commands have no defaults and no
+	// .bst override → no headers for those phases.
+	if strings.Contains(got, "# === configure ===") {
+		t.Errorf("kind:make BUILD has unexpected configure phase header:\n%s", got)
+	}
+	if strings.Contains(got, "# === strip ===") {
+		t.Errorf("kind:make BUILD has unexpected strip phase header:\n%s", got)
+	}
+}
+
+func TestWriter_MakeElementOverridesDefaults(t *testing.T) {
+	// .bst-supplied build-commands should replace kind:make's
+	// default `make`. Verify the override path.
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile"), []byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "make-override.bst")
+	bstBody := `kind: make
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+config:
+  build-commands:
+  - make custom-target
+`
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/make-override/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	if !strings.Contains(got, "make custom-target") {
+		t.Errorf("override build-commands not honored:\n%s", got)
+	}
+	if strings.Contains(got, "        make\n") {
+		t.Errorf("override build-commands didn't replace default `make`:\n%s", got)
+	}
+	// install-commands has no .bst override → kind:make's default
+	// install line still renders.
+	if !strings.Contains(got, `make -j1 DESTDIR="$$INSTALL_ROOT" install`) {
+		t.Errorf("install default missing despite no .bst override:\n%s", got)
+	}
+}
+
 // appendDepends adds a depends: list to an existing .bst file.
 func appendDepends(bstPath string, deps []string) error {
 	body, err := os.ReadFile(bstPath)
