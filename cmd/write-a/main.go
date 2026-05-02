@@ -996,12 +996,22 @@ func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	// Preserve mode (chiefly +x). autotools projects ship a
+	// committed `configure` script + helper shell scripts; if
+	// staging strips +x, the genrule's `if [ -x ./configure ]`
+	// guard falls through to autoreconf -ivf which fails
+	// without configure.ac. Same hazard for arbitrary kind:local
+	// shell scripts (bootstrap, autogen.sh, etc.).
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
