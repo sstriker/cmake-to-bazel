@@ -4,14 +4,17 @@ package main
 //
 // Every pipeline-kind element's phase commands (configure / build /
 // install / strip) may reference variables via %{name} syntax. The
-// values come from three layers, lowest precedence first:
+// values come from four layers, lowest precedence first:
 //
-//  1. Project defaults (BuildStream's projectconfig.yaml baseline,
-//     plus FDSDK's prefix=/usr overlay). Hardcoded in projectVars
-//     below; project.conf parsing is a follow-up.
-//  2. Per-kind defaults (the kind handler's own variable bindings,
+//  1. BuildStream stock defaults (projectVars below) — mirror
+//     buildstream/data/projectconfig.yaml. Hardcoded because they're
+//     fixed by the BuildStream library version, not the project.
+//  2. Project-level overrides — the meta-project's project.conf
+//     `variables:` block (loaded by project_conf.go). Empty when no
+//     project.conf is found on the path-up from each .bst.
+//  3. Per-kind defaults (the kind handler's own variable bindings,
 //     e.g. kind:make defines %{make-args} / %{make-install-args}).
-//  3. Per-element variables: block in the .bst.
+//  4. Per-element variables: block in the .bst.
 //
 // References resolve recursively until fixed-point; cycles among
 // non-runtime variables are an error. Two variables — %{install-root}
@@ -45,45 +48,50 @@ var runtimeSentinels = map[string]string{
 	"build-root":   "$$BUILD_ROOT",
 }
 
-// projectVars is the BuildStream variable baseline every element
-// inherits unless it overrides individually. Values mirror
-// buildstream/data/projectconfig.yaml plus FDSDK's prefix=/usr
-// overlay (BuildStream's stock prefix is /usr/local; FDSDK's
-// project.conf overrides it). Project.conf parsing is a follow-up;
-// hardcoding here lets pipeline kinds reference the canonical
-// variable surface immediately.
+// projectVars is the BuildStream stock variable baseline every
+// element inherits unless a higher layer overrides individually.
+// Values mirror buildstream/data/projectconfig.yaml exactly: prefix
+// is /usr/local (FDSDK overrides this to /usr in its project.conf,
+// which now layers on top via loadProjectConfFromBst). bindir /
+// sbindir / libexecdir / libdir derive off %{exec_prefix} (not
+// %{prefix} directly) so an exec_prefix override propagates the
+// same way it does in BuildStream proper.
 var projectVars = map[string]string{
-	"prefix":         "/usr",
+	"prefix":         "/usr/local",
 	"exec_prefix":    "%{prefix}",
 	"lib":            "lib",
-	"bindir":         "%{prefix}/bin",
-	"sbindir":        "%{prefix}/sbin",
-	"libexecdir":     "%{prefix}/libexec",
-	"libdir":         "%{prefix}/%{lib}",
+	"bindir":         "%{exec_prefix}/bin",
+	"sbindir":        "%{exec_prefix}/sbin",
+	"libexecdir":     "%{exec_prefix}/libexec",
+	"libdir":         "%{exec_prefix}/%{lib}",
+	"debugdir":       "%{libdir}/debug",
 	"includedir":     "%{prefix}/include",
 	"datadir":        "%{prefix}/share",
-	"mandir":         "%{prefix}/share/man",
-	"infodir":        "%{prefix}/share/info",
-	"localedir":      "%{prefix}/share/locale",
-	"docdir":         "%{prefix}/share/doc",
+	"docdir":         "%{datadir}/doc",
+	"infodir":        "%{datadir}/info",
+	"mandir":         "%{datadir}/man",
 	"sysconfdir":     "/etc",
 	"localstatedir":  "/var",
-	"sharedstatedir": "/var",
+	"sharedstatedir": "%{prefix}/com",
 }
 
-// resolveVars composes the layered variable map (project defaults
-// then kind defaults then element overrides) and expands every
-// reference until fixed-point. Returns name->resolved-value, with
-// runtime sentinels preserved as %{install-root} / %{build-root}
-// so substituteCmd can swap them for shell-var references at the
-// command-rendering stage.
+// resolveVars composes the layered variable map (BuildStream stock
+// < project.conf < kind defaults < element overrides) and expands
+// every reference until fixed-point. Returns name->resolved-value,
+// with runtime sentinels preserved as %{install-root} /
+// %{build-root} so substituteCmd can swap them for shell-var
+// references at the command-rendering stage.
 //
-// Cycles among non-sentinel variables produce an error naming one
-// participant. References to undefined variables produce an error
-// naming the missing variable.
-func resolveVars(kindVars, elemVars map[string]string) (map[string]string, error) {
+// Any of projectConf / kindVars / elemVars may be nil — a nil layer
+// contributes no overrides. Cycles among non-sentinel variables
+// produce an error naming one participant. References to undefined
+// variables produce an error naming the missing variable.
+func resolveVars(projectConf, kindVars, elemVars map[string]string) (map[string]string, error) {
 	raw := map[string]string{}
 	for k, v := range projectVars {
+		raw[k] = v
+	}
+	for k, v := range projectConf {
 		raw[k] = v
 	}
 	for k, v := range kindVars {

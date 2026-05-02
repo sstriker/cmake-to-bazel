@@ -15,10 +15,16 @@ in `docs/whole-project-plan.md`. Five fixtures so far:
 - **`make-greet/`** — single `kind: make` element with a Makefile
   that builds a tiny binary and a `make install` target. Phase 3
   sibling-kind acceptance gate (`make e2e-meta-make`).
-- **`vars-greet/`** — single `kind: manual` element that overrides
-  `%{prefix}` and defines a custom `%{greeting-dir}` composing onto
-  derived defaults. Variable-resolver acceptance gate
+- **`vars-greet/`** — single `kind: manual` element exercising the
+  full layered variable scope: `project.conf` sets `prefix=/usr`,
+  the `.bst`'s `variables:` block overrides it again to
+  `/opt/freedesktop-sdk`, and a custom `%{greeting-dir}` composes
+  onto derived defaults. Variable-resolver acceptance gate
   (`make e2e-meta-vars`).
+
+Each fixture that uses the variable resolver also ships a tiny
+`project.conf` overriding `prefix=/usr` (matches FDSDK's
+project-conf overlay of BuildStream stock `/usr/local`).
 
 ## hello-world fixture (Phase 1)
 

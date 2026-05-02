@@ -353,8 +353,10 @@ config:
 		`name = "greet_install"`,
 		`outs = ["install_tree.tar"]`,
 		// %{install-root} stays as the runtime sentinel ($$INSTALL_ROOT);
-		// %{prefix} expands to /usr at codegen time (default project var).
-		`$$INSTALL_ROOT/usr/share/greeting.txt`,
+		// %{prefix} expands to /usr/local at codegen time (BuildStream
+		// stock default — this fixture has no project.conf to override
+		// it the way the real meta-project fixtures do).
+		`$$INSTALL_ROOT/usr/local/share/greeting.txt`,
 		// Source-staging shadow merge same as cmake handler.
 		`for src in $(SRCS)`,
 		// install-commands phase header rendered.
@@ -599,6 +601,63 @@ config:
 	}
 	if !strings.Contains(err.Error(), "nonexistent-prefix") {
 		t.Errorf("error should name the missing variable; got: %v", err)
+	}
+}
+
+// TestWriter_ProjectConfVarsFlowThroughLoadGraph is the end-to-end
+// project.conf integration: a .bst with no element variables, but a
+// project.conf alongside that overrides prefix. loadGraph attaches
+// the project.conf's variables: to every element via
+// element.ProjectConfVars, and pipelineHandler.RenderA layers it
+// into the resolver — so the rendered cmd reflects the override.
+func TestWriter_ProjectConfVarsFlowThroughLoadGraph(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte("variables:\n  prefix: /opt/projwide\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "x.bst")
+	bstBody := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+config:
+  install-commands:
+  - install -D x.txt %{install-root}%{datadir}/x.txt
+`
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if got, want := g.Elements[0].ProjectConfVars["prefix"], "/opt/projwide"; got != want {
+		t.Errorf("ProjectConfVars[prefix]: got %q, want %q", got, want)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/x/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	want := `install -D x.txt $$INSTALL_ROOT/opt/projwide/share/x.txt`
+	if !strings.Contains(got, want) {
+		t.Errorf("project.conf prefix override didn't reach rendered cmd; want substring %q in:\n%s", want, got)
 	}
 }
 
