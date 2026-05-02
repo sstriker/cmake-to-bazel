@@ -2066,6 +2066,50 @@ config:
 	}
 }
 
+// TestWriter_CollectManifestHandler covers kind:collect_manifest:
+// no-source element with build-depends, project-A genrule emits
+// an empty install_tree.tar, project-B placeholder stays.
+func TestWriter_CollectManifestHandler(t *testing.T) {
+	tmp := t.TempDir()
+	parent := makeCmakeBst(t, tmp, "parent")
+	bst := filepath.Join(tmp, "manifest.bst")
+	if err := os.WriteFile(bst,
+		[]byte("kind: collect_manifest\nbuild-depends:\n- parent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{parent, bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.ByName["manifest"].Bst.Kind != "collect_manifest" {
+		t.Fatalf("Kind = %q, want collect_manifest", g.ByName["manifest"].Bst.Kind)
+	}
+	if len(g.ByName["manifest"].Deps) != 1 {
+		t.Errorf("build-depends should produce one Dep edge; got Deps=%v", g.ByName["manifest"].Deps)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/manifest/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, marker := range []string{
+		`name = "manifest_install"`,
+		`outs = ["install_tree.tar"]`,
+		`EMPTY="$$(mktemp -d)"`,
+		// No source staging for collect_manifest.
+		`srcs = []`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("collect_manifest BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+}
+
 // TestWriter_PathQualifiedDeps covers the FDSDK-shape: element
 // names key into the graph by their path relative to the project's
 // element-root, so a depends-list reference like

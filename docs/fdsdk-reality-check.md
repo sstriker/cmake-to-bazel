@@ -311,9 +311,12 @@ Two real gaps remain:
 - ~~**`kind: script` plugin (53 elements)**~~ — closed.
   `pipelineHandler` registration; `pipelineCfg` gains a `Commands`
   field that maps onto the install-commands slot when set
-  (kind:script's flat `config: commands:` list). Subgraph probes
-  now advance past kind:script to the next gap (`kind:collect_manifest`,
-  18 elements; FDSDK-specific manifest-collector).
+  (kind:script's flat `config: commands:` list).
+- ~~**`kind: collect_manifest` (18 elements)**~~ — closed (v1
+  placeholder). No-op handler that emits an empty install_tree.tar;
+  build-depends still flow through the graph correctly. Real
+  manifest collection (walking dep trees + emitting JSON) lands
+  alongside the typed-filegroup wrapper for pipeline-kind outputs.
 - **Project.conf-supplied per-host variables** — `bootstrap_build_arch`,
   `host_triplet`, `gcc_triplet`, ... defined in FDSDK's
   `include/_private/arch.yml` but only inside `(?):` branches
