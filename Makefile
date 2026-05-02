@@ -235,6 +235,15 @@ e2e-meta-autotools: check-tools converter
 e2e-meta-autotools-native: check-tools converter
 	scripts/meta-autotools-native.sh
 
+# Multi-target trace-driven kind:autotools acceptance gate.
+# Drives the autotools-multitarget fixture (multiple cc rules,
+# multiple install dests, per-target CFLAGS) end-to-end through
+# bazel build; asserts BUILD.bazel.out has the four expected
+# rules and install-mapping.json captures all install dests
+# with rule cross-references.
+e2e-meta-autotools-multitarget: check-tools converter
+	scripts/meta-autotools-multitarget.sh
+
 # Conditional-lowering acceptance gate. Single kind:manual element
 # (testdata/meta-project/conditional-greet/) whose .bst declares
 # (?): per-arch variable overrides. write-a lowers them into a

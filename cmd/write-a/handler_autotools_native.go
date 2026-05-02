@@ -157,7 +157,11 @@ func autotoolsTraceExtension(hasImports bool) *pipelineExtension {
 	ext := &pipelineExtension{
 		WrapPipelineCmds: wrapAutotoolsPipelineCmds,
 		AppendCmd:        autotoolsConverterStep(hasImports),
-		ExtraOuts:        []string{"BUILD.bazel.out", "make-db.txt"},
+		ExtraOuts: []string{
+			"BUILD.bazel.out",
+			"make-db.txt",
+			"install-mapping.json",
+		},
 		ExtraTools: []string{
 			"//tools:build-tracer",
 			"//tools:convert-element-autotools",
@@ -240,5 +244,6 @@ func autotoolsConverterStep(hasImports bool) string {
         $(location //tools:convert-element-autotools) \
             --trace="$$AUTOTOOLS_TRACE" \
             --make-db="$(location make-db.txt)" \
+            --out-install-mapping="$(location install-mapping.json)" \
             --out-build="$(location BUILD.bazel.out)"%s`, importsFlag)
 }

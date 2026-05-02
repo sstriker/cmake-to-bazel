@@ -46,6 +46,7 @@ func main() {
 	outBuild := flag.String("out-build", "", "path to write BUILD.bazel.out")
 	importsPath := flag.String("imports-manifest", "", "optional: path to imports.json mapping cross-element link libraries to Bazel labels")
 	makeDBPath := flag.String("make-db", "", "optional: path to `make -np` dump for post-build Makefile structural hints (target names, recipes, variables)")
+	outMapping := flag.String("out-install-mapping", "", "optional: path to write install-mapping.json sidecar (source → install-tree dest map; consumed by Phase 4 typed-filegroup work)")
 	flag.Parse()
 
 	if *tracePath == "" || *outBuild == "" {
@@ -84,11 +85,39 @@ func main() {
 			makeDB = parseMakeDB(body)
 		}
 	}
-	_ = makeDB // recorded but not yet consumed by emit; see follow-ups.
-
 	events := parseTrace(traceFile)
 	graph := correlate(events)
 	out := emitBuild(graph, imports)
+
+	// Install-mapping sidecar: when --out-install-mapping is
+	// set AND we have a make-db, parse the install: recipe and
+	// emit the source → install-tree-dest map. Today's make-db
+	// integration; future work cross-validates trace flags
+	// against per-target Makefile vars (slice (2)) and uses
+	// Makefile target names where the trace's `-o` differs
+	// (slice (3)).
+	if *outMapping != "" && makeDB != nil {
+		mapping := buildInstallMapping(makeDB, buildRules(graph, imports))
+		body, err := renderInstallMappingJSON(mapping)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "convert-element-autotools: render install-mapping: %v\n", err)
+			os.Exit(1)
+		}
+		if body == nil {
+			// No install mapping to record — write an empty
+			// version-1 envelope so the Bazel output exists
+			// (genrule must produce every declared output).
+			body = []byte(`{"version":1,"mappings":[]}` + "\n")
+		}
+		if err := os.MkdirAll(filepath.Dir(*outMapping), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "convert-element-autotools: mkdir mapping: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(*outMapping, body, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "convert-element-autotools: write mapping: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	if err := os.MkdirAll(filepath.Dir(*outBuild), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "convert-element-autotools: mkdir: %v\n", err)
