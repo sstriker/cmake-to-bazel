@@ -120,6 +120,49 @@ In rough priority order:
    targets (`docs:`, `dist:`) might surface other typed
    slices. The current parser only walks `install:`.
 
+## libtool coverage
+
+Autotools projects often drive compile / link through
+[GNU libtool](https://www.gnu.org/software/libtool/), which
+wraps `cc` / `ar` calls to add platform-specific shared-lib
+plumbing. A libtool-driven recipe looks like:
+
+```
+libtool --mode=compile cc -c foo.c -o foo.lo
+libtool --mode=link cc foo.lo -o libfoo.la
+```
+
+Under the hood, libtool invokes `cc` and `ar` in two passes
+(PIC + non-PIC compile; static archive + shared object). The
+trace captures those underlying invocations, so the existing
+correlation pipeline handles libtool builds without
+libtool-specific code:
+
+- Underlying `cc -c -fPIC ... -o .libs/foo.o` and
+  `cc -c ... -o foo.o` both surface as compile events. The
+  correlator's `objToCompile` keys by `filepath.Base`, so
+  `.libs/foo.o` and `foo.o` collide; last-write-wins keeps
+  whichever finished last.
+- `ar rcs .libs/libfoo.a foo.o` surfaces as an archive event.
+  `stripLibPrefixSuffix` recovers `foo` as the cc_library
+  rule name regardless of the `.libs/` prefix.
+- libtool-specific text wrappers (`.lo`, `.la`) aren't
+  recognized by our `.o` / `.a` extension predicates and get
+  silently skipped — which is correct: they're metadata files,
+  not real build artifacts.
+
+Edge case: when libtool's PIC and non-PIC compiles use
+different copts beyond `-fPIC`, last-write-wins on
+`objToCompile` loses one set. A libtool-aware fixture would
+exercise this; current fixtures use single-pass cc. Parked
+as a future enhancement (separate per-pass tracking, or
+splitting the PIC/non-PIC pair into separate cc_libraries).
+
+Bottom line: **libtool builds work today via the existing
+trace pipeline**; richer libtool semantics (per-pass copts,
+.la metadata for cross-element dep resolution) deferred
+until a fixture surfaces the gap.
+
 ## Standard autotools project as test bed
 
 The hand-rolled `testdata/meta-project/autotools-multitarget/`
