@@ -223,18 +223,19 @@ func mergeMappings(dst, src *yaml.Node) {
 }
 
 // stripUnhandledDirectives removes BuildStream YAML directives
-// write-a doesn't yet evaluate from the tree. For v1 that's:
-//
-//   - (?): per-arch conditional blocks. Recorded on the punch list
-//     as item #9 (lowers to project-B select()); for now we drop
-//     them so yaml.v3's struct-decode doesn't fail on the unhandled
-//     shape.
-//   - (>): / (<): / (=): list-merge directives. Not yet observed in
-//     the curated probes; stripping them keeps decode robust if
-//     they show up in real FDSDK content.
+// write-a doesn't evaluate inline from the tree. For v1 that's
+// the list-merge directives (>): / (<): / (=): — not yet observed
+// in the curated probes; stripping them keeps decode robust if
+// they show up in real FDSDK content.
 //
 // (@): is not in this list — composeYAML resolves it before this
-// pass runs.
+// pass runs. (?): is not in this list either: variable-level (?):
+// blocks are extracted into structured form by
+// extractConditionalsFromVariables in conditional.go (so the
+// pipeline handler can lower them to project-B select() over
+// @platforms//cpu:*); callers must run that extraction before
+// the struct-decode step or yaml.v3 will choke on the unhandled
+// list-of-mapping shape.
 func stripUnhandledDirectives(node *yaml.Node) {
 	if node == nil {
 		return
@@ -262,7 +263,7 @@ func stripUnhandledDirectives(node *yaml.Node) {
 
 func isUnhandledDirective(k string) bool {
 	switch k {
-	case "(?)", "(>)", "(<)", "(=)":
+	case "(>)", "(<)", "(=)":
 		return true
 	default:
 		return false

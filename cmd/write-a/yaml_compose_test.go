@@ -150,20 +150,23 @@ func TestCompose_ProjectRootRelativePaths(t *testing.T) {
 	}
 }
 
-// TestCompose_ConditionalDirectiveStripped covers the (?): strip
-// pass: the v1 composer drops (?): per-arch conditional blocks
-// before the struct-decode step so the unhandled shape doesn't
-// fail unmarshal. (Lowering them to project-B select() lands
-// alongside the multi-arch fixture that forces it — punch list #9.)
-func TestCompose_ConditionalDirectiveStripped(t *testing.T) {
+// TestCompose_ConditionalDirectivePreserved covers the composer's
+// hand-off contract for (?): blocks: composer leaves them in the
+// tree (the variables-level extractor in conditional.go pulls them
+// out before the struct-decode step). The (>): / (<): / (=):
+// list-merge directives are still stripped — those aren't yet
+// observed in curated probes and stripping them keeps decode
+// robust.
+func TestCompose_ConditionalDirectivePreserved(t *testing.T) {
 	tmp := t.TempDir()
 	main := filepath.Join(tmp, "main.yml")
-	if err := os.WriteFile(main, []byte(`prefix: /usr
-(?):
-- target_arch == "x86_64":
-    arch_var: x86_64
-- target_arch == "aarch64":
-    arch_var: aarch64
+	if err := os.WriteFile(main, []byte(`variables:
+  prefix: /usr
+  (?):
+  - target_arch == "x86_64":
+      arch_var: x86_64
+  - target_arch == "aarch64":
+      arch_var: aarch64
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -171,15 +174,14 @@ func TestCompose_ConditionalDirectiveStripped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadAndComposeYAML: %v", err)
 	}
-	var got map[string]string
-	if err := doc.Decode(&got); err != nil {
-		t.Fatalf("decode: %v (the (?) block should have been stripped)", err)
+	// Composer-level: (?): survives — extractor in conditional.go
+	// is the v1 consumer.
+	branches, err := extractConditionalsFromVariables(doc)
+	if err != nil {
+		t.Fatalf("extractConditionalsFromVariables: %v", err)
 	}
-	if got["prefix"] != "/usr" {
-		t.Errorf("prefix not retained after (?) strip; got %v", got)
-	}
-	if _, has := got["arch_var"]; has {
-		t.Errorf("(?): branches shouldn't be applied at write-a time (lower to project-B select); got %v", got)
+	if len(branches) != 2 {
+		t.Errorf("expected 2 branches, got %d", len(branches))
 	}
 }
 

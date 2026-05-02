@@ -162,6 +162,29 @@ func resolveVars(projectConf, kindVars, elemVars map[string]string) (map[string]
 	return resolved, nil
 }
 
+// resolveVarsForArch composes the same four-layer scope as
+// resolveVars, plus the matching (?): branch from each conditional
+// set when one applies to arch. Project-level conditionals layer
+// below element-level — element conditionals win on conflict, same
+// precedence the unconditional layers follow.
+//
+// arch is one of the supportedArches strings ("x86_64",
+// "aarch64", ...). Branches whose Arches don't include arch
+// contribute nothing for this resolution.
+func resolveVarsForArch(projectConf, kindVars, elemVars map[string]string,
+	arch string,
+	projectConditionals, elemConditionals []conditionalBranch) (map[string]string, error) {
+	pc := projectConf
+	if branch := branchForArch(projectConditionals, arch); branch != nil {
+		pc = applyConditional(pc, branch)
+	}
+	ev := elemVars
+	if branch := branchForArch(elemConditionals, arch); branch != nil {
+		ev = applyConditional(ev, branch)
+	}
+	return resolveVars(pc, kindVars, ev)
+}
+
 // expandRefs replaces every %{name} reference in s with the result
 // of lookup(name). The first lookup error short-circuits and
 // surfaces from expandRefs; subsequent matches return the original

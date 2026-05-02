@@ -1230,6 +1230,137 @@ public:
 	}
 }
 
+// TestWriter_ConditionalLowersToSelect covers (?): per-arch
+// variable overrides being lowered to a project-B
+// `cmd = select({...})` in the rendered BUILD. The element's
+// install-commands references %{arch-marker} which is set per arch
+// via the (?): block; the rendered cmd has one branch per
+// supported arch with the per-arch resolved path.
+func TestWriter_ConditionalLowersToSelect(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "g.txt"), []byte("g\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+variables:
+  arch-marker: 'unknown'
+  (?):
+  - target_arch == "x86_64":
+      arch-marker: 'x86_64'
+  - target_arch == "aarch64":
+      arch-marker: 'aarch64'
+
+config:
+  install-commands:
+  - install -D g.txt %{install-root}%{datadir}/%{arch-marker}.txt
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if len(g.Elements[0].Bst.Conditionals) != 2 {
+		t.Errorf("expected 2 (?): branches on bstFile, got %d", len(g.Elements[0].Bst.Conditionals))
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(outA, "elements/elem/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(rendered)
+	for _, marker := range []string{
+		// cmd attribute is a select() over @platforms//cpu:*.
+		"cmd = select({",
+		`"@platforms//cpu:x86_64":`,
+		`"@platforms//cpu:aarch64":`,
+		// Per-arch resolved paths flow through.
+		"$$INSTALL_ROOT/usr/local/share/x86_64.txt",
+		"$$INSTALL_ROOT/usr/local/share/aarch64.txt",
+		// Unsupported / no-matching-branch arches resolve to the
+		// unconditional `arch-marker: 'unknown'` default.
+		"$$INSTALL_ROOT/usr/local/share/unknown.txt",
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("rendered BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// Element with no arch-affecting variable references should
+	// still render single-string cmd. Verified separately by the
+	// existing meta-* gates and the dedup-collapse test below.
+}
+
+// TestWriter_ConditionalDedupsIdenticalArches covers the dedup-
+// collapse path: when all per-arch resolutions produce the same
+// rendered cmd (the (?): block existed but didn't actually affect
+// any cmd-referenced variable), write-a renders single-string cmd
+// rather than a select() with N identical branches.
+func TestWriter_ConditionalDedupsIdenticalArches(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "g.txt"), []byte("g\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	// (?): sets a `unused-flag` variable per arch, but no command
+	// references it. The dedup-collapse should emit single-string cmd.
+	body := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+variables:
+  (?):
+  - target_arch == "x86_64":
+      unused-flag: 'x86_64'
+  - target_arch == "aarch64":
+      unused-flag: 'aarch64'
+
+config:
+  install-commands:
+  - install -D g.txt %{install-root}%{datadir}/g.txt
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst})
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(outA, "elements/elem/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(rendered)
+	if strings.Contains(got, "select(") {
+		t.Errorf("identical-across-arches resolution should emit single-string cmd, not select(); got:\n%s", got)
+	}
+}
+
 // TestWriter_KindLocalPathProjectRootRelative covers the FDSDK
 // shape: a kind:local source's `path:` resolves against the
 // project root (the directory containing project.conf), not
