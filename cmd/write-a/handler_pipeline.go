@@ -61,11 +61,18 @@ func (h pipelineHandler) HasProjectABuild() bool { return true }
 // element shares. Pointer-to-slice so the renderer can distinguish
 // "not set in .bst, fall back to handler defaults" (nil) from
 // "explicitly cleared in .bst" (non-nil empty slice).
+//
+// Commands is the kind:script shape: a single flat list of
+// shell commands run in order. When set, it takes the place of
+// install-commands (and the other phases stay empty); kind:script
+// is the only kind that reads it. Mutually exclusive with the
+// per-phase fields per BuildStream's contract.
 type pipelineCfg struct {
 	ConfigureCommands *[]string `yaml:"configure-commands"`
 	BuildCommands     *[]string `yaml:"build-commands"`
 	InstallCommands   *[]string `yaml:"install-commands"`
 	StripCommands     *[]string `yaml:"strip-commands"`
+	Commands          *[]string `yaml:"commands"`
 }
 
 // pipelinePhases is a set of resolved phase command lists ready for
@@ -90,6 +97,13 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 	rawBuild := mergeWithDefault(cfg.BuildCommands, h.defaults.Build)
 	rawInstall := mergeWithDefault(cfg.InstallCommands, h.defaults.Install)
 	rawStrip := mergeWithDefault(cfg.StripCommands, h.defaults.Strip)
+	// kind:script's flat config:commands list — when present, it
+	// takes the install-commands slot (other phases stay empty).
+	// BuildStream's script plugin doesn't have configure / build /
+	// strip phases.
+	if cfg.Commands != nil {
+		rawInstall = *cfg.Commands
+	}
 
 	hasConditionals := len(elem.ProjectConfConditionals) > 0 || len(elem.Bst.Conditionals) > 0
 

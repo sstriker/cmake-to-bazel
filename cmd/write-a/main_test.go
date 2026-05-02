@@ -1620,6 +1620,72 @@ config:
 	}
 }
 
+// TestWriter_ScriptElementShape covers kind:script: a single
+// flat config:commands list maps onto pipelineHandler's install-
+// commands slot. configure / build / strip phases stay empty;
+// the rendered cmd has only the install phase.
+func TestWriter_ScriptElementShape(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "g.txt"), []byte("g\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: script
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+config:
+  commands:
+  - mkdir -p %{install-root}%{datadir}/scripts
+  - install -D g.txt %{install-root}%{datadir}/scripts/g.txt
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Bst.Kind != "script" {
+		t.Fatalf("Kind = %q, want script", g.Elements[0].Bst.Kind)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body2, err := os.ReadFile(filepath.Join(outA, "elements/elem/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body2)
+	for _, marker := range []string{
+		// install phase rendered; configure/build/strip not.
+		"# === install ===",
+		"mkdir -p $$INSTALL_ROOT/usr/local/share/scripts",
+		"install -D g.txt $$INSTALL_ROOT/usr/local/share/scripts/g.txt",
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("kind:script BUILD missing %q\n--body--\n%s", marker, got)
+		}
+	}
+	for _, banned := range []string{
+		"# === configure ===",
+		"# === build ===",
+		"# === strip ===",
+	} {
+		if strings.Contains(got, banned) {
+			t.Errorf("kind:script BUILD shouldn't have phase %q\n--body--\n%s", banned, got)
+		}
+	}
+}
+
 // TestWriter_PathQualifiedDeps covers the FDSDK-shape: element
 // names key into the graph by their path relative to the project's
 // element-root, so a depends-list reference like
