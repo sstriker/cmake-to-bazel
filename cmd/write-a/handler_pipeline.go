@@ -90,6 +90,24 @@ type pipelineExtension struct {
 	ExtraOuts        []string
 	ExtraTools       []string
 
+	// DepLabels lists Bazel labels (typically per-file
+	// outputs of upstream `<dep>_install` genrules, e.g.
+	// `//elements/foo:install_tree.tar`) added to the
+	// install genrule's srcs. Used by kinds whose build
+	// pipeline consumes upstream install trees — autotools'
+	// configure / make need dep .h / .a from upstream
+	// elements.
+	DepLabels []string
+
+	// DepExtractCmd is a shell snippet spliced into the
+	// install genrule's cmd, between the source-tree staging
+	// step and the user-provided pipeline cmds. Sets up
+	// $DEP_PREFIX with extracted dep install trees and
+	// exports build flags (CPPFLAGS / LDFLAGS for autotools)
+	// so the pipeline can find the deps' headers and
+	// libraries. No-op when DepLabels is empty.
+	DepExtractCmd string
+
 	// SiblingRules, when non-nil, is invoked at render time
 	// with the element name and returns extra rule
 	// declarations appended after the main `<elem>_install`
@@ -583,6 +601,9 @@ package(default_visibility = ["//visibility:public"])
 		for _, extra := range ext.ExtraSrcs {
 			srcsAttr += fmt.Sprintf(", %q", extra)
 		}
+		for _, label := range ext.DepLabels {
+			srcsAttr += fmt.Sprintf(", %q", label)
+		}
 	}
 	srcsAttr += "]"
 
@@ -813,6 +834,16 @@ func renderPipelineCmdBody(p pipelinePhases, fuseSources bool, ext *pipelineExte
 		appendCmd = "\n" + ext.AppendCmd + "\n"
 	}
 
+	// Optional shell snippet that runs after BUILD_ROOT setup
+	// but before the user-provided pipeline cmds. Used by
+	// kinds whose pipeline consumes upstream install trees
+	// (autotools native: extracts dep tars under $DEP_PREFIX,
+	// exports CPPFLAGS / LDFLAGS).
+	depExtractCmd := ""
+	if ext != nil && ext.DepExtractCmd != "" {
+		depExtractCmd = "\n" + ext.DepExtractCmd + "\n"
+	}
+
 	return fmt.Sprintf(`"""
         # Snapshot the exec root before any cd. Bazel resolves
         # location expressions to exec-root-relative paths, and the
@@ -826,12 +857,14 @@ func renderPipelineCmdBody(p pipelinePhases, fuseSources bool, ext *pipelineExte
         BUILD_ROOT="$$(mktemp -d)"
         for src in $(SRCS); do
             # Skip extension-supplied non-source files (imports.json
-            # for the autotools native render path, etc.). Their
-            # access happens via $$(location <name>) below; copying
-            # them into BUILD_ROOT would leak into the staged
-            # source tree.
+            # for the autotools native render path; install_tree.tar
+            # entries from upstream deps, handled by DepExtractCmd
+            # below). Their access happens via $$(location <name>) /
+            # $(SRCS) iteration in extension snippets; copying them
+            # into BUILD_ROOT would leak into the staged source tree.
             case "$$src" in
                 */imports.json) continue ;;
+                */install_tree.tar) continue ;;
             esac
             rel="$${src##*%[3]s}"
             mkdir -p "$$BUILD_ROOT/$$(dirname "$$rel")"
@@ -847,12 +880,22 @@ func renderPipelineCmdBody(p pipelinePhases, fuseSources bool, ext *pipelineExte
         #   $$BUILD_ROOT   — the staged source dir (set above).
         export INSTALL_ROOT="$$(mktemp -d)"
         export PATH=/usr/local/bin:/usr/bin:/bin
-%[2]s
+%[2]s%[5]s
 %[1]s%[4]s
         # Tar the install tree as the element's primary output.
+        # Deterministic options give byte-stable archives across
+        # builds with byte-identical content: --mtime=@0 zeros out
+        # mtimes; --sort=name removes filesystem-readdir-order
+        # variation; --owner=0 --group=0 --numeric-owner removes
+        # uid/gid drift across machines. Without these, an
+        # upstream's tar would churn even when the install
+        # contents didn't change, breaking downstream cache-narrow
+        # transitivity (the consumer's _install action would
+        # cache-miss on the changed tar input).
         cd "$$EXEC_ROOT"
-        tar -cf "$(location install_tree.tar)" -C "$$INSTALL_ROOT" .
-    """`, cmds, renderEnvExports(p.Env), stripFrom, appendCmd)
+        tar --mtime=@0 --sort=name --owner=0 --group=0 --numeric-owner \
+            -cf "$(location install_tree.tar)" -C "$$INSTALL_ROOT" .
+    """`, cmds, renderEnvExports(p.Env), stripFrom, appendCmd, depExtractCmd)
 }
 
 // renderEnvExports emits one `export K=V` line per env entry,

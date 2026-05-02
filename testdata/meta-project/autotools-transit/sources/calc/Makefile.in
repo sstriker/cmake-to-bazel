@@ -1,0 +1,22 @@
+CC ?= cc
+CFLAGS = @CFLAGS@
+CPPFLAGS = @CPPFLAGS@
+LDFLAGS = @LDFLAGS@
+prefix = @PREFIX@
+bindir = $(prefix)/bin
+
+all: calc
+
+calc.o: calc.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c calc.c -o calc.o
+
+calc: calc.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o calc calc.o -lmathlib
+
+install: all
+	install -D -m 0755 calc $(DESTDIR)$(bindir)/calc
+
+clean:
+	rm -f *.o calc
+
+.PHONY: all install clean

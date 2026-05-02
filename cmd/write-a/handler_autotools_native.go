@@ -84,7 +84,7 @@ func autotoolsPipelineHandlerForElement(elem *element, elemPkg string) (pipeline
 	if err != nil {
 		return pipelineHandler{}, err
 	}
-	h.extension = autotoolsTraceExtension(hasImports)
+	h.extension = autotoolsTraceExtension(elem, hasImports)
 	return h, nil
 }
 
@@ -168,7 +168,7 @@ func writeAutotoolsImportsManifest(elem *element, elemPkg string) (bool, error) 
 // converter. For autotools the build IS the introspection,
 // so we can't avoid re-running the build — but we can cache
 // the conversion narrowly.
-func autotoolsTraceExtension(hasImports bool) *pipelineExtension {
+func autotoolsTraceExtension(elem *element, hasImports bool) *pipelineExtension {
 	ext := &pipelineExtension{
 		WrapPipelineCmds: wrapAutotoolsPipelineCmds,
 		AppendCmd:        autotoolsMakeDBStep(),
@@ -183,15 +183,53 @@ func autotoolsTraceExtension(hasImports bool) *pipelineExtension {
 			return autotoolsConvertedSiblingRule(elemName, hasImports)
 		},
 	}
-	if hasImports {
-		// imports.json is consumed by `<elem>_converted`,
-		// not `<elem>_install` — but write-a generates it
-		// at render time and stages it in the element pkg.
-		// The sibling rule's srcs reference it via the
-		// package-relative path, so _install doesn't need
-		// it as a srcs entry.
+	// Wire dep install_tree.tar outputs into the consumer's
+	// _install srcs so configure / make can find dep .h / .a.
+	// Scoped to autotools-kind deps for now: pipeline kinds
+	// install under the same /usr/{include,lib} convention,
+	// so a single $DEP_PREFIX with CPPFLAGS / LDFLAGS overlay
+	// is a clean, kind-uniform extraction. Other dep kinds
+	// (kind:cmake, kind:manual) likely need similar wiring;
+	// expand when those fixtures land.
+	var depLabels []string
+	for _, dep := range elem.Deps {
+		if dep == nil || dep.Bst.Kind != "autotools" {
+			continue
+		}
+		depLabels = append(depLabels, fmt.Sprintf("//elements/%s:install_tree.tar", dep.Name))
+	}
+	if len(depLabels) > 0 {
+		ext.DepLabels = depLabels
+		ext.DepExtractCmd = autotoolsDepExtractCmd()
 	}
 	return ext
+}
+
+// autotoolsDepExtractCmd is the shell snippet that stages
+// upstream autotools deps' install trees. The pipeline cmd
+// template's source-staging loop already skips
+// `*/install_tree.tar` entries; this loop picks them up
+// and untars each into a shared $DEP_PREFIX. CPPFLAGS /
+// LDFLAGS prepend the conventional /usr layout (matches
+// every fixture's `./configure --prefix=/usr`).
+//
+// The `${VAR:-}` fallback preserves any user-set values
+// from the .bst's environment block.
+func autotoolsDepExtractCmd() string {
+	return `        # Stage upstream autotools deps' install trees under
+        # a shared $$DEP_PREFIX. The for-src loop above skipped
+        # */install_tree.tar entries; here we iterate $(SRCS)
+        # again to pick them up. CPPFLAGS / LDFLAGS prepend the
+        # /usr layout each dep installed with so the build's
+        # configure / make can find the dep's .h / .a.
+        DEP_PREFIX="$$(mktemp -d)"
+        for src in $(SRCS); do
+            case "$$src" in
+                */install_tree.tar) tar -xf "$$src" -C "$$DEP_PREFIX" ;;
+            esac
+        done
+        export CPPFLAGS="-I$$DEP_PREFIX/usr/include $${CPPFLAGS:-}"
+        export LDFLAGS="-L$$DEP_PREFIX/usr/lib $${LDFLAGS:-}"`
 }
 
 // wrapAutotoolsPipelineCmds rewrites the resolved

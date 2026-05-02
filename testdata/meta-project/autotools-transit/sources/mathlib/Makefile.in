@@ -1,0 +1,22 @@
+CC ?= cc
+CFLAGS = @CFLAGS@
+prefix = @PREFIX@
+libdir = $(prefix)/lib
+includedir = $(prefix)/include
+
+all: libmathlib.a
+
+mathlib.o: mathlib.c mathlib.h
+	$(CC) $(CFLAGS) -c mathlib.c -o mathlib.o
+
+libmathlib.a: mathlib.o
+	ar rcsD libmathlib.a mathlib.o
+
+install: all
+	install -D -m 0644 libmathlib.a $(DESTDIR)$(libdir)/libmathlib.a
+	install -D -m 0644 mathlib.h $(DESTDIR)$(includedir)/mathlib.h
+
+clean:
+	rm -f *.o *.a
+
+.PHONY: all install clean
