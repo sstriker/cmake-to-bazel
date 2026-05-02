@@ -296,6 +296,12 @@ type element struct {
 type graph struct {
 	Elements []*element
 	ByName   map[string]*element
+	// Options is the project.conf options: declarations the
+	// graph carries through to writeProjectA so the //options
+	// package renders alongside per-element packages. Empty
+	// when no project.conf was found or no options: block was
+	// declared.
+	Options map[string]bstOption
 }
 
 // stringList is a flag.Value for repeated flags (--bst foo.bst --bst bar.bst).
@@ -407,6 +413,7 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load project.conf: %w", err)
 		}
+		g.Options = info.Options
 	}
 	for _, p := range bstPaths {
 		// Element-level (@): includes resolve against the project
@@ -668,7 +675,7 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 	// here is just `module(...)` and bazel resolves nothing from
 	// the registry beyond its built-in implicit deps (platforms,
 	// rules_license, rules_java, etc., for toolchain bookkeeping).
-	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelA()); err != nil {
+	if err := writeFile(filepath.Join(outDir, "MODULE.bazel"), moduleBazelA(g)); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(outDir, "BUILD.bazel"), "# project A root; per-element packages live under elements/<name>/.\n"); err != nil {
@@ -703,6 +710,14 @@ func writeProjectA(g *graph, outDir, convertBin string) error {
 	}
 	if err := writeFile(filepath.Join(outDir, "tools", "BUILD.bazel"), `exports_files(["convert-element"])`+"\n"); err != nil {
 		return err
+	}
+
+	// Render //options/BUILD.bazel from project.conf options:
+	// declarations. Skipped when no options exist (the package
+	// stays absent rather than empty so downstream selects()
+	// don't reference dangling labels).
+	if err := writeOptionsPackage(outDir, g.Options); err != nil {
+		return fmt.Errorf("render //options package: %w", err)
 	}
 
 	for _, elem := range g.Elements {
@@ -751,15 +766,27 @@ func writeProjectB(g *graph, outDir string) error {
 	return nil
 }
 
-func moduleBazelA() string {
-	return `module(name = "meta_project_a", version = "0.0.0")
+func moduleBazelA(g *graph) string {
+	var b strings.Builder
+	b.WriteString(`module(name = "meta_project_a", version = "0.0.0")
 
 # Project A only runs genrules (one per element invoking the
-# per-kind translator). It declares no bazel_dep — bazel pulls in
-# its standard implicit modules (platforms / rules_license /
-# rules_java / etc.) for toolchain bookkeeping; nothing else is
-# needed.
-`
+# per-kind translator). It declares the minimum bazel_deps the
+# rendered tree actually loads:
+`)
+	if len(g.Options) > 0 {
+		b.WriteString(`#   - bazel_skylib for the string_flag rule the //options
+#     package declares (one rule per project.conf options:
+#     entry).
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+`)
+	} else {
+		b.WriteString(`# (No bazel_deps — only genrules; bazel's standard implicit
+# modules (platforms / rules_license / rules_java / etc.) cover
+# toolchain bookkeeping.)
+`)
+	}
+	return b.String()
 }
 
 // moduleBazelB declares rules_cc so project A's converted
