@@ -1,0 +1,143 @@
+#!/bin/sh
+# fdsdk-reality-check.sh — probes write-a against real freedesktop-sdk
+# content and reports which gap each curated element hits first.
+#
+# This is research / triage, not an acceptance gate: success criteria
+# is "exits cleanly with a per-element status report"; a regression in
+# any individual element doesn't fail the script. As features land in
+# write-a, prior failures should disappear from the report.
+#
+# Usage:
+#   FDSDK_DIR=/path/to/fdsdk-clone scripts/fdsdk-reality-check.sh
+#
+# If FDSDK_DIR is unset, the script tries /tmp/fdsdk; if that doesn't
+# exist either it prints the clone command and exits 0 (the gap survey
+# is documented in docs/fdsdk-reality-check.md, so a fresh checkout
+# isn't required to read the findings).
+#
+# See docs/fdsdk-reality-check.md for the corresponding gap analysis.
+
+set -eu
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+
+FDSDK_DIR="${FDSDK_DIR:-/tmp/fdsdk}"
+if [ ! -d "$FDSDK_DIR/elements" ]; then
+    cat <<EOF
+fdsdk-reality-check: FDSDK clone not found at $FDSDK_DIR.
+
+To run the probe:
+    git clone --depth=1 https://gitlab.com/freedesktop-sdk/freedesktop-sdk \
+        /tmp/fdsdk
+    FDSDK_DIR=/tmp/fdsdk scripts/fdsdk-reality-check.sh
+
+The findings from the most recent survey (without re-running) live
+in docs/fdsdk-reality-check.md.
+EOF
+    exit 0
+fi
+
+bin_dir="$repo_root/build/bin"
+mkdir -p "$bin_dir"
+make converter >/dev/null 2>&1
+CGO_ENABLED=0 go build -o "$bin_dir/write-a" ./cmd/write-a
+
+work_dir="$(mktemp -d)"
+trap "rm -rf '$work_dir'" EXIT
+
+# Curated probe set: each entry exercises one or more bullet points
+# from docs/fdsdk-reality-check.md. The probe runs against the .bst in
+# isolation (no FDSDK project.conf), so the first failure surfaces
+# whichever loader / handler gap matches.
+probes="
+elements/components/bzip2.bst         | kind:stack — path-qualified deps + project.conf includes
+elements/components/boot-keys-prod.bst | kind:import — multi-source element
+elements/components/expat.bst         | kind:cmake — public: block + kind:git_repo source
+elements/components/aom.bst           | kind:cmake — (?) arch conditional
+elements/bootstrap/bzip2.bst          | kind:manual — element-level (@) include + build-depends + junction-targeted dep
+elements/components/tar.bst           | kind:autotools — (@) include + build-depends + path-qualified deps
+"
+
+ok=0
+fail=0
+report=""
+
+# Each probe runs against an isolated copy of the .bst (no FDSDK
+# project.conf alongside) so the first failure surfaces the per-
+# element gap rather than always tripping on project.conf's (@):
+# composition directive (which is its own punch-list item, surveyed
+# separately below). kind:local sources resolve relative to the
+# .bst's directory, so a copy-in-isolation run can't fetch real
+# source paths — but every probe trips on parsing or graph
+# resolution before it would consult sources.
+while IFS='|' read -r path desc; do
+    path=$(echo "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    desc=$(echo "$desc" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -z "$path" ] && continue
+    src="$FDSDK_DIR/$path"
+    if [ ! -f "$src" ]; then
+        report="$report\n  SKIP    $path  (not found in this FDSDK checkout)"
+        continue
+    fi
+    elem_dir="$work_dir/probe-$(basename "$path" .bst)"
+    mkdir -p "$elem_dir"
+    cp "$src" "$elem_dir/$(basename "$path")"
+    out_a="$elem_dir/A"
+    out_b="$elem_dir/B"
+    err=$("$bin_dir/write-a" \
+        --bst "$elem_dir/$(basename "$path")" \
+        --out "$out_a" \
+        --out-b "$out_b" \
+        --convert-element "$bin_dir/convert-element" 2>&1 >/dev/null) || true
+    if [ -z "$err" ]; then
+        ok=$((ok+1))
+        report="$report\n  OK      $path"
+        report="$report\n          $desc"
+    else
+        fail=$((fail+1))
+        first_err=$(echo "$err" | head -1)
+        report="$report\n  FAIL    $path"
+        report="$report\n          $desc"
+        report="$report\n          → $first_err"
+    fi
+done <<EOF
+$probes
+EOF
+
+# Separately probe the project.conf parser against FDSDK's actual
+# project.conf. This is its own gap — the (@): composition
+# directive appears at the project-conf level too — and it gates
+# every in-place run against a real FDSDK checkout.
+project_conf_err=""
+if [ -f "$FDSDK_DIR/project.conf" ]; then
+    project_test_dir="$work_dir/project-conf-probe"
+    mkdir -p "$project_test_dir"
+    cp "$FDSDK_DIR/project.conf" "$project_test_dir/project.conf"
+    cat > "$project_test_dir/probe.bst" <<'BST_EOF'
+kind: import
+sources:
+- kind: local
+  path: ./
+BST_EOF
+    project_conf_err=$("$bin_dir/write-a" \
+        --bst "$project_test_dir/probe.bst" \
+        --out "$project_test_dir/A" \
+        --out-b "$project_test_dir/B" \
+        --convert-element "$bin_dir/convert-element" 2>&1 >/dev/null) || true
+fi
+
+total=$((ok+fail))
+printf "fdsdk-reality-check: %d/%d isolated-element probes succeeded\n\n" "$ok" "$total"
+printf "%b\n" "$report"
+echo
+echo "Project.conf probe (in-place against FDSDK's real project.conf):"
+if [ -z "$project_conf_err" ]; then
+    echo "  OK      project.conf"
+else
+    first_err=$(echo "$project_conf_err" | head -1)
+    echo "  FAIL    project.conf"
+    echo "          → $first_err"
+fi
+echo
+echo "See docs/fdsdk-reality-check.md for the prioritized punch list."

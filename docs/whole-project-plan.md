@@ -418,6 +418,20 @@ project B succeeds. Document remaining deltas in
 `docs/fidelity-known-deltas.md`. After this, the gate moves to
 the full FDSDK graph; the old orchestrator code can be deleted.
 
+The first reality check against real FDSDK
+(`docs/fdsdk-reality-check.md`, runnable via
+`make fdsdk-reality-check`) catalogs the loader / cross-element
+resolution / composition-directive gaps a Phase-4 attempt hits
+today. The smallest unblocker chain is `build-depends` /
+`runtime-depends` parsing → path-qualified element resolution →
+multi-source elements + `public:` tolerance + per-source
+`directory:`. After those three the survey re-runs from the
+variable-resolver side; the next forcing function is `(@):`
+composition (a YAML pre-processor at write-a's loader), and the
+architectural piece — `(?):` conditionals lowering to project-B
+Starlark `select()` over `@platforms` — lands once a multi-arch
+fixture forces it.
+
 ## Out of scope (explicitly)
 
 - **Replacing every element kind's plugin with a fine-grained

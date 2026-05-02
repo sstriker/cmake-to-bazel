@@ -2,6 +2,7 @@
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
         e2e-meta-hello e2e-meta-stack e2e-meta-manual e2e-meta-make e2e-meta-vars \
         e2e-meta-compose e2e-meta-filter e2e-meta-import e2e-meta-autotools \
+        fdsdk-reality-check \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
 
@@ -180,6 +181,14 @@ e2e-meta-import: check-tools converter
 # resolver under the project.conf prefix override.
 e2e-meta-autotools: check-tools converter
 	scripts/meta-autotools.sh
+
+# FDSDK reality check. Probes write-a against curated real
+# freedesktop-sdk elements and reports which loader / handler gap
+# each one hits first. Research / triage, not a gate — see
+# docs/fdsdk-reality-check.md for the prioritized punch list.
+# Set FDSDK_DIR=/path/to/clone (or use the default /tmp/fdsdk).
+fdsdk-reality-check:
+	scripts/fdsdk-reality-check.sh
 
 # M5 downstream-build acceptance gate. Requires bazel/bazelisk on PATH
 # in addition to the standard cmake/ninja/bwrap; if absent the test
