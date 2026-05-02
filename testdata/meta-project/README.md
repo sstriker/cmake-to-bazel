@@ -1,7 +1,7 @@
 # Meta-project test fixtures
 
 End-to-end fixtures for the Bazel-as-orchestrator shape described
-in `docs/whole-project-plan.md`. Three fixtures so far:
+in `docs/whole-project-plan.md`. Five fixtures so far:
 
 - **`hello-world.bst`** + **`sources/hello-world/`** — single cmake
   element. Phase 1 acceptance gate (`make e2e-meta-hello`).
@@ -15,6 +15,10 @@ in `docs/whole-project-plan.md`. Three fixtures so far:
 - **`make-greet/`** — single `kind: make` element with a Makefile
   that builds a tiny binary and a `make install` target. Phase 3
   sibling-kind acceptance gate (`make e2e-meta-make`).
+- **`vars-greet/`** — single `kind: manual` element that overrides
+  `%{prefix}` and defines a custom `%{greeting-dir}` composing onto
+  derived defaults. Variable-resolver acceptance gate
+  (`make e2e-meta-vars`).
 
 ## hello-world fixture (Phase 1)
 
@@ -159,3 +163,38 @@ extract pipeline as `meta-manual.sh`, then runs the extracted
 `usr/bin/greet` binary and asserts its output is
 `"greet from kind:make"`. End-to-end proof that kind:make's
 defaults compose correctly with the shared pipelineHandler shape.
+
+## vars-greet fixture (variable resolver)
+
+```
+testdata/meta-project/vars-greet/
+  greet.bst                   # kind:manual; variables: { prefix, greeting-dir }
+  sources/greeting.txt        # "Hello from a custom prefix!"
+```
+
+Exercises the variable resolver (`cmd/write-a/variables.go`) end-
+to-end. The `.bst`'s `variables:` block:
+
+- Overrides `%{prefix}` from the project default `/usr` to
+  `/opt/freedesktop-sdk`. Every derived default (`%{datadir}`,
+  `%{libdir}`, `%{bindir}`, ...) follows the override automatically
+  via the resolver's recursive expansion.
+- Defines a fresh user variable `%{greeting-dir}` whose RHS
+  references `%{datadir}` — so `%{greeting-dir}` resolves to
+  `/opt/freedesktop-sdk/share/greetings` purely through layered
+  expansion.
+
+The single `install-commands` line writes the staged
+`greeting.txt` to `%{install-root}%{greeting-dir}/hello.txt`. After
+resolution, the rendered genrule cmd reads:
+
+```
+install -D greeting.txt $INSTALL_ROOT/opt/freedesktop-sdk/share/greetings/hello.txt
+```
+
+`scripts/meta-vars.sh` drives the same render → bazel-build →
+extract pipeline as the other Phase 3 gates, plus extra render-
+phase grep checks asserting no `%{...}` reference leaks through
+unsubstituted (a typo'd variable in a `.bst` would surface as a
+`variable %q referenced but not defined` error from
+`cmd/write-a` rather than a silent literal in the rendered BUILD).

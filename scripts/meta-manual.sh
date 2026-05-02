@@ -64,7 +64,7 @@ done
 # the substituted variable references the handler emits.
 for marker in 'name = "greet_install"' \
               '# === install ===' \
-              '$$INSTALL_ROOT$$PREFIX/share/greeting.txt' \
+              '$$INSTALL_ROOT/usr/share/greeting.txt' \
               'outs = ["install_tree.tar"]'; do
     if ! grep -qF "$marker" "$A/elements/greet/BUILD.bazel"; then
         echo "meta-manual: project A greet BUILD missing marker: $marker" >&2
