@@ -30,7 +30,7 @@ and path-qualified element resolution all engage):
 | Element | Kind | First failure | Punch list |
 |---|---|---|---|
 | `components/bzip2.bst` | stack | dep `public-stacks/runtime-minimal` not in graph | single-element-load |
-| `components/boot-keys-prod.bst` | import | kind:local path resolves bst-dir-relative; FDSDK declares them project-root-relative | #11 |
+| `components/boot-keys-prod.bst` | import | kind:local source files genuinely absent from FDSDK's checkout (production keys are generated/supplied separately) | fixture-level |
 | `components/expat.bst` | cmake | dep `public-stacks/runtime-minimal` not in graph | single-element-load |
 | `components/aom.bst` | cmake | dep `public-stacks/runtime-minimal` not in graph | single-element-load |
 | `bootstrap/bzip2.bst` | manual | dep `bootstrap/gnu-config` not in graph | single-element-load |
@@ -221,21 +221,19 @@ resolver, and emit per-arch values into the rendered project-B
 BUILD via `select(...)`. The genrule cmd references the selected
 value through a make-var bound to the select.
 
-### 11. kind:local path resolution (project-root vs bst-dir relative)
+### 11. kind:local path resolution (project-root vs bst-dir relative) ✓ done
 
-`bstSource.Path` for `kind: local` is currently resolved relative
-to the .bst file's directory. Real BuildStream resolves them
-project-root-relative — boot-keys-prod.bst at
-`elements/components/boot-keys-prod.bst` declares
-`path: files/boot-keys/PK.key`, which BuildStream resolves to
-`<project-root>/files/boot-keys/PK.key`, not
-`<project-root>/elements/components/files/boot-keys/PK.key`.
+`loadElement` now resolves kind:local `path:` against the project
+root (`includeBase` — the directory containing project.conf) when
+present, falling back to the .bst's own directory only when no
+project.conf was found. Matches BuildStream's kind:local plugin
+contract: "the contents of a directory rooted at the project."
 
-Fix shape: when a project.conf is found, resolve kind:local paths
-against `info.ProjectRoot` rather than `bstDir`. When no
-project.conf is found, fall back to bst-dir-relative (the
-existing-fixture shape). Surfaced empirically by the in-place
-boot-keys-prod probe.
+Existing self-contained fixtures (no project.conf, or project.conf
+co-located with the .bst) are unaffected — bstDir == projectRoot
+in those layouts. The change is observable when a .bst lives in a
+deeper subdirectory than the kind:local source it references —
+the FDSDK shape that boot-keys-prod hit.
 
 ### 10. project.conf `name`, `element-path`, `aliases:` handling
 
@@ -276,24 +274,20 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-Items #1, #2, #3, #4, #5, #6, #7, and #8 are closed. The synthetic
-multi-element probe exercises every closed item end-to-end (the
-new addition: kind:git_repo source metadata flowing through the
-resolver) and passes today. The in-place probes have moved past
-every parse-/resolution-/source-kind-side gap; five of six now
-fail at "dep X not in graph", which is a probe-shape limitation
-(single-element load) rather than a write-a gap.
+Items #1 through #8 and #11 are closed. The synthetic multi-
+element probe exercises every closed item end-to-end and passes
+today. Every in-place probe whose first failure was previously a
+write-a gap (parse / resolution / source-kind / kind:local path)
+now reaches either the dep-resolution phase ("dep X not in
+graph") or, in boot-keys-prod's case, an FDSDK-checkout-level
+issue (production keys aren't shipped in the repo).
 
-The remaining write-a gaps are:
+The remaining items are non-write-a / architectural:
 
-- **kind:local path resolution (#11)** — project-root-relative
-  paths. Surfaced empirically by `boot-keys-prod.bst`; FDSDK
-  declares many kind:local sources with project-root-relative
-  paths but write-a resolves them bst-dir-relative. Small fix.
-- **multi-element load** — the probe shape is the obstacle, not
-  write-a. Loading a real FDSDK subgraph (e.g. all elements in a
-  given dep closure) is the next natural reality-check step;
-  doesn't need a code change to write-a to exercise.
+- **multi-element load probe shape** — the script loads only the
+  named .bst, not its transitive dep tree. Single-element loads
+  naturally trip on missing deps. A subgraph-loading probe would
+  surface what's actually next; doesn't need a write-a change.
 - **`(?):` conditional → project-B `select()`** (#9) — the
   architectural piece. Lowers per-arch variable overrides into
   Bazel-native multi-arch resolution rather than baking write-a's

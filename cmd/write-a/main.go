@@ -491,7 +491,6 @@ func loadElement(bstPath, includeBase string) (*element, error) {
 		if len(f.Sources) == 0 {
 			return nil, fmt.Errorf("%s: kind %q requires at least one source; .bst declares none", bstPath, f.Kind)
 		}
-		bstDir := filepath.Dir(bstPath)
 		for _, src := range f.Sources {
 			rs := resolvedSource{
 				Kind:      src.Kind,
@@ -501,13 +500,16 @@ func loadElement(bstPath, includeBase string) (*element, error) {
 				Track:     src.Track,
 			}
 			if src.Kind == "local" {
-				// kind:local path is interpreted relative to the .bst
-				// dir if it isn't already absolute (matches BuildStream
-				// semantics). Project-root-relative resolution for
-				// kind:local — the FDSDK shape — is punch list #11.
+				// kind:local paths resolve project-root-relative.
+				// includeBase is the project root (or the .bst's
+				// own directory when no project.conf was found —
+				// covers self-contained fixtures). Absolute paths
+				// pass through unchanged. Matches BuildStream's
+				// kind:local semantics: "the contents of a
+				// directory rooted at the project."
 				resolved := src.Path
 				if !filepath.IsAbs(resolved) {
-					resolved = filepath.Join(bstDir, resolved)
+					resolved = filepath.Join(includeBase, resolved)
 				}
 				abs, err := filepath.Abs(resolved)
 				if err != nil {
