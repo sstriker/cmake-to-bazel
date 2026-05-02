@@ -44,6 +44,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -301,47 +302,57 @@ var staticDispatchVars = map[string]string{
 	"bootstrap_build_arch": "x86_64",
 }
 
-// foldStaticConditionals partitions branches into target_arch-
-// keyed (returned unchanged for select() lowering) and others
-// (statically evaluated against staticVars; matching branches'
-// overrides folded into vars). Returns the filtered branch list
-// + the augmented vars map.
+// foldStaticConditionals partitions branches into:
+//
+//   - **target_arch-keyed** — survive in the returned slice for
+//     the pipeline-handler's @platforms//cpu:* select() lowering.
+//   - **option-typed** (varname is a key in optionTyped) — survive
+//     in the returned slice for the pipeline-handler's
+//     //options:<opt>_<val> select() lowering.
+//   - **other** — statically evaluated against staticVars at
+//     graph-load time; matching branches' overrides fold into
+//     the variable map. Branches whose varname isn't in staticVars
+//     also survive in the returned slice (the pipeline handler
+//     skips them; effectively no-op until a value space is
+//     declared).
 //
 // Branches with empty Varname (unrecognized expression) survive
 // unchanged in the returned slice — the pipeline handler skips
 // them, but they're available for a future expression-evaluator
 // extension.
-func foldStaticConditionals(vars map[string]string, branches []conditionalBranch, staticVars map[string]string) (map[string]string, []conditionalBranch) {
+func foldStaticConditionals(vars map[string]string, branches []conditionalBranch, staticVars map[string]string, optionTyped map[string]bool) (map[string]string, []conditionalBranch) {
 	out := map[string]string{}
 	for k, v := range vars {
 		out[k] = v
 	}
 	var remaining []conditionalBranch
 	for _, b := range branches {
-		switch b.Varname {
-		case "target_arch", "":
+		// target_arch + option-typed survive for pipeline-handler
+		// select() lowering — the static-fold can't represent
+		// dynamic Bazel-side dispatch.
+		if b.Varname == "target_arch" || b.Varname == "" || optionTyped[b.Varname] {
 			remaining = append(remaining, b)
-		default:
-			val, ok := staticVars[b.Varname]
-			if !ok {
-				// Unknown dispatch variable — preserve the branch
-				// (caller skips); nothing to fold.
-				remaining = append(remaining, b)
-				continue
-			}
-			matches := false
-			for _, a := range b.Arches {
-				if a == val {
-					matches = true
-					break
-				}
-			}
-			if !matches {
-				continue
-			}
-			// Fold the matching branch's overrides into vars.
-			out = applyConditional(out, &b)
+			continue
 		}
+		val, ok := staticVars[b.Varname]
+		if !ok {
+			// Unknown dispatch variable — preserve the branch
+			// (caller skips); nothing to fold.
+			remaining = append(remaining, b)
+			continue
+		}
+		matches := false
+		for _, a := range b.Arches {
+			if a == val {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		// Fold the matching branch's overrides into vars.
+		out = applyConditional(out, &b)
 	}
 	return out, remaining
 }
@@ -382,4 +393,132 @@ func branchForArch(branches []conditionalBranch, arch string) *conditionalBranch
 		}
 	}
 	return nil
+}
+
+// dispatchVar describes one variable that the pipeline handler
+// dispatches over via Bazel select() — `target_arch` (lowered to
+// @platforms//cpu:*) or an option-typed variable (lowered to
+// //options:<name>_<value> config_setting). Values is the closed-
+// set of values the dispatch enumerates.
+type dispatchVar struct {
+	Name   string
+	Values []string
+	Kind   string // "platform" for target_arch; "option" for project.conf options.
+}
+
+// dispatchSpaceForElement computes the dispatch variable set for
+// (?): branches in this element. v1 supports exactly one
+// dispatch variable per element (target_arch alone or one option-
+// typed). Elements with multiple distinct dispatch variables
+// surface as a clear error pointing at the cross-product follow-
+// up. Elements with no dispatch return (nil, nil) — the pipeline
+// handler emits a single-string cmd.
+func dispatchSpaceForElement(elem *element, options map[string]bstOption) ([]dispatchVar, error) {
+	seen := map[string]bool{}
+	for _, b := range elem.ProjectConfConditionals {
+		if dispatchable(b.Varname, options) {
+			seen[b.Varname] = true
+		}
+	}
+	for _, b := range elem.Bst.Conditionals {
+		if dispatchable(b.Varname, options) {
+			seen[b.Varname] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	if len(seen) > 1 {
+		names := make([]string, 0, len(seen))
+		for v := range seen {
+			names = append(names, v)
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("element %q: multiple dispatch variables in (?): branches %v — cross-product handling is a follow-up; v1 supports one dispatch variable per element", elem.Name, names)
+	}
+	var name string
+	for v := range seen {
+		name = v
+	}
+	if name == "target_arch" {
+		return []dispatchVar{{Name: name, Values: supportedArches, Kind: "platform"}}, nil
+	}
+	opt := options[name]
+	values := opt.Values
+	if opt.Type == "bool" && len(values) == 0 {
+		values = []string{"True", "False"}
+	}
+	return []dispatchVar{{Name: name, Values: values, Kind: "option"}}, nil
+}
+
+// dispatchable reports whether a (?): branch keyed on varname
+// produces a Bazel select() arm. target_arch (always) and
+// project.conf-declared options participate; other variables are
+// either static-folded (host_arch / build_arch) or skipped
+// (unknown).
+func dispatchable(varname string, options map[string]bstOption) bool {
+	if varname == "" {
+		return false
+	}
+	if varname == "target_arch" {
+		return true
+	}
+	_, ok := options[varname]
+	return ok
+}
+
+// resolveVarsForTuple is the multi-dispatch-variable extension of
+// resolveVarsForArch: each (varname, value) entry in tuple finds a
+// matching (?): branch (Varname == varname && Arches contains
+// value) and folds the branch's overrides into the variable scope
+// before resolving. The tuple values themselves seed the variable
+// scope (one layer above projectConf, below kindVars) so a
+// reference like `%{target_arch}` resolves to the tuple's
+// target_arch value.
+//
+// v1 only ever passes a one-entry tuple (per dispatchSpaceForElement's
+// single-variable constraint). The signature accepts arbitrary
+// tuples so the cross-product follow-up doesn't need to refactor.
+func resolveVarsForTuple(projectConf, kindVars, elemVars map[string]string,
+	tuple map[string]string,
+	projectConditionals, elemConditionals []conditionalBranch) (map[string]string, error) {
+	pc := projectConf
+	for i := range projectConditionals {
+		b := &projectConditionals[i]
+		v, ok := tuple[b.Varname]
+		if !ok {
+			continue
+		}
+		for _, a := range b.Arches {
+			if a == v {
+				pc = applyConditional(pc, b)
+				break
+			}
+		}
+	}
+	ev := elemVars
+	for i := range elemConditionals {
+		b := &elemConditionals[i]
+		v, ok := tuple[b.Varname]
+		if !ok {
+			continue
+		}
+		for _, a := range b.Arches {
+			if a == v {
+				ev = applyConditional(ev, b)
+				break
+			}
+		}
+	}
+	// Seed tuple values one layer above projectConf so
+	// `%{target_arch}` etc. references resolve to the per-arm
+	// dispatch value.
+	pc2 := map[string]string{}
+	for k, v := range pc {
+		pc2[k] = v
+	}
+	for k, v := range tuple {
+		pc2[k] = v
+	}
+	return resolveVars(pc2, kindVars, ev)
 }

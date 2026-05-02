@@ -39,6 +39,21 @@ var optionsExcludedFromFlagRender = map[string]bool{
 	"target_arch": true,
 }
 
+// optionTypedSet returns the set of option-name keys declared in
+// the project.conf options: block. Used by the conditional-folder
+// to keep option-typed (?): branches out of the static-fold pass
+// (they need to flow to the pipeline handler's select() lowering).
+func optionTypedSet(options map[string]bstOption) map[string]bool {
+	if len(options) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for name := range options {
+		out[name] = true
+	}
+	return out
+}
+
 // writeOptionsPackage renders //options/BUILD.bazel into outDir.
 // Returns nil + writes nothing when no options are declared (the
 // project doesn't ship a BUILD.bazel under //options in that

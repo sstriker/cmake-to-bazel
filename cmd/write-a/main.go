@@ -289,6 +289,11 @@ type element struct {
 	// resolves variable references before emitting on the
 	// genrule's env attribute.
 	ProjectConfEnvironment map[string]string
+	// ProjectConfOptions is the project.conf options:
+	// declarations carried onto the element so the pipeline
+	// handler can identify option-typed dispatch variables in
+	// (?): branches and look up their value spaces.
+	ProjectConfOptions map[string]bstOption
 }
 
 // graph is the loaded set of elements with cross-references resolved.
@@ -424,7 +429,7 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 		if includeBase == "" {
 			includeBase = filepath.Dir(p)
 		}
-		elem, err := loadElement(p, includeBase, sourceCache)
+		elem, err := loadElement(p, includeBase, sourceCache, info.Options)
 		if err != nil {
 			return nil, err
 		}
@@ -467,10 +472,11 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 		for k, v := range info.Variables {
 			seeded[k] = v
 		}
-		foldedVars, foldedConds := foldStaticConditionals(seeded, info.Conditionals, staticDispatchVars)
+		foldedVars, foldedConds := foldStaticConditionals(seeded, info.Conditionals, staticDispatchVars, optionTypedSet(info.Options))
 		elem.ProjectConfVars = foldedVars
 		elem.ProjectConfConditionals = foldedConds
 		elem.ProjectConfEnvironment = info.Environment
+		elem.ProjectConfOptions = info.Options
 		g.ByName[elem.Name] = elem
 		g.Elements = append(g.Elements, elem)
 	}
@@ -580,7 +586,7 @@ func loadReadPaths(path string) ([]string, error) {
 // for this graph, callers pass filepath.Dir(bstPath) as a fallback
 // — covers the existing self-contained fixtures that don't declare
 // a project.
-func loadElement(bstPath, includeBase, sourceCache string) (*element, error) {
+func loadElement(bstPath, includeBase, sourceCache string, options map[string]bstOption) (*element, error) {
 	doc, err := loadAndComposeYAML(bstPath, includeBase, map[string]bool{})
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", bstPath, err)
@@ -601,7 +607,7 @@ func loadElement(bstPath, includeBase, sourceCache string) (*element, error) {
 	// matching overrides into f.Variables so the resolver doesn't
 	// see those branches separately; target_arch branches survive
 	// for select() lowering.
-	foldedVars, foldedConds := foldStaticConditionals(f.Variables, conditionals, staticDispatchVars)
+	foldedVars, foldedConds := foldStaticConditionals(f.Variables, conditionals, staticDispatchVars, optionTypedSet(options))
 	f.Variables = foldedVars
 	f.Conditionals = foldedConds
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")

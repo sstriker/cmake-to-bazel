@@ -197,7 +197,13 @@ fail on source-kind anymore. The next gap is "single-element load
 doesn't see transitive deps", which is a probe-shape limitation
 rather than a write-a gap.
 
-### 9. `(?):` conditional directive (81 elements) ✓ done
+### 9. `(?):` conditional directive (81 elements) ✓ done — partial (cross-product follow-up)
+
+Single-dispatch-variable lowering done end-to-end across PRs #45 / #49 / #51 / #52 / #53. target_arch lowers to `select()` over `@platforms//cpu:*`; project.conf-declared options lower to `config_setting` per `(option, value)` + `select()` over those config_settings. Static-fold survives for host facts (host_arch / build_arch).
+
+Mixed dispatch (an element whose `(?):` branches reference both target_arch and an option-typed variable, e.g. FDSDK's `bootstrap/base-sdk/perl.bst`) is the remaining work: the cross-product handling either renders 6 × 5 = 30 select() arms or lifts shared state into a Starlark-level helper. Diagnosed empirically by the bootstrap subgraph probe.
+
+### 9-original. `(?):` conditional directive (81 elements) — historical
 
 `cmd/write-a/conditional.go` parses `(?):` blocks at the
 `variables:` level into structured `[]conditionalBranch` form.

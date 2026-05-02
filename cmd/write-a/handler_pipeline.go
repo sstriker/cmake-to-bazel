@@ -113,23 +113,26 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 		rawInstall = *cfg.Commands
 	}
 
-	hasConditionals := len(elem.ProjectConfConditionals) > 0 || len(elem.Bst.Conditionals) > 0
+	dispatch, err := dispatchSpaceForElement(elem, elem.ProjectConfOptions)
+	if err != nil {
+		return err
+	}
 
 	// Resolution helper: variable-resolve + substitute every phase
-	// command for a specific arch (or unconditional pass when
-	// hasConditionals is false).
-	resolveAt := func(arch string) (pipelinePhases, error) {
+	// command for a specific tuple (one entry per dispatch
+	// variable). Empty tuple = unconditional resolution.
+	resolveAt := func(tuple map[string]string) (pipelinePhases, error) {
 		var vars map[string]string
 		var err error
-		if arch == "" {
+		if len(tuple) == 0 {
 			vars, err = resolveVars(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables)
 		} else {
-			vars, err = resolveVarsForArch(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables,
-				arch, elem.ProjectConfConditionals, elem.Bst.Conditionals)
+			vars, err = resolveVarsForTuple(elem.ProjectConfVars, h.defaultVars, elem.Bst.Variables,
+				tuple, elem.ProjectConfConditionals, elem.Bst.Conditionals)
 		}
 		if err != nil {
 			return pipelinePhases{}, fmt.Errorf("element %q (kind:%s) resolve variables%s: %w",
-				elem.Name, h.kindName, archSuffix(arch), err)
+				elem.Name, h.kindName, tupleSuffix(tuple), err)
 		}
 		var p pipelinePhases
 		p.Configure, err = substituteCmds(rawConfigure, vars, elem.Name, h.kindName, "configure-commands")
@@ -164,23 +167,26 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 		return err
 	}
 
-	if !hasConditionals {
-		// Single-arch resolution; single-string cmd.
-		phases, err := resolveAt("")
+	if len(dispatch) == 0 {
+		// No (?): dispatch (or branches were folded into static
+		// vars at graph-load time): single-string cmd.
+		phases, err := resolveAt(nil)
 		if err != nil {
 			return err
 		}
 		return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
-			renderPipelineBuild(elem, []archGroup{{Arches: nil, Phases: phases}}))
+			renderPipelineBuild(elem, []dispatchGroup{{Phases: phases}}))
 	}
 
-	// Per-arch resolution; group arches by identical resolution so
-	// the emitted select() doesn't duplicate identical branches.
+	// One dispatch variable per element (v1 contract — see
+	// dispatchSpaceForElement). Iterate its values, group by
+	// identical resolution, emit one select() arm per group.
+	dv := dispatch[0]
 	type groupKey [4]string
 	groupIdx := map[groupKey]int{}
-	var groups []archGroup
-	for _, arch := range supportedArches {
-		phases, err := resolveAt(arch)
+	var groups []dispatchGroup
+	for _, val := range dv.Values {
+		phases, err := resolveAt(map[string]string{dv.Name: val})
 		if err != nil {
 			return err
 		}
@@ -191,17 +197,22 @@ func (h pipelineHandler) RenderA(elem *element, elemPkg string) error {
 			strings.Join(phases.Strip, "\x00") + "\x01" + envKey(phases.Env),
 		}
 		if idx, ok := groupIdx[key]; ok {
-			groups[idx].Arches = append(groups[idx].Arches, arch)
+			groups[idx].Values = append(groups[idx].Values, val)
 		} else {
 			groupIdx[key] = len(groups)
-			groups = append(groups, archGroup{Arches: []string{arch}, Phases: phases})
+			groups = append(groups, dispatchGroup{
+				Var:    dv.Name,
+				Kind:   dv.Kind,
+				Values: []string{val},
+				Phases: phases,
+			})
 		}
 	}
-	// Dedup-collapse: if every supported arch resolves identically,
+	// Dedup-collapse: if every dispatch value resolves identically,
 	// the (?): block didn't actually affect the rendered cmd. Emit
 	// the single-string form to keep the BUILD readable.
 	if len(groups) == 1 {
-		groups[0].Arches = nil
+		groups[0] = dispatchGroup{Phases: groups[0].Phases}
 	}
 	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"),
 		renderPipelineBuild(elem, groups))
@@ -215,6 +226,25 @@ func archSuffix(arch string) string {
 		return ""
 	}
 	return " (arch=" + arch + ")"
+}
+
+// tupleSuffix formats the dispatch tuple for error messages. Empty
+// tuple → empty string; one entry → " (var=val)"; multiple entries
+// → " (var1=val1, var2=val2, ...)" sorted by name.
+func tupleSuffix(tuple map[string]string) string {
+	if len(tuple) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(tuple))
+	for k := range tuple {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+tuple[k])
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 // composeEnvironment merges project.conf-level env (defaults) and
@@ -269,13 +299,25 @@ func envKey(env [][2]string) string {
 	return b.String()
 }
 
-// archGroup is one branch of the per-arch select() the pipeline
-// handler emits. A group with empty Arches is the "single-string
-// cmd" shape (no select); a group with a non-empty Arches list
-// becomes one entry of the select() dict mapped from each
-// constraint label.
-type archGroup struct {
-	Arches []string
+// dispatchGroup is one branch of the select() the pipeline handler
+// emits when an element's (?): block dispatches over a variable
+// (target_arch or an option-typed variable). A group with empty
+// Values is the "single-string cmd" shape (no select); a group
+// with a non-empty Values list becomes one entry per value of the
+// select() dict.
+//
+// Var + Kind together describe the dispatch surface:
+//   - Var == "" / Kind == "" — no dispatch (single-string cmd).
+//   - Kind == "platform" — Var is "target_arch"; Values are
+//     supportedArches; select labels are @platforms//cpu:<v>.
+//   - Kind == "option" — Var is a project.conf-declared option
+//     name; Values are the option's declared values; select
+//     labels are //elements/<elem>:<var>_<value> config_settings
+//     emitted in the element's own BUILD.bazel.
+type dispatchGroup struct {
+	Var    string
+	Kind   string
+	Values []string
 	Phases pipelinePhases
 }
 
@@ -354,7 +396,7 @@ func stagePipelineSources(elem *element, elemPkg string) error {
 //     group. Lowering BuildStream's (?): per-arch overrides into
 //     project-B Bazel-native multi-arch resolution rather than
 //     baking write-a's host arch into the rendered cmd.
-func renderPipelineBuild(elem *element, groups []archGroup) string {
+func renderPipelineBuild(elem *element, groups []dispatchGroup) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `# Generated by cmd/write-a. Do not edit by hand.
 
@@ -365,7 +407,17 @@ filegroup(
     srcs = glob(["sources/**"]),
 )
 
-genrule(
+`, elem.Name)
+
+	// Option-typed dispatch needs config_setting rules emitted in
+	// the same package so the select() arms below can reference
+	// them by local label. target_arch dispatch uses
+	// @platforms//cpu:* directly — no config_setting needed.
+	if optionTypedDispatch(groups) {
+		b.WriteString(renderConfigSettings(groups))
+	}
+
+	fmt.Fprintf(&b, `genrule(
     name = "%[1]s_install",
     srcs = [":%[1]s_sources"],
     outs = ["install_tree.tar"],
@@ -375,27 +427,97 @@ genrule(
 	return b.String()
 }
 
+// optionTypedDispatch reports whether any group dispatches over an
+// option-typed variable (Kind == "option"). Used to gate
+// config_setting emission — platform-typed dispatch references
+// @platforms//cpu:* directly without needing local config_setting.
+func optionTypedDispatch(groups []dispatchGroup) bool {
+	for _, g := range groups {
+		if g.Kind == "option" {
+			return true
+		}
+	}
+	return false
+}
+
+// renderConfigSettings emits one `config_setting` per (var, value)
+// pair across all option-typed groups. Each config_setting has
+// flag_values mapping the //options:<var> string_flag to the
+// chosen value.
+func renderConfigSettings(groups []dispatchGroup) string {
+	var b strings.Builder
+	for _, g := range groups {
+		if g.Kind != "option" {
+			continue
+		}
+		for _, v := range g.Values {
+			fmt.Fprintf(&b, `config_setting(
+    name = %q,
+    flag_values = {
+        %q: %q,
+    },
+)
+
+`, configSettingName(g.Var, v), "//options:"+g.Var, v)
+		}
+	}
+	return b.String()
+}
+
+// configSettingName returns the local config_setting label name
+// for a given (option, value) pair. Format: <var>_<value>, with
+// any non-identifier characters in value replaced with `_`.
+func configSettingName(varname, value string) string {
+	var b strings.Builder
+	b.WriteString(varname)
+	b.WriteByte('_')
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
 // renderPipelineCmdAttr emits the value of the genrule's cmd
-// attribute. Single-group case: a triple-quoted shell script
-// string. Multi-group case: a select({...}) dict over
-// @platforms//cpu:* constraint labels.
-func renderPipelineCmdAttr(groups []archGroup) string {
-	if len(groups) == 1 && len(groups[0].Arches) == 0 {
+// attribute. Single-group + empty dispatch: a triple-quoted shell
+// script string. Multi-group: a select({...}) dict over either
+// @platforms//cpu:* (target_arch dispatch) or local
+// :<var>_<value> config_setting labels (option-typed dispatch).
+func renderPipelineCmdAttr(groups []dispatchGroup) string {
+	if len(groups) == 1 && len(groups[0].Values) == 0 {
 		return renderPipelineCmdBody(groups[0].Phases)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "select({\n")
 	for _, g := range groups {
-		// Each arch in the group maps to the same body — emit one
-		// label-per-arch entry so Bazel resolves correctly.
-		for _, arch := range g.Arches {
-			fmt.Fprintf(&b, "        %q: %s,\n",
-				archConstraintLabel(arch),
-				renderPipelineCmdBody(g.Phases))
+		body := renderPipelineCmdBody(g.Phases)
+		// Each value in the group maps to the same body — emit one
+		// label-per-value entry so Bazel resolves correctly.
+		for _, v := range g.Values {
+			fmt.Fprintf(&b, "        %q: %s,\n", dispatchLabel(g.Kind, g.Var, v), body)
 		}
 	}
 	fmt.Fprintf(&b, "    })")
 	return b.String()
+}
+
+// dispatchLabel returns the Bazel select() key for a given
+// dispatch group + value. "platform" → @platforms//cpu:<v>;
+// "option" → :<var>_<v> (local config_setting).
+func dispatchLabel(kind, varname, value string) string {
+	switch kind {
+	case "platform":
+		return archConstraintLabel(value)
+	case "option":
+		return ":" + configSettingName(varname, value)
+	default:
+		return ""
+	}
 }
 
 // renderPipelineCmdBody emits the triple-quoted shell-script body

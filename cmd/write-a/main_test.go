@@ -1686,6 +1686,154 @@ config:
 	}
 }
 
+// TestWriter_OptionTypedConditionalLowersToConfigSettingSelect
+// covers the end-to-end option-typed (?): lowering: project.conf
+// declares an option (snap_grade), an element's variables: block
+// has (?): branches keyed on it, the rendered BUILD has
+// config_settings per used (option, value) and the genrule's cmd
+// is a select() over those config_settings.
+func TestWriter_OptionTypedConditionalLowersToConfigSettingSelect(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte(`options:
+  snap_grade:
+    type: enum
+    variable: snap_grade
+    default: devel
+    values:
+    - devel
+    - stable
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+variables:
+  out-marker: 'unknown'
+  (?):
+  - snap_grade == "devel":
+      out-marker: 'dev'
+  - snap_grade == "stable":
+      out-marker: 'prod'
+
+config:
+  install-commands:
+  - install -D x.txt %{install-root}/usr/share/%{out-marker}.txt
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(outA, "elements/elem/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(rendered)
+	for _, marker := range []string{
+		// One config_setting per used (option, value).
+		`name = "snap_grade_devel"`,
+		`name = "snap_grade_stable"`,
+		`"//options:snap_grade": "devel"`,
+		`"//options:snap_grade": "stable"`,
+		// select() arms reference the config_settings.
+		`":snap_grade_devel":`,
+		`":snap_grade_stable":`,
+		// Per-arm bodies differ in the resolved out-marker.
+		`install -D x.txt $$INSTALL_ROOT/usr/share/dev.txt`,
+		`install -D x.txt $$INSTALL_ROOT/usr/share/prod.txt`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("rendered BUILD missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// @platforms//cpu:* labels should NOT appear — this is option
+	// dispatch, not platform dispatch.
+	if strings.Contains(got, "@platforms//cpu:") {
+		t.Errorf("@platforms//cpu:* labels should not appear in option-typed dispatch:\n%s", got)
+	}
+}
+
+// TestWriter_MixedDispatchVarsErrors covers the v1 single-
+// dispatch-variable contract: an element with both target_arch
+// and option-typed (?): branches surfaces a clear error pointing
+// at the cross-product follow-up rather than rendering an
+// incomplete select().
+func TestWriter_MixedDispatchVarsErrors(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "project.conf"),
+		[]byte(`options:
+  snap_grade:
+    type: enum
+    variable: snap_grade
+    default: devel
+    values:
+    - devel
+    - stable
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: manual
+
+sources:
+- kind: local
+  path: ` + srcDir + `
+
+variables:
+  flag-value: 'unknown'
+  (?):
+  - target_arch == "x86_64":
+      flag-value: 'arch-x86'
+  - snap_grade == "stable":
+      flag-value: 'grade-stable'
+
+config:
+  install-commands:
+  - install -D x.txt %{install-root}/usr/share/%{flag-value}.txt
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err == nil {
+		t.Fatal("expected error for mixed dispatch variables, got nil")
+	} else if !strings.Contains(err.Error(), "multiple dispatch variables") {
+		t.Errorf("error should mention multiple dispatch variables; got: %v", err)
+	}
+}
+
 // TestWriter_OptionsPackageRenderedFromProjectConf covers the
 // end-to-end flow: project.conf options: declarations get parsed,
 // threaded onto graph.Options, and writeProjectA emits both
