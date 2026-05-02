@@ -281,35 +281,59 @@ representative elements and reports which gap each one hits first.
 Re-run after every PR that closes a gap; the prior failures should
 move down the list.
 
-**Every original write-a-side punch-list item is closed.** Items
-#1 through #9, plus #11. The synthetic multi-element probe
-exercises every closed item end-to-end and passes. The in-place
-probes have moved past every parse / resolution / source-kind /
-kind:local-path / arch-conditional gap; their first-failures now
-either point at the probe's single-element-load limitation
-("dep X not in graph") or an FDSDK-checkout-level issue
-(boot-keys-prod's keys aren't shipped in the repo).
+Every original write-a-side punch-list item is closed (#1-#9
+plus #11), plus the loader gaps surfaced by the multi-element
+subgraph probe (list-form `filename:` dep entries; bare
+list-merge directives; non-string `ref:` for language-package
+source kinds). The synthetic multi-element probe exercises every
+closed item end-to-end and passes.
 
-The remaining items are non-write-a / orchestration-side:
+The subgraph probe surfaces the next gaps via iterative
+transitive-dep walking:
 
-- **multi-element load probe shape** — the script loads only the
-  named .bst, not its transitive dep tree. Single-element loads
-  naturally trip on missing deps. A subgraph-loading probe would
-  surface what's actually next; doesn't need a write-a change.
-- **real source-fetch integration** — write-a now records
-  kind:git_repo / kind:tar / etc. metadata on `resolvedSource`,
-  but skips them at staging time. A bazel-build of those elements
-  needs the existing `orchestrator/internal/sourcecheckout` layer
-  (or its successor) to actually fetch sources and feed them in.
-- **`(?):` outside variables:** — write-a's extractor only handles
-  conditional blocks at the `variables:` level (the dominant
-  FDSDK pattern). Per-arch `config:` blocks (e.g., per-arch
-  install-commands) would need an analogous extractor on
-  `bstFile.Config`. Lands when an FDSDK fixture forces it.
-- **richer `(?):` expression syntax** — the v1 parser recognizes
-  `target_arch == "X"`, `target_arch != "X"`,
-  `target_arch in (X, Y, ...)`, and `or`-joined chains.
-  `host_arch` / `build_arch` references and `and`-combinators are
-  rare in FDSDK; lands when they show up. Branches with
-  unrecognized expressions are silently skipped (no select()
-  entry emitted).
+| Element | Subgraph deps loaded | First failure |
+|---|---|---|
+| `components/expat.bst` | ~80 | `kind: script` unsupported |
+| `components/aom.bst` | ~80 | `kind: script` unsupported |
+| `components/tar.bst` | ~80 | `kind: script` unsupported |
+| `components/bzip2.bst` (stack) | ~80 | `kind: script` unsupported |
+| `bootstrap/bzip2.bst` | ~120 | `bootstrap_build_arch` variable referenced but not defined |
+| `components/boot-keys-prod.bst` | 0 | FDSDK-checkout-level (production keys missing) |
+
+Two real gaps remain:
+
+- **`kind: script` plugin (53 elements)** — the next missing
+  pipeline-kind handler. Mirrors the `pipelineHandler`
+  registration shape every other coarse kind uses; small
+  follow-up. Five of six subgraph probes hit this.
+- **Project.conf-supplied per-host variables** — `bootstrap_build_arch`,
+  `host_triplet`, `gcc_triplet`, ... defined in FDSDK's
+  `include/_private/arch.yml` but only inside `(?):` branches
+  (see expression-syntax limitation below). Surfaced by the
+  bootstrap subgraph; orchestration-side fix would be either
+  expanding the v1 expression parser to handle FDSDK's full
+  syntax, or supplying default values from a project.conf
+  overlay.
+
+Other follow-ups (none on the critical path for `write-a render`):
+
+- **multi-element load probe shape** — the script's iterative
+  walker is at ~80-120 deps per element; this can probably be
+  optimized but doesn't need a write-a change.
+- **real source-fetch integration** — write-a records
+  kind:git_repo / kind:tar / etc. metadata on `resolvedSource`
+  but skips them at staging time. A bazel-build of those
+  elements needs the existing
+  `orchestrator/internal/sourcecheckout` layer (or its
+  successor) to actually fetch sources and feed them in.
+- **`(?):` outside variables:** — write-a's extractor only
+  handles conditional blocks at the `variables:` level (the
+  dominant FDSDK pattern). Per-arch `config:` blocks would need
+  an analogous extractor on `bstFile.Config`. Lands when an
+  FDSDK fixture forces it.
+- **richer `(?):` expression syntax** — `host_arch` /
+  `build_arch` references, `and`-combinators, parentheses.
+  Branches with unrecognized expressions are silently skipped
+  today. Surfaces empirically as the
+  `bootstrap_build_arch`-referenced-but-not-defined finding
+  above.

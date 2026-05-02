@@ -220,6 +220,86 @@ if [ -z "$synth_err" ]; then
     fi
 fi
 
+# Multi-element subgraph probes — for each curated element, walk
+# its transitive dep tree iteratively (load, see "dep X not in
+# graph" error, add X's .bst, retry) until either the load
+# succeeds or write-a reports a non-dep-resolution failure.
+# Surfaces what's actually next once single-element-load isn't the
+# bottleneck.
+#
+# Capped at MAX_ITER iterations per element so a runaway dep
+# walker doesn't hang the probe. Real FDSDK elements have ~10-100
+# transitive deps; the cap is intentionally generous.
+MAX_ITER=300
+subgraph_report=""
+subgraph_ok=0
+subgraph_fail=0
+while IFS='|' read -r path desc; do
+    path=$(echo "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    desc=$(echo "$desc" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -z "$path" ] && continue
+    src="$FDSDK_DIR/$path"
+    if [ ! -f "$src" ]; then
+        subgraph_report="$subgraph_report\n  SKIP    $path"
+        continue
+    fi
+    set -- --bst "$src"
+    iter=0
+    final_err=""
+    while [ "$iter" -lt "$MAX_ITER" ]; do
+        iter=$((iter+1))
+        out_a="$work_dir/sub-A-$(basename "$path" .bst)"
+        out_b="$work_dir/sub-B-$(basename "$path" .bst)"
+        rm -rf "$out_a" "$out_b"
+        err=$("$bin_dir/write-a" "$@" \
+            --out "$out_a" \
+            --out-b "$out_b" \
+            --convert-element "$bin_dir/convert-element" 2>&1 >/dev/null) || true
+        if [ -z "$err" ]; then
+            final_err=""
+            break
+        fi
+        first=$(echo "$err" | head -1)
+        # Extract the missing dep name from
+        #   element "X" depends on "Y" which is not in the graph
+        missing=$(echo "$first" | sed -n 's/.*depends on "\([^"]*\)" which is not in the graph.*/\1/p')
+        if [ -z "$missing" ]; then
+            final_err="$first"
+            break
+        fi
+        candidate="$FDSDK_DIR/elements/$missing.bst"
+        if [ ! -f "$candidate" ]; then
+            final_err="missing dep \"$missing\" not found at $candidate"
+            break
+        fi
+        # Skip if already added (loop guard).
+        already=0
+        for added in "$@"; do
+            if [ "$added" = "$candidate" ]; then
+                already=1
+                break
+            fi
+        done
+        if [ "$already" = "1" ]; then
+            final_err="dep walker looped on $missing"
+            break
+        fi
+        set -- "$@" --bst "$candidate"
+    done
+    if [ -z "$final_err" ]; then
+        subgraph_ok=$((subgraph_ok+1))
+        # Count the additional .bsts that got walked in.
+        deps_loaded=$(( ($# - 2) / 2 ))
+        subgraph_report="$subgraph_report\n  OK      $path  ($deps_loaded transitive deps)"
+    else
+        subgraph_fail=$((subgraph_fail+1))
+        subgraph_report="$subgraph_report\n  FAIL    $path"
+        subgraph_report="$subgraph_report\n          → $final_err"
+    fi
+done <<EOF
+$probes
+EOF
+
 total=$((ok+fail))
 printf "fdsdk-reality-check: %d/%d isolated-element probes succeeded\n\n" "$ok" "$total"
 printf "%b\n" "$report"
@@ -227,6 +307,10 @@ echo
 in_place_total=$((in_place_ok+in_place_fail))
 printf "In-place probes (real FDSDK tree, real project.conf): %d/%d succeeded\n" "$in_place_ok" "$in_place_total"
 printf "%b\n" "$in_place_report"
+echo
+sub_total=$((subgraph_ok+subgraph_fail))
+printf "Subgraph probes (curated element + transitive deps walked iteratively): %d/%d succeeded\n" "$subgraph_ok" "$sub_total"
+printf "%b\n" "$subgraph_report"
 echo
 echo "Synthetic multi-element probe (FDSDK-shape: kind:cmake + kind:import"
 echo "+ kind:stack with path-qualified deps, build-depends + runtime-depends,"

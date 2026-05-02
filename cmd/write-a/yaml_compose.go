@@ -76,8 +76,49 @@ func loadAndComposeYAML(path, includeBase string, visited map[string]bool) (*yam
 	if err := composeYAML(&doc, includeBase, visited); err != nil {
 		return nil, fmt.Errorf("compose %s: %w", abs, err)
 	}
+	resolveBareListMergeDirectives(&doc)
 	stripUnhandledDirectives(&doc)
 	return &doc, nil
+}
+
+// resolveBareListMergeDirectives walks node in place. When a
+// mapping is `{(>): [...]}` / `{(<): [...]}` / `{(=): [...]}` —
+// i.e. the map's only key is a BuildStream list-merge directive
+// — the map collapses to the directive's list value. The
+// directive's contract is "compose with the parent's list at this
+// path"; with no parent context (the case write-a hits when
+// loading a single file), the directive's value IS the resulting
+// list.
+//
+// FDSDK shape that hit this: `sources: { (>): [...] }` in
+// elements/components/linux.bst — the parent's list is implicitly
+// empty, so the (>) value is just the source list.
+func resolveBareListMergeDirectives(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	switch node.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, c := range node.Content {
+			resolveBareListMergeDirectives(c)
+		}
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content); i += 2 {
+			resolveBareListMergeDirectives(node.Content[i+1])
+		}
+		// Detect "this map has exactly one key, and it's a list-
+		// merge directive." Collapse the map to the directive's
+		// value (which should be a sequence).
+		if len(node.Content) == 2 {
+			k := node.Content[0].Value
+			if k == "(>)" || k == "(<)" || k == "(=)" {
+				v := node.Content[1]
+				if v.Kind == yaml.SequenceNode {
+					*node = *v
+				}
+			}
+		}
+	}
 }
 
 // composeYAML walks node in place, resolving (@): directives. For

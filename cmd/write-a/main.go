@@ -107,49 +107,86 @@ type bstFile struct {
 }
 
 // bstDep is one entry inside a depends / build-depends / runtime-
-// depends list. Real .bst files declare deps in two shapes:
+// depends list. Real .bst files declare deps in three shapes:
 //
-//   - String shape:  "- foo.bst"
-//   - Map shape:     "- filename: foo.bst, junction: jx.bst, config: {...}"
+//   - String:        "- foo.bst"
+//   - Map (single):  "- filename: foo.bst, junction: jx.bst, config: {...}"
+//   - Map (list):    "- filename: [foo.bst, bar.bst], config: {...}"
 //
-// The map shape carries junction-targeting and per-dep config (e.g.
-// kind:filter overriding parent's domain choice). For v1 we only
-// consume Filename — junction and config get parsed and recorded
-// (so the unmarshal doesn't reject map-form entries) but aren't
-// yet acted on.
+// The map shapes carry junction-targeting and per-dep config (e.g.
+// kind:filter overriding parent's domain choice). The list-of-
+// filenames form (FDSDK uses it heavily for "depend on each of
+// these with the same config:" patterns) expands into N dep edges
+// at graph-load time. For v1 we only consume Filename / Filenames
+// — junction and config get parsed and recorded but aren't yet
+// acted on.
 type bstDep struct {
-	Filename string
-	Junction string
-	Config   yaml.Node
+	// Filename holds the single-string and single-filename map
+	// shapes; Filenames holds the list-form map shape. Mutually
+	// exclusive — exactly one is populated per parsed entry.
+	Filename  string
+	Filenames []string
+	Junction  string
+	Config    yaml.Node
 }
 
 // UnmarshalYAML accepts either a scalar (string-form dep) or a
-// mapping (map-form dep). yaml.v3 picks per-entry shape via the
-// Node's Kind, so a single list can mix both shapes.
+// mapping (map-form dep, single or list filename). yaml.v3 picks
+// per-entry shape via the Node's Kind, so a single list can mix
+// shapes.
 func (d *bstDep) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
 		d.Filename = node.Value
 		return nil
 	case yaml.MappingNode:
-		var raw struct {
-			Filename string    `yaml:"filename"`
-			Junction string    `yaml:"junction"`
-			Config   yaml.Node `yaml:"config"`
+		for i := 0; i < len(node.Content); i += 2 {
+			k := node.Content[i].Value
+			v := node.Content[i+1]
+			switch k {
+			case "filename":
+				switch v.Kind {
+				case yaml.ScalarNode:
+					d.Filename = v.Value
+				case yaml.SequenceNode:
+					for _, c := range v.Content {
+						if c.Kind != yaml.ScalarNode {
+							return fmt.Errorf("dep: filename list entry must be a string, got node kind %d", c.Kind)
+						}
+						d.Filenames = append(d.Filenames, c.Value)
+					}
+				default:
+					return fmt.Errorf("dep: filename must be a string or list of strings, got node kind %d", v.Kind)
+				}
+			case "junction":
+				if v.Kind == yaml.ScalarNode {
+					d.Junction = v.Value
+				}
+			case "config":
+				d.Config = *v
+			}
 		}
-		if err := node.Decode(&raw); err != nil {
-			return err
-		}
-		if raw.Filename == "" {
+		if d.Filename == "" && len(d.Filenames) == 0 {
 			return fmt.Errorf("dep: map-form entry must have a `filename:` key")
 		}
-		d.Filename = raw.Filename
-		d.Junction = raw.Junction
-		d.Config = raw.Config
 		return nil
 	default:
 		return fmt.Errorf("dep: expected scalar or mapping, got yaml node kind %d", node.Kind)
 	}
+}
+
+// expandedFilenames returns every dep filename declared on this
+// entry — either a single Filename or every Filenames entry. The
+// graph-resolution loop iterates the result so a list-form dep
+// expands to N edges.
+func (d *bstDep) expandedFilenames() []string {
+	if len(d.Filenames) > 0 {
+		return d.Filenames
+	}
+	if d.Filename != "" {
+		return []string{d.Filename}
+	}
+	return nil
 }
 
 type bstSource struct {
@@ -171,9 +208,16 @@ type bstSource struct {
 	// layer. Unknown source kinds get the same record-and-skip
 	// treatment so write-a's render pass succeeds against full FDSDK
 	// content even where bazel-build wouldn't (yet) compile.
-	URL   string `yaml:"url"`
-	Ref   string `yaml:"ref"`
-	Track string `yaml:"track"`
+	//
+	// Ref is yaml.Node rather than string because language-package
+	// source kinds (kind:cargo2 / kind:go_module / kind:pypi /
+	// kind:cpan) declare ref as a vendored list of registry
+	// entries, not a single ref string. v1 records the raw node
+	// untyped — we don't act on these yet at staging time, so the
+	// shape doesn't matter beyond "yaml.v3 unmarshal succeeds".
+	URL   string    `yaml:"url"`
+	Ref   yaml.Node `yaml:"ref"`
+	Track string    `yaml:"track"`
 }
 
 // resolvedSource is one entry in element.Sources: a per-source
@@ -186,8 +230,10 @@ type resolvedSource struct {
 	AbsPath   string // populated only for kind:local
 	Directory string
 	URL       string
-	Ref       string
-	Track     string
+	// Ref is the raw ref node (string for git/tar; list-of-mapping
+	// for language-package source kinds). v1 doesn't act on it.
+	Ref   yaml.Node
+	Track string
 }
 
 type element struct {
@@ -396,18 +442,23 @@ func loadGraph(bstPaths []string) (*graph, error) {
 		allDeps = append(allDeps, elem.Bst.BuildDepends...)
 		allDeps = append(allDeps, elem.Bst.RuntimeDepends...)
 		for _, dep := range allDeps {
-			// Tolerate `depends: [- foo.bst]` style by stripping the
-			// .bst suffix; also accept bare element names.
-			depName := strings.TrimSuffix(dep.Filename, ".bst")
-			depElem, ok := g.ByName[depName]
-			if !ok {
-				return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
+			// List-form deps (filename: [a.bst, b.bst]) expand to
+			// N edges; the shared config: applies to each.
+			for _, fn := range dep.expandedFilenames() {
+				// Tolerate `depends: [- foo.bst]` style by
+				// stripping the .bst suffix; also accept bare
+				// element names.
+				depName := strings.TrimSuffix(fn, ".bst")
+				depElem, ok := g.ByName[depName]
+				if !ok {
+					return nil, fmt.Errorf("element %q depends on %q which is not in the graph", elem.Name, depName)
+				}
+				if seen[depElem] {
+					continue
+				}
+				seen[depElem] = true
+				elem.Deps = append(elem.Deps, depElem)
 			}
-			if seen[depElem] {
-				continue
-			}
-			seen[depElem] = true
-			elem.Deps = append(elem.Deps, depElem)
 		}
 	}
 	// Topological sort (Kahn's algorithm). Stable secondary order on
@@ -510,9 +561,11 @@ func loadElement(bstPath, includeBase string) (*element, error) {
 	// filter / compose don't have their own sources. Phase 2's
 	// supported kinds use kind:local where present.
 	if h, ok := handlers[f.Kind]; ok && h.NeedsSources() {
-		if len(f.Sources) == 0 {
-			return nil, fmt.Errorf("%s: kind %q requires at least one source; .bst declares none", bstPath, f.Kind)
-		}
+		// Zero sources is valid for pipeline kinds that operate on
+		// dep install trees only (e.g. kind:manual elements that
+		// just stitch together build-depends outputs). Handlers
+		// that can't function without sources surface that as a
+		// render-phase error.
 		for _, src := range f.Sources {
 			rs := resolvedSource{
 				Kind:      src.Kind,
