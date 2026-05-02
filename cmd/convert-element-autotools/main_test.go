@@ -304,6 +304,67 @@ func TestPerTargetIntent_PreservesAlwaysOptimize(t *testing.T) {
 	}
 }
 
+// TestCorrelate_LibtoolDualCompile is the regression guard for
+// the libtool-style dual-compile pattern: the same source
+// (foo.c) is compiled twice, once with -fPIC -DPIC into
+// .libs/foo.o (archived as libfoo_pic.a) and once without PIC
+// into foo.o (archived as libfoo.a). Both .o paths share the
+// basename `foo.o` — without exact-path correlation, both
+// archives' lookups would resolve to the same (last-written)
+// compile event, causing the static lib to inherit the PIC
+// compile's -DPIC define. With exact-path correlation, each
+// archive maps to its own compile event.
+func TestCorrelate_LibtoolDualCompile(t *testing.T) {
+	events := []Event{
+		// Non-PIC compile (drives libfoo.a).
+		{Kind: EventCompile, Out: "foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-O2"}},
+		{Kind: EventArchive, Out: "libfoo.a", Objs: []string{"foo.o"}},
+		// PIC compile (drives libfoo_pic.a). -fPIC strips as
+		// default-toolchain; -DPIC stays as a defines entry.
+		{Kind: EventCompile, Out: ".libs/foo.o", Srcs: []string{"foo.c"}, Copts: []string{"-O2", "-fPIC"}, Defines: []string{"PIC"}},
+		{Kind: EventArchive, Out: "libfoo_pic.a", Objs: []string{".libs/foo.o"}},
+	}
+	got := emitBuild(correlate(events), nil, nil)
+	// Both rules emit, both have foo.c as src.
+	for _, marker := range []string{
+		`name = "foo"`,
+		`name = "foo_pic"`,
+		`srcs = ["foo.c"]`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("missing marker %q\n--body--\n%s", marker, got)
+		}
+	}
+	// Scope assertions to each rule's body. The cc_library
+	// blocks are separated by blank lines.
+	blocks := strings.Split(got, "cc_library(")
+	var fooBody, fooPicBody string
+	for _, b := range blocks {
+		switch {
+		case strings.Contains(b, `name = "foo"`) && !strings.Contains(b, `name = "foo_pic"`):
+			fooBody = b
+		case strings.Contains(b, `name = "foo_pic"`):
+			fooPicBody = b
+		}
+	}
+	if fooBody == "" || fooPicBody == "" {
+		t.Fatalf("could not isolate rule bodies\n--body--\n%s", got)
+	}
+	// foo_pic carries the PIC define.
+	if !strings.Contains(fooPicBody, `defines = ["PIC"]`) {
+		t.Errorf("foo_pic missing defines=[\"PIC\"]\n--foo_pic body--\n%s", fooPicBody)
+	}
+	// foo (the static lib) must NOT inherit PIC — that's the
+	// libtool collision the exact-path correlation prevents.
+	if strings.Contains(fooBody, `defines = ["PIC"]`) {
+		t.Errorf("foo (static) leaked PIC define from libtool dual-compile\n--foo body--\n%s", fooBody)
+	}
+	// -fPIC is stripped as a default-toolchain flag in both.
+	if strings.Contains(got, `"-fPIC"`) {
+		t.Errorf("-fPIC should be stripped (default-toolchain)\n%s", got)
+	}
+}
+
 // TestPerTargetIntent_NilDBStripsEverything is the regression
 // guard for the simple case: nil makeDB falls back to
 // unconditional default-toolchain stripping (every -O\d, -g,

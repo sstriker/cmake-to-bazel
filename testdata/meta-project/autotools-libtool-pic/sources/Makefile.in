@@ -1,0 +1,48 @@
+CC ?= cc
+CFLAGS = @CFLAGS@
+prefix = @PREFIX@
+libdir = $(prefix)/lib
+includedir = $(prefix)/include
+
+# Libtool emulation. The same translation unit (foo.c) gets
+# compiled twice:
+#
+#   1. .libs/foo.o — with -fPIC -DPIC, archived into the
+#      libfoo_pic.a "shared-prep" lib (real libtool would
+#      then ld -shared this into libfoo.so).
+#   2. foo.o — without PIC, archived into libfoo.a (the
+#      static lib).
+#
+# Both .o paths share the basename `foo.o` — the converter's
+# objToCompile map keys by basename, so the fixture exercises
+# the libtool dual-compile collision.
+#
+# Order matters for determinism: the PIC compile runs first
+# (`.libs/foo.o` recipe), then the non-PIC compile. With the
+# converter's last-write-wins basename map, the non-PIC
+# compile's flags are what survive in the cc_library copts.
+
+all: libfoo.a libfoo_pic.a
+
+.libs/foo.o: foo.c foo.h
+	@mkdir -p .libs
+	$(CC) $(CFLAGS) -fPIC -DPIC -c foo.c -o .libs/foo.o
+
+foo.o: foo.c foo.h
+	$(CC) $(CFLAGS) -c foo.c -o foo.o
+
+libfoo_pic.a: .libs/foo.o
+	ar rcs libfoo_pic.a .libs/foo.o
+
+libfoo.a: foo.o
+	ar rcs libfoo.a foo.o
+
+install: all
+	install -D -m 0644 libfoo.a $(DESTDIR)$(libdir)/libfoo.a
+	install -D -m 0644 libfoo_pic.a $(DESTDIR)$(libdir)/libfoo_pic.a
+	install -D -m 0644 foo.h $(DESTDIR)$(includedir)/foo.h
+
+clean:
+	rm -rf *.o *.a .libs
+
+.PHONY: all install clean

@@ -453,11 +453,18 @@ func isObjectFile(p string) bool {
 // consume which archives. The emitter walks Graph to produce
 // cc_library / cc_binary rules.
 type Graph struct {
-	// objToCompile maps a normalized .o basename to the compile
-	// event that produced it. Last-write-wins when the same
-	// basename is recompiled (rare but possible during a single
-	// make run with re-targeting).
-	objToCompile map[string]Event
+	// objByPath maps the compile event's exact output path
+	// (e.g., "foo.o", ".libs/foo.o") to the producing event.
+	// Preferred for archive/link lookups because libtool-style
+	// dual-compile patterns produce two events with different
+	// paths but the same basename — keying by basename alone
+	// would collide.
+	objByPath map[string]Event
+	// objByBasename is the fallback for the rare case where an
+	// archive references an object by a different path form
+	// than the compiler's -o argument. Last-write-wins on
+	// duplicate basenames.
+	objByBasename map[string]Event
 	// libByBaseName maps a stripped library basename
 	// (libfoo.a → "foo") to the archive event that produced it.
 	// Used to resolve link events' -l<name> args to local
@@ -471,15 +478,32 @@ type Graph struct {
 	links []Event
 }
 
+// lookupCompile resolves an object path (as it appears in an
+// archive's input list or a link command's `.o` arg) to the
+// compile event that produced it. Tries exact-path match
+// first; falls back to basename. The two-tier lookup is what
+// keeps libtool-style dual-compiles distinguishable: `foo.o`
+// resolves to the non-PIC compile, `.libs/foo.o` to the PIC
+// one.
+func (g *Graph) lookupCompile(obj string) (Event, bool) {
+	if ev, ok := g.objByPath[obj]; ok {
+		return ev, true
+	}
+	ev, ok := g.objByBasename[filepath.Base(obj)]
+	return ev, ok
+}
+
 func correlate(events []Event) *Graph {
 	g := &Graph{
-		objToCompile:  map[string]Event{},
+		objByPath:     map[string]Event{},
+		objByBasename: map[string]Event{},
 		libByBaseName: map[string]Event{},
 	}
 	for _, ev := range events {
 		switch ev.Kind {
 		case EventCompile:
-			g.objToCompile[filepath.Base(ev.Out)] = ev
+			g.objByPath[ev.Out] = ev
+			g.objByBasename[filepath.Base(ev.Out)] = ev
 		case EventArchive:
 			g.archives = append(g.archives, ev)
 			g.libByBaseName[stripLibPrefixSuffix(ev.Out)] = ev
@@ -560,7 +584,7 @@ func buildRules(g *Graph, imports *manifest.Resolver, makeDB *MakeDB) []CCRule {
 	for _, a := range g.archives {
 		var srcs, copts, defines []string
 		for _, obj := range a.Objs {
-			c, ok := g.objToCompile[filepath.Base(obj)]
+			c, ok := g.lookupCompile(obj)
 			if !ok {
 				continue
 			}
@@ -596,7 +620,7 @@ func buildRules(g *Graph, imports *manifest.Resolver, makeDB *MakeDB) []CCRule {
 		// Each .o input expands to its compile event's source +
 		// copts + defines (last-write-wins on duplicate basenames).
 		for _, obj := range l.Objs {
-			c, ok := g.objToCompile[filepath.Base(obj)]
+			c, ok := g.lookupCompile(obj)
 			if !ok {
 				continue
 			}

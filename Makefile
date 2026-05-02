@@ -2,7 +2,7 @@
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
         e2e-meta-hello e2e-meta-stack e2e-meta-manual e2e-meta-make e2e-meta-vars \
         e2e-meta-compose e2e-meta-filter e2e-meta-import e2e-meta-autotools \
-        e2e-meta-autotools-native e2e-meta-autotools-multitarget e2e-meta-autotools-tu-optflags e2e-meta-autotools-stability \
+        e2e-meta-autotools-native e2e-meta-autotools-multitarget e2e-meta-autotools-tu-optflags e2e-meta-autotools-stability e2e-meta-autotools-libtool-pic \
         e2e-meta-conditional e2e-meta-script fdsdk-reality-check \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
@@ -262,6 +262,16 @@ e2e-meta-autotools-tu-optflags: check-tools converter
 # kind:cmake's read-paths narrowing.
 e2e-meta-autotools-stability: check-tools converter
 	scripts/meta-autotools-stability.sh
+
+# Libtool dual-compile gate. Fixture's Makefile compiles foo.c
+# twice: once with -fPIC -DPIC into .libs/foo.o (archived as
+# libfoo_pic.a, the shared-prep lib) and once without PIC into
+# foo.o (archived as libfoo.a, the static lib). Both .o paths
+# collide on basename. The converter's exact-path correlation
+# distinguishes them so the static lib's cc_library doesn't
+# inherit -DPIC from the PIC compile.
+e2e-meta-autotools-libtool-pic: check-tools converter
+	scripts/meta-autotools-libtool-pic.sh
 
 # Conditional-lowering acceptance gate. Single kind:manual element
 # (testdata/meta-project/conditional-greet/) whose .bst declares
