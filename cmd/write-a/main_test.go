@@ -716,6 +716,118 @@ variables:
 	}
 }
 
+// TestWriter_BazelElementPassthrough covers kind:bazel: the
+// source tree's BUILD.bazel is staged verbatim into project B,
+// project A renders a no-target marker, and write-a doesn't
+// generate any rule overlay.
+func TestWriter_BazelElementPassthrough(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authoredBuild := `# Hand-authored BUILD; kind:bazel passes it through verbatim.
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "embedded",
+    srcs = ["main.c"],
+    visibility = ["//visibility:public"],
+)
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "BUILD.bazel"),
+		[]byte(authoredBuild), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.c"),
+		[]byte("int main(void) { return 0; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "embedded.bst")
+	bstBody := "kind: bazel\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Bst.Kind != "bazel" {
+		t.Fatalf("Kind = %q, want bazel", g.Elements[0].Bst.Kind)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	bzlA, err := os.ReadFile(filepath.Join(outA, "elements/embedded/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"genrule(", "cc_library(", "cc_binary("} {
+		if strings.Contains(string(bzlA), banned) {
+			t.Errorf("project A bazel BUILD should declare no targets, got %q in:\n%s", banned, bzlA)
+		}
+	}
+
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(outB, "elements/embedded/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != authoredBuild {
+		t.Errorf("project B BUILD not staged verbatim:\n--got--\n%s\n--want--\n%s", got, authoredBuild)
+	}
+	// main.c also staged.
+	if _, err := os.Stat(filepath.Join(outB, "elements/embedded/main.c")); err != nil {
+		t.Errorf("main.c not staged: %v", err)
+	}
+}
+
+// TestWriter_BazelElementMissingBuildPlaceholder covers the
+// misconfiguration path: kind:bazel source without a BUILD
+// file gets a placeholder that flags the gap rather than
+// silently producing an empty package.
+func TestWriter_BazelElementMissingBuildPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "stuff.txt"),
+		[]byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "noBuild.bst")
+	bstBody := "kind: bazel\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectA(g, filepath.Join(tmp, "A"), binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outB, "elements/noBuild/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "almost certainly a misconfiguration") {
+		t.Errorf("missing-BUILD placeholder should flag the misconfiguration:\n%s", body)
+	}
+}
+
 // TestWriter_ImportElementShape covers kind:import: project-A
 // no-target marker; project-B source tree staged verbatim plus a
 // filegroup over glob("**/*", exclude=["BUILD.bazel"]).

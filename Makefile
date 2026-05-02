@@ -137,6 +137,14 @@ e2e-meta-hello: check-tools converter
 e2e-meta-stack: check-tools converter
 	scripts/meta-stack.sh
 
+# kind:bazel passthrough acceptance gate. Element's source tree
+# already contains a BUILD.bazel; write-a stages it verbatim into
+# project B and runs no translator. The gate asserts the staged
+# BUILD is byte-identical to the source's authored one and the
+# resulting cc_binary builds + runs end-to-end.
+e2e-meta-bazel-passthrough: check-tools converter
+	scripts/meta-bazel-passthrough.sh
+
 # Cross-element kind:cmake dep gate. Two kind:cmake elements where
 # the consumer (cons) depends on the producer (prod) via
 # find_package(prod CONFIG REQUIRED) + target_link_libraries(prod::prod).
