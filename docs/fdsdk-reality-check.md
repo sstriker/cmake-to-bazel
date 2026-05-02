@@ -320,12 +320,15 @@ Other follow-ups (none on the critical path for `write-a render`):
 - **multi-element load probe shape** — the script's iterative
   walker is at ~80-120 deps per element; this can probably be
   optimized but doesn't need a write-a change.
-- **real source-fetch integration** — write-a records
-  kind:git_repo / kind:tar / etc. metadata on `resolvedSource`
-  but skips them at staging time. A bazel-build of those
-  elements needs the existing
-  `orchestrator/internal/sourcecheckout` layer (or its
-  successor) to actually fetch sources and feed them in.
+- **real source-fetch integration** — write-a now has a
+  `--source-cache` flag: pre-fetched trees indexed by source-key
+  (SHA of kind+url+ref) under the cache directory stage as if
+  they were kind:local. Callers populate the cache via the
+  orchestrator's source-checkout layer or by hand. The actual
+  fetcher (a small tool that reads .bst metadata and populates
+  the cache) is the next architectural step; could live in
+  write-a or as a sibling cmd. write-a itself stays
+  network-free.
 - **`(?):` outside variables:** — write-a's extractor only
   handles conditional blocks at the `variables:` level (the
   dominant FDSDK pattern). Per-arch `config:` blocks would need

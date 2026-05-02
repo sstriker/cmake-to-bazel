@@ -61,14 +61,13 @@ func (cmakeHandler) RenderA(elem *element, elemPkg string) error {
 	return writeFile(filepath.Join(elemPkg, "BUILD.bazel"), cmakeElementBuild(elem))
 }
 
-// cmakeMultiSource reports whether this cmake element's sources are
-// in any shape that prevents the single-source-tree narrowing path:
-// >1 source declared, the lone source has a non-empty Directory
-// subpath, or any source is non-kind:local (no on-disk tree to
-// narrow against). All these shapes flow through stageAllSources
-// without path-narrowing — kind:local sources stage normally;
-// non-kind:local sources skip until real source-fetch integration
-// lands.
+// cmakeMultiSource reports whether this cmake element's sources
+// are in any shape that prevents the single-source-tree narrowing
+// path: >1 source declared, the lone source has a non-empty
+// Directory subpath, or the source has no on-disk tree to walk
+// (kind:git_repo / kind:tar / etc. with no --source-cache hit —
+// AbsPath is empty). All these shapes flow through stageAllSources
+// without path-narrowing.
 func cmakeMultiSource(elem *element) bool {
 	if len(elem.Sources) != 1 {
 		return true
@@ -76,7 +75,7 @@ func cmakeMultiSource(elem *element) bool {
 	if elem.Sources[0].Directory != "" {
 		return true
 	}
-	return elem.Sources[0].Kind != "local"
+	return elem.Sources[0].AbsPath == ""
 }
 
 func (cmakeHandler) RenderB(elem *element, elemPkg string) error {

@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const sampleCmakeBst = `kind: cmake
@@ -74,7 +76,7 @@ func TestWriter_HelloWorldShape(t *testing.T) {
 	}
 	binPath := fakeConvertBin(t, tmp)
 
-	g, err := loadGraph([]string{bstPath})
+	g, err := loadGraph([]string{bstPath}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -175,7 +177,7 @@ sources:
 	if err := os.WriteFile(bstPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bstPath})
+	g, err := loadGraph([]string{bstPath}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v (non-local sources should parse)", err)
 	}
@@ -203,7 +205,7 @@ func TestWriter_RejectsDuplicateElementName(t *testing.T) {
 	dir2 := filepath.Join(tmp, "d2")
 	bst1 := makeCmakeBst(t, dir1, "shared")
 	bst2 := makeCmakeBst(t, dir2, "shared")
-	if _, err := loadGraph([]string{bst1, bst2}); err == nil {
+	if _, err := loadGraph([]string{bst1, bst2}, ""); err == nil {
 		t.Errorf("expected error for duplicate element name, got nil")
 	}
 }
@@ -222,7 +224,7 @@ func TestWriter_GraphTopoSorted(t *testing.T) {
 	if err := appendDepends(rootBst, []string{"mid"}); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{rootBst, midBst, leafBst}) // reverse order
+	g, err := loadGraph([]string{rootBst, midBst, leafBst}, "") // reverse order
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -247,7 +249,7 @@ func TestWriter_RejectsCycle(t *testing.T) {
 	if err := appendDepends(b, []string{"a"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadGraph([]string{a, b}); err == nil {
+	if _, err := loadGraph([]string{a, b}, ""); err == nil {
 		t.Errorf("expected cycle error, got nil")
 	}
 }
@@ -258,7 +260,7 @@ func TestWriter_RejectsMissingDep(t *testing.T) {
 	if err := appendDepends(a, []string{"nonexistent"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadGraph([]string{a}); err == nil {
+	if _, err := loadGraph([]string{a}, ""); err == nil {
 		t.Errorf("expected unresolved-dep error, got nil")
 	}
 }
@@ -273,7 +275,7 @@ func TestWriter_StackElementShape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g, err := loadGraph([]string{libA, libB, stack})
+	g, err := loadGraph([]string{libA, libB, stack}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -358,7 +360,7 @@ func TestWriter_AutotoolsElementShape(t *testing.T) {
 	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -433,7 +435,7 @@ variables:
 	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -471,7 +473,7 @@ func TestWriter_ImportElementShape(t *testing.T) {
 	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -551,7 +553,7 @@ config:
 	if err := os.WriteFile(filter, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{parent, filter})
+	g, err := loadGraph([]string{parent, filter}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -606,7 +608,7 @@ func TestWriter_FilterRejectsMultipleDeps(t *testing.T) {
 		[]byte("kind: filter\ndepends:\n- a\n- b\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{a, b, bad})
+	g, err := loadGraph([]string{a, b, bad}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -633,7 +635,7 @@ func TestWriter_ComposeElementShape(t *testing.T) {
 		[]byte("kind: compose\ndepends:\n- a\n- b\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{a, b, bundle})
+	g, err := loadGraph([]string{a, b, bundle}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -708,7 +710,7 @@ config:
 		t.Fatal(err)
 	}
 
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -783,7 +785,7 @@ sources:
 		t.Fatal(err)
 	}
 
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -853,7 +855,7 @@ config:
 	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -911,7 +913,7 @@ config:
 	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -966,7 +968,7 @@ config:
 	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1014,7 +1016,7 @@ config:
 	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1062,7 +1064,7 @@ func TestWriter_MultiSourceImport(t *testing.T) {
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1111,7 +1113,7 @@ func TestWriter_SourceDirectoryMountsUnderSubpath(t *testing.T) {
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1173,7 +1175,7 @@ config:
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1221,7 +1223,7 @@ public:
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v (public: block should be tolerated)", err)
 	}
@@ -1267,7 +1269,7 @@ config:
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1342,7 +1344,7 @@ config:
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1397,7 +1399,7 @@ sources:
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1420,6 +1422,97 @@ sources:
 	}
 	if _, err := os.Stat(filepath.Join(outB, "elements/components/elem/secret.txt")); err != nil {
 		t.Errorf("project-root-relative source didn't stage into project B: %v", err)
+	}
+}
+
+// TestWriter_SourceCacheHitStagesAsKindLocal covers the
+// --source-cache flow: a non-kind:local source whose key resolves
+// to a pre-existing directory under the cache stages as if it
+// were kind:local at that path. write-a doesn't fetch — callers
+// pre-populate the cache via the orchestrator's source-checkout
+// layer or by hand for tests.
+func TestWriter_SourceCacheHitStagesAsKindLocal(t *testing.T) {
+	tmp := t.TempDir()
+	bst := filepath.Join(tmp, "elem.bst")
+	body := `kind: import
+sources:
+- kind: git_repo
+  url: alias:repo.git
+  ref: deadbeef
+`
+	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(tmp, "cache")
+	// First load (no cache) — AbsPath should stay empty.
+	loaded, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("first loadGraph: %v", err)
+	}
+	if loaded.Elements[0].Sources[0].AbsPath != "" {
+		t.Fatalf("AbsPath should be empty without --source-cache; got %q", loaded.Elements[0].Sources[0].AbsPath)
+	}
+	key := sourceKey(loaded.Elements[0].Sources[0])
+	if key == "" {
+		t.Fatal("sourceKey returned empty for non-kind:local source")
+	}
+	// Pre-stage the cache.
+	keyDir := filepath.Join(cacheDir, key)
+	if err := os.MkdirAll(keyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, "fetched.txt"), []byte("fetched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Second load with cache populated — AbsPath should resolve.
+	loaded2, err := loadGraph([]string{bst}, cacheDir)
+	if err != nil {
+		t.Fatalf("second loadGraph: %v", err)
+	}
+	if got := loaded2.Elements[0].Sources[0].AbsPath; got != keyDir {
+		t.Errorf("cache-resolved AbsPath: got %q, want %q", got, keyDir)
+	}
+	// And the fetched content stages into project B.
+	binPath := fakeConvertBin(t, tmp)
+	outB := filepath.Join(tmp, "B")
+	if err := os.MkdirAll(outB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProjectA(loaded2, filepath.Join(tmp, "A"), binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if err := writeProjectB(loaded2, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outB, "elements/elem/fetched.txt")); err != nil {
+		t.Errorf("cache-resolved kind:git_repo content didn't stage: %v", err)
+	}
+}
+
+// TestWriter_SourceKeyDeterministic covers the source-key stability
+// story: identical source specs produce identical keys (callers
+// rely on this when writing fetched trees back into the cache);
+// distinct refs produce distinct keys; kind:local sources produce
+// the empty key (no fetching needed).
+func TestWriter_SourceKeyDeterministic(t *testing.T) {
+	rs := resolvedSource{
+		Kind: "git_repo",
+		URL:  "alias:repo.git",
+		Ref:  yaml.Node{Kind: yaml.ScalarNode, Value: "deadbeef"},
+	}
+	a := sourceKey(rs)
+	b := sourceKey(rs)
+	if a != b || a == "" {
+		t.Errorf("sourceKey not deterministic / empty: %q vs %q", a, b)
+	}
+	rs2 := rs
+	rs2.Ref = yaml.Node{Kind: yaml.ScalarNode, Value: "cafebabe"}
+	if sourceKey(rs2) == a {
+		t.Errorf("sourceKey collision across different refs")
+	}
+	rsLocal := resolvedSource{Kind: "local", AbsPath: "/some/path"}
+	if got := sourceKey(rsLocal); got != "" {
+		t.Errorf("kind:local sourceKey should be empty; got %q", got)
 	}
 }
 
@@ -1452,7 +1545,7 @@ sources:
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1513,7 +1606,7 @@ config:
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{bst})
+	g, err := loadGraph([]string{bst}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v (all-non-local sources should parse)", err)
 	}
@@ -1564,7 +1657,7 @@ func TestWriter_PathQualifiedDeps(t *testing.T) {
 	g, err := loadGraph([]string{
 		filepath.Join(tmp, "components/foo.bst"),
 		filepath.Join(tmp, "subdir/bar.bst"),
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1624,7 +1717,7 @@ func TestWriter_PathQualifiedDeps_ElementPathSubdir(t *testing.T) {
 	g, err := loadGraph([]string{
 		filepath.Join(tmp, "elements/components/foo.bst"),
 		filepath.Join(tmp, "elements/bootstrap/bar.bst"),
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1670,7 +1763,7 @@ func TestWriter_PathQualifiedDeps_SameBasenameDifferentSubdirs(t *testing.T) {
 	g, err := loadGraph([]string{
 		filepath.Join(tmp, "elements/components/dup.bst"),
 		filepath.Join(tmp, "elements/bootstrap/dup.bst"),
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1687,7 +1780,7 @@ func TestWriter_NoProjectConf_BasenameKeyingFallback(t *testing.T) {
 	tmp := t.TempDir()
 	a := makeCmakeBst(t, tmp, "lib-a")
 	b := makeCmakeBst(t, tmp, "lib-b")
-	g, err := loadGraph([]string{a, b})
+	g, err := loadGraph([]string{a, b}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1721,7 +1814,7 @@ func TestWriter_BuildDependsResolvedIntoDepsGraph(t *testing.T) {
 		[]byte("kind: stack\nbuild-depends:\n- a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{a, b})
+	g, err := loadGraph([]string{a, b}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1744,7 +1837,7 @@ func TestWriter_RuntimeDependsResolvedIntoDepsGraph(t *testing.T) {
 		[]byte("kind: stack\nruntime-depends:\n- a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{a, b})
+	g, err := loadGraph([]string{a, b}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1774,7 +1867,7 @@ build-depends:
 	if err := os.WriteFile(b, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{a, b})
+	g, err := loadGraph([]string{a, b}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1817,7 +1910,7 @@ build-depends:
 	if err := os.WriteFile(bad, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{a, b, c, bad})
+	g, err := loadGraph([]string{a, b, c, bad}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1860,7 +1953,7 @@ build-depends:
 	if err := os.WriteFile(b, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := loadGraph([]string{a, b})
+	g, err := loadGraph([]string{a, b}, "")
 	if err != nil {
 		t.Fatalf("loadGraph: %v", err)
 	}
@@ -1893,7 +1986,7 @@ build-depends:
 	if err := os.WriteFile(bst, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadGraph([]string{bst}); err == nil {
+	if _, err := loadGraph([]string{bst}, ""); err == nil {
 		t.Fatal("expected error for map-form dep without filename, got nil")
 	}
 }
