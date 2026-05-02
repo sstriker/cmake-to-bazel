@@ -431,8 +431,27 @@ func loadGraph(bstPaths []string, sourceCache string) (*graph, error) {
 			return nil, fmt.Errorf("element %q declared twice (%s and %s)",
 				elem.Name, existing.Name, p)
 		}
-		elem.ProjectConfVars = info.Variables
-		elem.ProjectConfConditionals = info.Conditionals
+		// Fold non-target_arch (?): branches statically against
+		// staticDispatchVars (bootstrap_build_arch / host_arch /
+		// build_arch). target_arch branches survive for the
+		// pipeline-handler's per-arch select() lowering. Element-
+		// level conditionals get the same treatment in
+		// loadElement; project-level conditionals here.
+		//
+		// staticDispatchVars themselves also seed the variable
+		// scope as defaults, so a `%{bootstrap_build_arch}`
+		// reference resolves cleanly even before a (?): branch
+		// would have set the variable.
+		seeded := map[string]string{}
+		for k, v := range staticDispatchVars {
+			seeded[k] = v
+		}
+		for k, v := range info.Variables {
+			seeded[k] = v
+		}
+		foldedVars, foldedConds := foldStaticConditionals(seeded, info.Conditionals, staticDispatchVars)
+		elem.ProjectConfVars = foldedVars
+		elem.ProjectConfConditionals = foldedConds
 		g.ByName[elem.Name] = elem
 		g.Elements = append(g.Elements, elem)
 	}
@@ -558,7 +577,14 @@ func loadElement(bstPath, includeBase, sourceCache string) (*element, error) {
 	if err := doc.Decode(&f); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", bstPath, err)
 	}
-	f.Conditionals = conditionals
+	// Fold non-target_arch (?): branches statically — same shape
+	// as loadGraph does for the project-level conditionals. Folds
+	// matching overrides into f.Variables so the resolver doesn't
+	// see those branches separately; target_arch branches survive
+	// for select() lowering.
+	foldedVars, foldedConds := foldStaticConditionals(f.Variables, conditionals, staticDispatchVars)
+	f.Variables = foldedVars
+	f.Conditionals = foldedConds
 	name := strings.TrimSuffix(filepath.Base(bstPath), ".bst")
 
 	elem := &element{Name: name, Bst: &f}

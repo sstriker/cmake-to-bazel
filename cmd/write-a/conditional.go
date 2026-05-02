@@ -75,72 +75,117 @@ func archConstraintLabel(arch string) string {
 	}
 }
 
-// conditionalBranch is one entry in a (?): block's list. Arches is
-// the parsed set of CPU arches the branch applies to (post-
-// expression-evaluation, so a `target_arch == "x86_64" or
-// target_arch == "aarch64"` expression yields ["x86_64",
-// "aarch64"]). Overrides is the variable-overrides yaml.Node the
-// branch contributes when one of its arches matches.
+// conditionalBranch is one entry in a (?): block's list. Varname
+// is the LHS variable the expression dispatches on (`target_arch`,
+// `bootstrap_build_arch`, ...); Arches is the set of values the
+// branch matches. Overrides is the variable-overrides yaml.Node
+// the branch contributes when one of its values matches.
+//
+// `target_arch`-keyed branches lower to project-B select() over
+// @platforms//cpu:*. Branches keyed by other variables get
+// statically evaluated against the staticDispatchVars map at
+// graph-load time and folded into the parent variable layer.
 type conditionalBranch struct {
+	Varname   string
 	Arches    []string
 	Overrides *yaml.Node
 }
 
-// archEquals matches `target_arch == "X"` (with single-quote
-// alternative). Whitespace tolerant.
-var archEqualsRE = regexp.MustCompile(`^\s*target_arch\s*==\s*['"]([^'"]+)['"]\s*$`)
+// varEqualsRE matches `<var> == "X"` (with single-quote alternative).
+// Whitespace tolerant. Captures (var, value).
+var varEqualsRE = regexp.MustCompile(`^\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*==\s*['"]([^'"]+)['"]\s*$`)
 
-// archNotEquals matches `target_arch != "X"`.
-var archNotEqualsRE = regexp.MustCompile(`^\s*target_arch\s*!=\s*['"]([^'"]+)['"]\s*$`)
+// varNotEqualsRE matches `<var> != "X"`.
+var varNotEqualsRE = regexp.MustCompile(`^\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*!=\s*['"]([^'"]+)['"]\s*$`)
 
-// archIn matches `target_arch in ("X", "Y", "Z")` — list-membership.
-var archInRE = regexp.MustCompile(`^\s*target_arch\s+in\s+\(([^)]+)\)\s*$`)
+// varInRE matches `<var> in ("X", "Y", "Z")`.
+var varInRE = regexp.MustCompile(`^\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s+in\s+\(([^)]+)\)\s*$`)
 
-// archInTuple extracts arch names from the tuple body of archInRE.
+// archInTupleEntryRE extracts quoted arch names from the tuple
+// body of varInRE.
 var archInTupleEntryRE = regexp.MustCompile(`['"]([^'"]+)['"]`)
 
-// parseArchExpression returns the set of supportedArches a
-// BuildStream conditional expression matches. Unrecognized syntax
-// yields nil (caller silently skips the branch); explicit-empty
-// match (e.g. an arch listed that's not in supportedArches) is
-// also nil.
-func parseArchExpression(expr string) []string {
+// parseArchExpression returns the LHS variable and the set of
+// supported arches a BuildStream conditional expression matches.
+// Most FDSDK uses target_arch on the LHS; bootstrap_build_arch /
+// host_arch / build_arch and a few custom dispatch variables also
+// appear (see flags.yml). Recognized syntax:
+//
+//	<var> == "X"
+//	<var> != "X"
+//	<var> in ("X", "Y", ...)
+//	<var> == "X" or <var> == "Y" or ...   (consistent LHS variable)
+//
+// Unrecognized syntax / mixed-LHS or-chains return ("", nil) — the
+// caller skips the branch (no select() entry emitted; static
+// dispatch falls through).
+//
+// Arches matching is filtered to supportedArches for the LHS that
+// drives Bazel select() lowering (target_arch); for other LHS
+// variables the arches set returns the literal RHS values
+// (bootstrap_build_arch / host_arch values aren't constrained to
+// the @platforms//cpu:* set).
+func parseArchExpression(expr string) (varname string, arches []string) {
 	expr = strings.TrimSpace(expr)
-	// `or`-joined target_arch == X chain.
-	if strings.Contains(expr, "or") && !strings.Contains(expr, "and") {
-		parts := strings.Split(expr, "or")
+	// `or`-joined chain — recurse on each part. The branch only
+	// makes sense if every part has the same LHS variable; mixed-
+	// LHS chains return ("", nil).
+	if strings.Contains(expr, " or ") && !strings.Contains(expr, " and ") {
+		parts := strings.Split(expr, " or ")
+		var lhs string
 		var out []string
 		for _, p := range parts {
-			matches := parseArchExpression(strings.TrimSpace(p))
-			out = mergeArches(out, matches)
+			v, vs := parseArchExpression(strings.TrimSpace(p))
+			if v == "" {
+				return "", nil
+			}
+			if lhs == "" {
+				lhs = v
+			} else if lhs != v {
+				return "", nil
+			}
+			out = mergeArches(out, vs)
 		}
-		return out
+		return lhs, out
 	}
-	if m := archEqualsRE.FindStringSubmatch(expr); m != nil {
-		if isSupported(m[1]) {
-			return []string{m[1]}
+	if m := varEqualsRE.FindStringSubmatch(expr); m != nil {
+		varname = m[1]
+		v := m[2]
+		if varname == "target_arch" && !isSupported(v) {
+			return varname, nil
 		}
-		return nil
+		return varname, []string{v}
 	}
-	if m := archNotEqualsRE.FindStringSubmatch(expr); m != nil {
+	if m := varNotEqualsRE.FindStringSubmatch(expr); m != nil {
+		varname = m[1]
+		notv := m[2]
+		// !=  only well-defined for target_arch — we know the
+		// closed set @platforms//cpu:* allows. For other vars,
+		// can't enumerate the complement; leave nil.
+		if varname != "target_arch" {
+			return varname, nil
+		}
 		out := make([]string, 0, len(supportedArches))
 		for _, a := range supportedArches {
-			if a != m[1] {
+			if a != notv {
 				out = append(out, a)
 			}
 		}
-		return out
+		return varname, out
 	}
-	if m := archInRE.FindStringSubmatch(expr); m != nil {
+	if m := varInRE.FindStringSubmatch(expr); m != nil {
+		varname = m[1]
 		var out []string
-		for _, em := range archInTupleEntryRE.FindAllStringSubmatch(m[1], -1) {
-			if isSupported(em[1]) {
-				out = append(out, em[1])
+		for _, em := range archInTupleEntryRE.FindAllStringSubmatch(m[2], -1) {
+			v := em[1]
+			if varname == "target_arch" && !isSupported(v) {
+				continue
 			}
+			out = append(out, v)
 		}
-		return out
+		return varname, out
 	}
-	return nil
+	return "", nil
 }
 
 func isSupported(arch string) bool {
@@ -229,12 +274,76 @@ func extractConditionalsFromVariables(doc *yaml.Node) ([]conditionalBranch, erro
 		}
 		expr := branchNode.Content[0].Value
 		overrides := branchNode.Content[1]
+		varname, arches := parseArchExpression(expr)
 		branches = append(branches, conditionalBranch{
-			Arches:    parseArchExpression(expr),
+			Varname:   varname,
+			Arches:    arches,
 			Overrides: overrides,
 		})
 	}
 	return branches, nil
+}
+
+// staticDispatchVars carries the values of dispatch variables that
+// (?): branches reference besides target_arch. write-a evaluates
+// them statically — these aren't multi-arch-select() candidates
+// (the dispatch values aren't constrained to @platforms//cpu:*),
+// they're configuration knobs whose value is fixed at build-graph-
+// load time.
+//
+// Defaults below match a host-arch-x86_64 build of FDSDK. The
+// --build-arch flag overrides build_arch and bootstrap_build_arch
+// together, since they typically share the host's CPU
+// architecture.
+var staticDispatchVars = map[string]string{
+	"build_arch":           "x86_64",
+	"host_arch":            "x86_64",
+	"bootstrap_build_arch": "x86_64",
+}
+
+// foldStaticConditionals partitions branches into target_arch-
+// keyed (returned unchanged for select() lowering) and others
+// (statically evaluated against staticVars; matching branches'
+// overrides folded into vars). Returns the filtered branch list
+// + the augmented vars map.
+//
+// Branches with empty Varname (unrecognized expression) survive
+// unchanged in the returned slice — the pipeline handler skips
+// them, but they're available for a future expression-evaluator
+// extension.
+func foldStaticConditionals(vars map[string]string, branches []conditionalBranch, staticVars map[string]string) (map[string]string, []conditionalBranch) {
+	out := map[string]string{}
+	for k, v := range vars {
+		out[k] = v
+	}
+	var remaining []conditionalBranch
+	for _, b := range branches {
+		switch b.Varname {
+		case "target_arch", "":
+			remaining = append(remaining, b)
+		default:
+			val, ok := staticVars[b.Varname]
+			if !ok {
+				// Unknown dispatch variable — preserve the branch
+				// (caller skips); nothing to fold.
+				remaining = append(remaining, b)
+				continue
+			}
+			matches := false
+			for _, a := range b.Arches {
+				if a == val {
+					matches = true
+					break
+				}
+			}
+			if !matches {
+				continue
+			}
+			// Fold the matching branch's overrides into vars.
+			out = applyConditional(out, &b)
+		}
+	}
+	return out, remaining
 }
 
 // applyConditional layers the override variables for one
