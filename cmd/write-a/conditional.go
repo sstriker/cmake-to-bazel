@@ -406,13 +406,17 @@ type dispatchVar struct {
 	Kind   string // "platform" for target_arch; "option" for project.conf options.
 }
 
-// dispatchSpaceForElement computes the dispatch variable set for
-// (?): branches in this element. v1 supports exactly one
-// dispatch variable per element (target_arch alone or one option-
-// typed). Elements with multiple distinct dispatch variables
-// surface as a clear error pointing at the cross-product follow-
-// up. Elements with no dispatch return (nil, nil) — the pipeline
-// handler emits a single-string cmd.
+// dispatchSpaceForElement computes the ordered list of dispatch
+// variables used by (?): branches in this element. Returns:
+//
+//   - empty: no conditional dispatch (single-string cmd, current path).
+//   - one or more entries: the pipeline handler iterates the
+//     cartesian product of values and emits one select() arm per
+//     unique resolved phases group.
+//
+// The returned slice is sorted by Var.Name for deterministic
+// rendering (config_setting names + select() arm order are stable
+// across runs).
 func dispatchSpaceForElement(elem *element, options map[string]bstOption) ([]dispatchVar, error) {
 	seen := map[string]bool{}
 	for _, b := range elem.ProjectConfConditionals {
@@ -428,27 +432,53 @@ func dispatchSpaceForElement(elem *element, options map[string]bstOption) ([]dis
 	if len(seen) == 0 {
 		return nil, nil
 	}
-	if len(seen) > 1 {
-		names := make([]string, 0, len(seen))
-		for v := range seen {
-			names = append(names, v)
-		}
-		sort.Strings(names)
-		return nil, fmt.Errorf("element %q: multiple dispatch variables in (?): branches %v — cross-product handling is a follow-up; v1 supports one dispatch variable per element", elem.Name, names)
-	}
-	var name string
+	names := make([]string, 0, len(seen))
 	for v := range seen {
-		name = v
+		names = append(names, v)
 	}
-	if name == "target_arch" {
-		return []dispatchVar{{Name: name, Values: supportedArches, Kind: "platform"}}, nil
+	sort.Strings(names)
+	out := make([]dispatchVar, 0, len(names))
+	for _, name := range names {
+		if name == "target_arch" {
+			out = append(out, dispatchVar{Name: name, Values: supportedArches, Kind: "platform"})
+			continue
+		}
+		opt := options[name]
+		values := opt.Values
+		if opt.Type == "bool" && len(values) == 0 {
+			values = []string{"True", "False"}
+		}
+		out = append(out, dispatchVar{Name: name, Values: values, Kind: "option"})
 	}
-	opt := options[name]
-	values := opt.Values
-	if opt.Type == "bool" && len(values) == 0 {
-		values = []string{"True", "False"}
+	return out, nil
+}
+
+// cartesianTuples generates every combination of dispatch values
+// across the dispatch space. Returns one map per tuple (varname →
+// value). Order is deterministic: outer loop iterates the first
+// dispatch var's values; inner loops iterate subsequent vars'
+// values.
+func cartesianTuples(vars []dispatchVar) []map[string]string {
+	if len(vars) == 0 {
+		return nil
 	}
-	return []dispatchVar{{Name: name, Values: values, Kind: "option"}}, nil
+	// Initialize with one empty tuple; expand one dimension at a time.
+	tuples := []map[string]string{{}}
+	for _, v := range vars {
+		next := make([]map[string]string, 0, len(tuples)*len(v.Values))
+		for _, t := range tuples {
+			for _, val := range v.Values {
+				clone := make(map[string]string, len(t)+1)
+				for k, vv := range t {
+					clone[k] = vv
+				}
+				clone[v.Name] = val
+				next = append(next, clone)
+			}
+		}
+		tuples = next
+	}
+	return tuples
 }
 
 // dispatchable reports whether a (?): branch keyed on varname
