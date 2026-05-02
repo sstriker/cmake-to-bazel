@@ -1,0 +1,19 @@
+#!/bin/sh
+# Minimal autoconf-shape configure script for the autotools-greet
+# fixture. Honors --prefix; accepts and ignores every other autoconf
+# flag the BuildStream autotools plugin's %{conf-args} passes
+# (--exec-prefix / --bindir / --libdir / ...). Substitutes @PREFIX@
+# into Makefile.in to produce the Makefile the build phase consumes.
+set -eu
+
+prefix=/usr/local
+for arg do
+    case $arg in
+        --prefix=*) prefix=${arg#--prefix=} ;;
+        # Accept and ignore every other autoconf flag.
+        --*) ;;
+        *) ;;
+    esac
+done
+sed "s|@PREFIX@|$prefix|g" Makefile.in > Makefile
+echo "configure: prefix=$prefix"
