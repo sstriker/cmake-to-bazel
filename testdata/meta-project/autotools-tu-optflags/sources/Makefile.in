@@ -1,0 +1,33 @@
+CC = cc
+CFLAGS = @CFLAGS@
+prefix = @PREFIX@
+bindir = $(prefix)/bin
+
+# hotloop.o always optimizes, even when the global CFLAGS is -O0.
+# The make-db captures this as `hotloop.o: CFLAGS += -O2`; the
+# trace captures the actual `cc -O0 -g -O2 -c hotloop.c` line.
+# convert-element-autotools cross-references the two so the
+# per-target -O2 survives the default-toolchain strip.
+hotloop.o: CFLAGS += -O2
+
+all: app
+
+hotloop.o: hotloop.c
+	$(CC) $(CFLAGS) -c hotloop.c -o hotloop.o
+
+regular.o: regular.c
+	$(CC) $(CFLAGS) -c regular.c -o regular.o
+
+main.o: main.c
+	$(CC) $(CFLAGS) -c main.c -o main.o
+
+app: main.o regular.o hotloop.o
+	$(CC) $(CFLAGS) -o app main.o regular.o hotloop.o
+
+install: all
+	install -D -m 0755 app $(DESTDIR)$(bindir)/app
+
+clean:
+	rm -f *.o app
+
+.PHONY: all install clean

@@ -2,6 +2,7 @@
         e2e-orchestrate e2e-orchestrate-scale e2e-bazel-build e2e-cmake-consumer e2e-toolchain-skip e2e-fidelity e2e-fidelity-fmt e2e-buildbarn e2e-buildbarn-execute \
         e2e-meta-hello e2e-meta-stack e2e-meta-manual e2e-meta-make e2e-meta-vars \
         e2e-meta-compose e2e-meta-filter e2e-meta-import e2e-meta-autotools \
+        e2e-meta-autotools-native e2e-meta-autotools-multitarget e2e-meta-autotools-tu-optflags e2e-meta-autotools-stability e2e-meta-autotools-libtool-pic \
         e2e-meta-conditional e2e-meta-script fdsdk-reality-check \
         buildbarn-up buildbarn-down install-bazelisk install-cmake convert-and-build \
         fetch-fmt update-golden record-fixtures lint vet fmt check-tools clean
@@ -137,6 +138,14 @@ e2e-meta-hello: check-tools converter
 e2e-meta-stack: check-tools converter
 	scripts/meta-stack.sh
 
+# kind:bazel passthrough acceptance gate. Element's source tree
+# already contains a BUILD.bazel; write-a stages it verbatim into
+# project B and runs no translator. The gate asserts the staged
+# BUILD is byte-identical to the source's authored one and the
+# resulting cc_binary builds + runs end-to-end.
+e2e-meta-bazel-passthrough: check-tools converter
+	scripts/meta-bazel-passthrough.sh
+
 # Cross-element kind:cmake dep gate. Two kind:cmake elements where
 # the consumer (cons) depends on the producer (prod) via
 # find_package(prod CONFIG REQUIRED) + target_link_libraries(prod::prod).
@@ -215,6 +224,54 @@ e2e-meta-import: check-tools converter
 # resolver under the project.conf prefix override.
 e2e-meta-autotools: check-tools converter
 	scripts/meta-autotools.sh
+
+# Trace-driven kind:autotools native acceptance gate. Drives
+# the autotools-greet fixture through write-a +
+# --convert-element-autotools + --build-tracer-bin; bazel build
+# runs the tracer-wrapped install genrule + the native converter
+# inline; the gate asserts the rendered BUILD.bazel.out contains
+# native cc_binary targets recovered from the trace.
+# Bazel's action cache (buildbarn in CI) handles cross-node
+# convergence transparently — same action key, same outputs.
+e2e-meta-autotools-native: check-tools converter
+	scripts/meta-autotools-native.sh
+
+# Multi-target trace-driven kind:autotools acceptance gate.
+# Drives the autotools-multitarget fixture (multiple cc rules,
+# multiple install dests, per-target CFLAGS) end-to-end through
+# bazel build; asserts BUILD.bazel.out has the four expected
+# rules and install-mapping.json captures all install dests
+# with rule cross-references.
+e2e-meta-autotools-multitarget: check-tools converter
+	scripts/meta-autotools-multitarget.sh
+
+# Per-target CFLAGS preservation gate. Fixture's
+# `hotloop.o: CFLAGS += -O2` overrides global -O0 -g; the
+# converter cross-references trace + make-db to keep -O2 in
+# copts while stripping the global default flags.
+e2e-meta-autotools-tu-optflags: check-tools converter
+	scripts/meta-autotools-tu-optflags.sh
+
+# Convert-action stability gate. Splits the autotools native
+# render path into _install (full source input → trace.log +
+# make-db.txt) + _converted (narrow input → BUILD.bazel.out).
+# A comment-only edit in a source file invalidates _install's
+# cache key (input bytes changed) but the build's trace.log +
+# make-db.txt come out byte-identical, so _converted's narrow
+# cache key is unchanged → BUILD.bazel.out is reused. Mirrors
+# kind:cmake's read-paths narrowing.
+e2e-meta-autotools-stability: check-tools converter
+	scripts/meta-autotools-stability.sh
+
+# Libtool dual-compile gate. Fixture's Makefile compiles foo.c
+# twice: once with -fPIC -DPIC into .libs/foo.o (archived as
+# libfoo_pic.a, the shared-prep lib) and once without PIC into
+# foo.o (archived as libfoo.a, the static lib). Both .o paths
+# collide on basename. The converter's exact-path correlation
+# distinguishes them so the static lib's cc_library doesn't
+# inherit -DPIC from the PIC compile.
+e2e-meta-autotools-libtool-pic: check-tools converter
+	scripts/meta-autotools-libtool-pic.sh
 
 # Conditional-lowering acceptance gate. Single kind:manual element
 # (testdata/meta-project/conditional-greet/) whose .bst declares

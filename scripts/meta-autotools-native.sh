@@ -1,0 +1,162 @@
+#!/bin/sh
+# meta-autotools-native.sh — end-to-end acceptance gate for the
+# trace-driven kind:autotools native render path.
+#
+# Drives the full single-genrule design end-to-end:
+#
+#   1. cmd/write-a renders project A with --convert-element-autotools
+#      + --build-tracer-bin set. kind:autotools elements get a single
+#      install genrule with two outputs (install_tree.tar + the
+#      native BUILD.bazel.out) and tools = [build-tracer,
+#      convert-element-autotools].
+#   2. bazel build runs the genrule once. Inside the sandbox:
+#      build-tracer wraps the configure/build/install pipeline,
+#      capturing every execve into a trace file; convert-element-
+#      autotools reads the trace and emits BUILD.bazel.out with
+#      native cc_library / cc_binary targets.
+#   3. The driver extracts BUILD.bazel.out from project A's
+#      bazel-bin and asserts the native shape (cc_binary or
+#      cc_library, depending on the fixture's pipeline outputs).
+#
+# Bazel's action cache (buildbarn in CI) handles cross-node
+# convergence transparently — same source + same toolchain + same
+# converter version => same action result, shared via the existing
+# remote-cache plumbing.
+#
+# Bazel-availability gating + META_BAZEL_*_ARGS overrides mirror
+# scripts/meta-autotools.sh.
+
+set -eu
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+
+bin_dir="$repo_root/build/bin"
+mkdir -p "$bin_dir"
+
+make converter >/dev/null
+CGO_ENABLED=0 go build -o "$bin_dir/write-a" ./cmd/write-a
+CGO_ENABLED=0 go build -o "$bin_dir/build-tracer" ./cmd/build-tracer
+CGO_ENABLED=0 go build -o "$bin_dir/convert-element-autotools" ./cmd/convert-element-autotools
+
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+
+A="$work_dir/A"
+B="$work_dir/B"
+
+fixture="testdata/meta-project/autotools-greet"
+
+"$bin_dir/write-a" \
+    --bst "$fixture/greet.bst" \
+    --out "$A" \
+    --out-b "$B" \
+    --convert-element "$bin_dir/convert-element" \
+    --convert-element-autotools "$bin_dir/convert-element-autotools" \
+    --build-tracer-bin "$bin_dir/build-tracer"
+
+# Render-phase checks.
+for want in \
+    "elements/greet/BUILD.bazel" \
+    "tools/convert-element-autotools" \
+    "tools/build-tracer"; do
+    if [ ! -f "$A/$want" ]; then
+        echo "meta-autotools-native: missing rendered file $want in project A" >&2
+        exit 1
+    fi
+done
+for marker in \
+    '"BUILD.bazel.out"' \
+    '"trace.log"' \
+    '"//tools:build-tracer"' \
+    '"//tools:convert-element-autotools"' \
+    'name = "greet_install"' \
+    'name = "greet_converted"'; do
+    if ! grep -qF -- "$marker" "$A/elements/greet/BUILD.bazel"; then
+        echo "meta-autotools-native: rendered BUILD missing marker: $marker" >&2
+        cat "$A/elements/greet/BUILD.bazel" >&2
+        exit 1
+    fi
+done
+echo "meta-autotools-native: render OK"
+
+# Bazel-availability gating.
+if command -v bazel >/dev/null; then
+    BZL=bazel
+elif command -v bazelisk >/dev/null; then
+    BZL=bazelisk
+else
+    echo "meta-autotools-native: render OK; bazel not on PATH, skipping build phase"
+    exit 0
+fi
+bazel_major=$("$BZL" --version 2>&1 | head -1 | awk '{print $2}' | cut -d. -f1)
+case "$bazel_major" in
+    [0-9]*) ;;
+    *) bazel_major=0 ;;
+esac
+if [ "$bazel_major" -lt 7 ]; then
+    echo "meta-autotools-native: render OK; bazel $($BZL --version | head -1) is < 7 (no bzlmod), skipping build phase"
+    exit 0
+fi
+if ! command -v strace >/dev/null; then
+    echo "meta-autotools-native: render OK; strace not on PATH (build-tracer needs it), skipping build phase" >&2
+    exit 0
+fi
+
+META_BAZEL_STARTUP_ARGS=${META_BAZEL_STARTUP_ARGS:-}
+META_BAZEL_BUILD_ARGS=${META_BAZEL_BUILD_ARGS:-}
+
+bzl_cache="$work_dir/.bazel"
+run_bazel() {
+    workspace="$1"
+    cmd="$2"
+    shift 2
+    # shellcheck disable=SC2086
+    (cd "$workspace" && "$BZL" --output_user_root="$bzl_cache" \
+        $META_BAZEL_STARTUP_ARGS \
+        "$cmd" "$@" $META_BAZEL_BUILD_ARGS)
+}
+
+# Pass 1: bazel builds the convert genrule, which depends on
+# the install genrule. Two actions, two cache keys:
+#   - <elem>_install: full source input → trace.log +
+#     make-db.txt + install_tree.tar.
+#   - <elem>_converted: trace.log + make-db.txt → BUILD.bazel.out
+#     + install-mapping.json. Cache narrows to the trace +
+#     make-db, so trivial source edits leave this action's
+#     cache key stable (project B's BUILD doesn't churn).
+#
+# build-tracer's native backend uses ptrace from a parent
+# process; bazel's default linux-sandbox usually allows that
+# (kernel.yama.ptrace_scope = 1 means "trace your own
+# children"), so we don't need --spawn_strategy=local.
+run_bazel "$A" build //elements/greet:greet_converted 2>&1 | tail -10
+
+# Native BUILD.bazel.out + install_tree.tar should both exist.
+for want in \
+    "$A/bazel-bin/elements/greet/install_tree.tar" \
+    "$A/bazel-bin/elements/greet/BUILD.bazel.out"; do
+    if [ ! -f "$want" ]; then
+        echo "meta-autotools-native: missing build output $want" >&2
+        exit 1
+    fi
+done
+
+# Native shape: BUILD.bazel.out should declare a cc_binary
+# matching the fixture's `greet` binary.
+build_out="$A/bazel-bin/elements/greet/BUILD.bazel.out"
+for marker in \
+    'load("@rules_cc//cc:defs.bzl"' \
+    'cc_binary(' \
+    'name = "greet"' \
+    'srcs = ["greet.c"]'; do
+    if ! grep -qF "$marker" "$build_out"; then
+        echo "meta-autotools-native: BUILD.bazel.out missing $marker" >&2
+        cat "$build_out" >&2
+        exit 1
+    fi
+done
+
+echo "meta-autotools-native: ok (tracer-wrapped install + native converter ran inline; produced cc_binary(greet))"
+echo "--- BUILD.bazel.out ---"
+cat "$build_out"

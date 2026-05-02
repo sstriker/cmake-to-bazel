@@ -523,6 +523,159 @@ func TestWriter_AutotoolsElementShape(t *testing.T) {
 	}
 }
 
+// TestWriter_AutotoolsNativeWraps covers the trace-driven
+// autotools native render path. When --convert-element-autotools
+// + --build-tracer-bin are supplied, the per-element BUILD's
+// install genrule wraps the configure/build/install commands in
+// build-tracer and appends a convert-element-autotools step that
+// emits BUILD.bazel.out alongside install_tree.tar — one Bazel
+// action with two outputs. Bazel's action cache (buildbarn in
+// CI) handles cross-node convergence; no separate registry.
+func TestWriter_AutotoolsNativeWraps(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "configure"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile.in"),
+		[]byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "auto.bst")
+	bstBody := "kind: autotools\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Marker-shaped fake binaries — RenderA only stages them.
+	fakeAutotoolsBin := filepath.Join(tmp, "convert-element-autotools-fake")
+	if err := os.WriteFile(fakeAutotoolsBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeTracerBin := filepath.Join(tmp, "build-tracer-fake")
+	if err := os.WriteFile(fakeTracerBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	autotoolsConfig.convertBin = fakeAutotoolsBin
+	autotoolsConfig.tracerBin = fakeTracerBin
+	t.Cleanup(func() {
+		autotoolsConfig.convertBin = ""
+		autotoolsConfig.tracerBin = ""
+	})
+
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(outA, "elements/auto/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	// Positive markers: TWO genrules. Install runs the build
+	// under build-tracer (full source input → `<elem>_install`
+	// re-runs on any source edit). Converted reads
+	// trace + make-db (narrow input → cache hits when the
+	// build's compile/link commands stay the same, even if
+	// underlying source bytes changed).
+	for _, marker := range []string{
+		// _install genrule:
+		`name = "auto_install"`,
+		`"install_tree.tar"`,
+		`"trace.log"`,
+		`"make-db.txt"`,
+		`"$$EXEC_ROOT/$(location //tools:build-tracer)" --out="$$EXEC_ROOT/$(location trace.log)"`,
+		`make -np > "$$EXEC_ROOT/$(location make-db.txt)"`,
+		`tools = ["//tools:build-tracer"]`,
+		// _converted sibling genrule:
+		`name = "auto_converted"`,
+		`"BUILD.bazel.out"`,
+		`"install-mapping.json"`,
+		`":trace.log", ":make-db.txt"`,
+		`$(location //tools:convert-element-autotools)`,
+		`--trace="$(location :trace.log)"`,
+		`--make-db="$(location :make-db.txt)"`,
+		`tools = ["//tools:convert-element-autotools"]`,
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("native autotools BUILD missing %q\n--body--\n%s", marker, got)
+		}
+	}
+	// Both binaries staged under tools/.
+	if _, err := os.Stat(filepath.Join(outA, "tools/convert-element-autotools")); err != nil {
+		t.Errorf("convert-element-autotools not staged: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outA, "tools/build-tracer")); err != nil {
+		t.Errorf("build-tracer not staged: %v", err)
+	}
+}
+
+// TestWriter_AutotoolsCoarseFallbackWithoutFlags covers the
+// fallback path: without --convert-element-autotools /
+// --build-tracer-bin, the autotools handler renders the
+// unmodified coarse install-pipeline shape. No tracer wrap, no
+// BUILD.bazel.out output, no extra tools.
+func TestWriter_AutotoolsCoarseFallbackWithoutFlags(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "configure"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Makefile.in"),
+		[]byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "auto.bst")
+	bstBody := "kind: autotools\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	autotoolsConfig.convertBin = ""
+	autotoolsConfig.tracerBin = ""
+
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outA, "elements/auto/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	if !strings.Contains(got, `outs = ["install_tree.tar"]`) {
+		t.Errorf("coarse fallback should output only install_tree.tar:\n%s", got)
+	}
+	for _, missing := range []string{
+		`BUILD.bazel.out`,
+		`AUTOTOOLS_TRACE`,
+		`//tools:build-tracer`,
+		`//tools:convert-element-autotools`,
+	} {
+		if strings.Contains(got, missing) {
+			t.Errorf("coarse fallback wrongly contains %q\n%s", missing, got)
+		}
+	}
+}
+
 // TestWriter_AutotoolsElementHonorsConfLocal covers the per-element
 // override path BuildStream documents: `variables: conf-local: ...`
 // appends extra flags to ./configure without re-stating the
@@ -569,6 +722,118 @@ variables:
 	}
 	if !strings.Contains(string(body), "--enable-static --disable-shared") {
 		t.Errorf("conf-local override didn't reach rendered cmd:\n%s", body)
+	}
+}
+
+// TestWriter_BazelElementPassthrough covers kind:bazel: the
+// source tree's BUILD.bazel is staged verbatim into project B,
+// project A renders a no-target marker, and write-a doesn't
+// generate any rule overlay.
+func TestWriter_BazelElementPassthrough(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authoredBuild := `# Hand-authored BUILD; kind:bazel passes it through verbatim.
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "embedded",
+    srcs = ["main.c"],
+    visibility = ["//visibility:public"],
+)
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "BUILD.bazel"),
+		[]byte(authoredBuild), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.c"),
+		[]byte("int main(void) { return 0; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "embedded.bst")
+	bstBody := "kind: bazel\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if g.Elements[0].Bst.Kind != "bazel" {
+		t.Fatalf("Kind = %q, want bazel", g.Elements[0].Bst.Kind)
+	}
+
+	binPath := fakeConvertBin(t, tmp)
+	outA := filepath.Join(tmp, "A")
+	if err := writeProjectA(g, outA, binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	bzlA, err := os.ReadFile(filepath.Join(outA, "elements/embedded/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"genrule(", "cc_library(", "cc_binary("} {
+		if strings.Contains(string(bzlA), banned) {
+			t.Errorf("project A bazel BUILD should declare no targets, got %q in:\n%s", banned, bzlA)
+		}
+	}
+
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(outB, "elements/embedded/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != authoredBuild {
+		t.Errorf("project B BUILD not staged verbatim:\n--got--\n%s\n--want--\n%s", got, authoredBuild)
+	}
+	// main.c also staged.
+	if _, err := os.Stat(filepath.Join(outB, "elements/embedded/main.c")); err != nil {
+		t.Errorf("main.c not staged: %v", err)
+	}
+}
+
+// TestWriter_BazelElementMissingBuildPlaceholder covers the
+// misconfiguration path: kind:bazel source without a BUILD
+// file gets a placeholder that flags the gap rather than
+// silently producing an empty package.
+func TestWriter_BazelElementMissingBuildPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "stuff.txt"),
+		[]byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bst := filepath.Join(tmp, "noBuild.bst")
+	bstBody := "kind: bazel\nsources:\n- kind: local\n  path: " + srcDir + "\n"
+	if err := os.WriteFile(bst, []byte(bstBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := loadGraph([]string{bst}, "")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	binPath := fakeConvertBin(t, tmp)
+	outB := filepath.Join(tmp, "B")
+	if err := writeProjectA(g, filepath.Join(tmp, "A"), binPath); err != nil {
+		t.Fatalf("writeProjectA: %v", err)
+	}
+	if err := writeProjectB(g, outB); err != nil {
+		t.Fatalf("writeProjectB: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(outB, "elements/noBuild/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "almost certainly a misconfiguration") {
+		t.Errorf("missing-BUILD placeholder should flag the misconfiguration:\n%s", body)
 	}
 }
 

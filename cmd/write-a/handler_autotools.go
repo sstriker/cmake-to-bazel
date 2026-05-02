@@ -1,6 +1,12 @@
 package main
 
-func init() {
+// autotoolsPipelineHandler returns the coarse install-pipeline
+// shape of kind:autotools (./configure + make + make install
+// running in a genrule, output is install_tree.tar). Used as
+// the cache-miss branch of nativeAutotoolsHandler. Defined as
+// a function rather than a top-level var so init-order across
+// handler files stays well-defined.
+func autotoolsBasePipelineHandler() pipelineHandler {
 	// kind:autotools is BuildStream's `autotools` plugin lowered onto
 	// the pipelineHandler shape. The plugin's defaults (per
 	// buildstream/src/buildstream/plugins/elements/autotools.py) layer
@@ -31,7 +37,7 @@ func init() {
 	// a follow-up that affects every pipeline kind, not just
 	// autotools, so it lands once the host-toolchain shape stops
 	// being sufficient for FDSDK reality-check.
-	registerHandler(pipelineHandler{
+	return pipelineHandler{
 		kindName: "autotools",
 		defaultVars: map[string]string{
 			// %{autogen} regenerates the configure script when missing.
@@ -116,5 +122,5 @@ fi`,
 			Build:     []string{"%{make}"},
 			Install:   []string{"%{make-install}"},
 		},
-	})
+	}
 }

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Hand-rolled configure script. Mirrors the canonical autoconf
+# flag set the BuildStream autotools plugin passes:
+#   --prefix --bindir --libdir --datadir --includedir ...
+# Only --prefix and CFLAGS are substituted into Makefile.in;
+# the rest are accepted to keep the autotools handler's flag
+# pass-through happy.
+
+PREFIX=/usr/local
+CFLAGS=${CFLAGS:--O2}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prefix=*)        PREFIX="${1#--prefix=}" ;;
+        --prefix)          PREFIX="$2"; shift ;;
+        --exec-prefix=*|--bindir=*|--sbindir=*|--sysconfdir=*|\
+        --datadir=*|--includedir=*|--libdir=*|--libexecdir=*|\
+        --localstatedir=*|--sharedstatedir=*|--mandir=*|--infodir=*) ;;
+        --build=*|--host=*|--target=*) ;;
+        *) ;;
+    esac
+    shift
+done
+
+sed -e "s|@PREFIX@|$PREFIX|g" \
+    -e "s|@CFLAGS@|$CFLAGS|g" \
+    Makefile.in > Makefile
+
+echo "configure: PREFIX=$PREFIX CFLAGS=$CFLAGS"

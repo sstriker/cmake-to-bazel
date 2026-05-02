@@ -1,0 +1,28 @@
+#!/bin/sh
+# Hand-rolled configure for calc; CPPFLAGS / LDFLAGS are
+# inherited from the install genrule's env (the dep-extract
+# step exports them pointing at $DEP_PREFIX/usr/{include,lib}).
+
+PREFIX=/usr/local
+CFLAGS=${CFLAGS:--O2}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prefix=*)        PREFIX="${1#--prefix=}" ;;
+        --prefix)          PREFIX="$2"; shift ;;
+        --exec-prefix=*|--bindir=*|--sbindir=*|--sysconfdir=*|\
+        --datadir=*|--includedir=*|--libdir=*|--libexecdir=*|\
+        --localstatedir=*|--sharedstatedir=*|--mandir=*|--infodir=*) ;;
+        --build=*|--host=*|--target=*) ;;
+        *) ;;
+    esac
+    shift
+done
+
+sed -e "s|@PREFIX@|$PREFIX|g" \
+    -e "s|@CFLAGS@|$CFLAGS|g" \
+    -e "s|@CPPFLAGS@|${CPPFLAGS:-}|g" \
+    -e "s|@LDFLAGS@|${LDFLAGS:-}|g" \
+    Makefile.in > Makefile
+
+echo "configure[calc]: PREFIX=$PREFIX CFLAGS=$CFLAGS CPPFLAGS=${CPPFLAGS:-} LDFLAGS=${LDFLAGS:-}"

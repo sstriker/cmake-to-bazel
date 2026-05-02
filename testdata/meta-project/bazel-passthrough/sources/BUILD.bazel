@@ -1,0 +1,10 @@
+# Hand-authored BUILD for a kind:bazel element. Source tree
+# already declares its Bazel rules; cmd/write-a stages this
+# file verbatim into project B's elements/passthrough/.
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "passthrough",
+    srcs = ["greet.c"],
+    visibility = ["//visibility:public"],
+)

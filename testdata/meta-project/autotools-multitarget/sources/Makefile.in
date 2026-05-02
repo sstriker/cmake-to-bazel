@@ -1,0 +1,56 @@
+CC ?= cc
+CFLAGS = @CFLAGS@
+prefix = @PREFIX@
+bindir = $(prefix)/bin
+libexecdir = $(prefix)/libexec
+libdir = $(prefix)/lib
+includedir = $(prefix)/include
+datadir = $(prefix)/share
+
+INCLUDES = -Iinclude
+
+all: libmathlib.a libappcore.a app helper
+
+mathlib.o: mathlib.c include/mathlib.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c mathlib.c -o mathlib.o
+
+appcore.o: appcore.c include/appcore.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c appcore.c -o appcore.o
+
+libmathlib.a: mathlib.o
+	ar rcs libmathlib.a mathlib.o
+
+libappcore.a: appcore.o
+	ar rcs libappcore.a appcore.o
+
+app.o: app.c include/appcore.h include/mathlib.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c app.c -o app.o
+
+# helper.o uses an extra warning flag specific to this target's
+# compile — exercises per-target CFLAGS override paths.
+helper.o: helper.c include/appcore.h
+	$(CC) $(CFLAGS) $(INCLUDES) -Wall -c helper.c -o helper.o
+
+app: app.o libappcore.a libmathlib.a
+	$(CC) $(CFLAGS) -o app app.o -L. -lappcore -lmathlib
+
+helper: helper.o libappcore.a
+	$(CC) $(CFLAGS) -o helper helper.o -L. -lappcore
+
+install: all
+	install -D -m 0755 app $(DESTDIR)$(bindir)/app
+	install -D -m 0755 helper $(DESTDIR)$(libexecdir)/helper
+	install -D -m 0644 libmathlib.a $(DESTDIR)$(libdir)/libmathlib.a
+	install -D -m 0644 libappcore.a $(DESTDIR)$(libdir)/libappcore.a
+	install -D -m 0644 include/mathlib.h $(DESTDIR)$(includedir)/mathlib.h
+	install -D -m 0644 include/appcore.h $(DESTDIR)$(includedir)/appcore.h
+	install -D -m 0644 share/multitarget-readme.txt $(DESTDIR)$(datadir)/multitarget/readme.txt
+
+check: all
+	./app
+	./helper
+
+clean:
+	rm -f *.o *.a app helper
+
+.PHONY: all install check clean
